@@ -9,7 +9,7 @@ from holon_guard import GuardLifecycle, SnapshotStore
 from holon_guard.authority import AuthorityService
 from holon_guard.server import GuardServer
 from holon_guard_ipc.codec import decode_message, encode_message, validate_response
-from guard_support import enabled_policy, make_ledger, transfer_request
+from guard_support import enabled_policy, make_audit, make_ledger, transfer_request
 
 
 class Wallet:
@@ -64,7 +64,10 @@ class GuardContractBoundaryTests(unittest.TestCase):
         lifecycle = GuardLifecycle(
             store, store.load(), self.wallet, Owner(), make_ledger(root)
         )
-        self.server = GuardServer("unused", AuthorityService(lifecycle, enabled_policy()))
+        self.audit = make_audit(root)
+        self.server = GuardServer(
+            "unused", AuthorityService(lifecycle, enabled_policy(), self.audit)
+        )
 
     def exchange_raw(self, message: dict) -> object:
         connection = Connection({"ipc_version": "1", "message": message, "owner_pid": 101})
@@ -78,6 +81,9 @@ class GuardContractBoundaryTests(unittest.TestCase):
         self.assertEqual(response.kind, MessageKind.REFUSAL)
         self.assertEqual(response.payload["code"], "ARBITRARY_CALL_REFUSED")
         self.assertNotIn("private-input", str(response.to_dict()))
+        self.assertNotIn(
+            "private-input", str([event.to_dict() for event in self.audit.journal.events()])
+        )
         self.assertEqual(self.wallet.calls, 0)
 
     def test_schema_mismatch_returns_safe_compatibility_status(self) -> None:

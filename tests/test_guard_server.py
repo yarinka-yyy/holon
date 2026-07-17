@@ -14,7 +14,7 @@ from holon_guard.authority import AuthorityService
 from holon_guard.server import GuardServer
 from holon_guard_ipc import MAX_MESSAGE_BYTES, PipeClient, PipeProtocolError, PipeUnavailable
 from holon_guard_ipc.codec import decode_message, validate_response
-from guard_support import ACTION_ID, enabled_policy, make_ledger, transfer_request
+from guard_support import ACTION_ID, enabled_policy, make_audit, make_ledger, transfer_request
 
 
 class RunningHandle:
@@ -52,7 +52,7 @@ class GuardServerTests(unittest.TestCase):
         store.bootstrap_normal_for_test(1.0)
         ledger = make_ledger(root)
         lifecycle = GuardLifecycle(store, store.load(), MockWallet(), LiveOwner(), ledger)
-        authority = AuthorityService(lifecycle, enabled_policy())
+        authority = AuthorityService(lifecycle, enabled_policy(), make_audit(root))
         self.pipe = rf"\\.\pipe\Holon.Guard.test.{uuid.uuid4()}"
         self.server = GuardServer(self.pipe, authority, 0.02)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)

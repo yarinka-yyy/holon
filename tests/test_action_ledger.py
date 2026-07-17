@@ -78,6 +78,19 @@ class ActionLedgerTests(unittest.TestCase):
         with self.assertRaises(InvalidActionState):
             self.store.load()
 
+    def test_terminal_refusal_preserves_current_and_persists_before_reply(self) -> None:
+        self.ledger.begin(ACTION_ID, FINGERPRINT)
+        refused_id = f"act-{uuid.uuid4()}"
+        refused = self.ledger.refuse(refused_id, "b" * 64, "ACTION_ALREADY_ACTIVE")
+        self.assertEqual(refused.state, ActionState.REFUSED)
+        restarted = ActionLedger(self.store, self.store.load())
+        self.assertEqual(restarted.snapshot.current.action_id, ACTION_ID)
+        self.assertEqual(restarted.find(refused_id), refused)
+        self.assert_failure(
+            RefusalCode.ACTION_REPLAYED.value,
+            lambda: restarted.check_identity(refused_id, "b" * 64),
+        )
+
     def test_capacity_disables_new_actions_without_eviction(self) -> None:
         terminal = tuple(
             ActionRecord(

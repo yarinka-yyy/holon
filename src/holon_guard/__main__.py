@@ -10,6 +10,7 @@ from holon_guard_ipc import PIPE_NAME
 from holon_contracts import RefusalCode, SecurityCode
 from holon_policy import Policy, PolicyEngine, PolicyLoadError
 from holon_policy.baseline import load_baseline_policy
+from holon_journal import EventType
 
 from .action_model import ActionStateSnapshot
 from .action_store import ActionStateStore, InvalidActionState, MissingActionState
@@ -17,6 +18,7 @@ from .actions import ActionLedger
 from .authority import AuthorityService
 from .lifecycle import GuardLifecycle
 from .lock import GuardAlreadyRunning, SingleInstanceLock
+from .runtime_security import load_authority_audit
 from .server import GuardServer
 from .store import SnapshotStore
 from .wallet import UnavailableWalletController, WindowsOwnerProbe
@@ -59,12 +61,20 @@ def main(argv: list[str] | None = None) -> int:
             lifecycle = GuardLifecycle.restore(
                 store, UnavailableWalletController(), WindowsOwnerProbe(), ledger
             )
-            failure = policy_failure or action_failure
+            audit, audit_failure = load_authority_audit(data_dir)
+            failure = audit_failure or policy_failure or action_failure
             if failure is not None:
                 lifecycle.disable_signing(failure)
             elif not policy.authority_enabled:
                 lifecycle.disable_signing(RefusalCode.POLICY_AUTHORITY_DISABLED.value)
-            authority = AuthorityService(lifecycle, PolicyEngine(policy))
+            authority = AuthorityService(
+                lifecycle, PolicyEngine(policy), audit, security_failure=failure
+            )
+            if lifecycle.snapshot.state.value == "SIGNING_DISABLED":
+                authority.audit_system(
+                    EventType.SIGNING_DISABLED, lifecycle.snapshot.reason,
+                    guard_state=lifecycle.snapshot.state.value,
+                )
             GuardServer(args.pipe_name, authority).serve_forever()
     except GuardAlreadyRunning:
         return 3

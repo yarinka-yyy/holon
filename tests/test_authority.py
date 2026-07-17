@@ -9,7 +9,9 @@ from holon_contracts import MessageKind, make_envelope
 from holon_guard import GuardLifecycle, SnapshotStore
 from holon_guard.authority import AuthorityService
 from holon_policy import Policy, PolicyEngine
-from guard_support import ACTION_ID, ACTION_ID_2, enabled_policy, make_ledger, transfer_request
+from guard_support import (
+    ACTION_ID, ACTION_ID_2, enabled_policy, make_audit, make_ledger, transfer_request,
+)
 
 
 class Handle:
@@ -55,16 +57,16 @@ class AuthorityTests(unittest.TestCase):
         self.lifecycle = GuardLifecycle(
             store, store.load(), self.wallet, Owner(), make_ledger(root)
         )
-        self.service = AuthorityService(self.lifecycle, enabled_policy())
+        self.audit = make_audit(root)
+        self.service = AuthorityService(self.lifecycle, enabled_policy(), self.audit)
 
     def test_policy_refusal_never_starts_wallet_or_action(self) -> None:
-        refused = self.service.handle(
-            transfer_request(network="ethereum"), owner_pid=101
-        )
+        refused = self.service.handle(transfer_request(network="ethereum"), owner_pid=101)
         self.assertEqual(refused.kind, MessageKind.REFUSAL)
         self.assertEqual(refused.payload["code"], "NETWORK_NOT_ALLOWED")
         self.assertEqual(self.wallet.calls, 0)
         self.assertIsNone(self.lifecycle.ledger.snapshot.current)
+        self.assertEqual(self.lifecycle.ledger.find(refused.action_id).state.value, "REFUSED")
 
     def test_prepare_status_mutation_and_one_active_action(self) -> None:
         started = self.service.handle(transfer_request(), owner_pid=101)
@@ -101,7 +103,7 @@ class AuthorityTests(unittest.TestCase):
 
     def test_disabled_policy_is_a_refusal_not_a_technical_error(self) -> None:
         disabled = Policy("1", "1", False, ())
-        service = AuthorityService(self.lifecycle, PolicyEngine(disabled))
+        service = AuthorityService(self.lifecycle, PolicyEngine(disabled), self.audit)
         response = service.handle(transfer_request(), owner_pid=101)
         self.assertEqual(response.kind, MessageKind.REFUSAL)
         self.assertEqual(response.payload["code"], "POLICY_AUTHORITY_DISABLED")

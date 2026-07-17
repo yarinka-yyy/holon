@@ -44,7 +44,11 @@ class CrossRuntimeContractTests(unittest.TestCase):
             "from holon_guard.action_store import ActionStateStore\n"
             "from holon_guard.actions import ActionLedger\n"
             "from holon_guard.authority import AuthorityService\n"
+            "from holon_guard.authority_audit import AuthorityAudit\n"
+            "from holon_guard.request_control import RequestController\n"
+            "from holon_guard.request_store import RequestStateStore\n"
             "from holon_guard.server import GuardServer\n"
+            "from holon_journal import Journal,JournalStore\n"
             "from holon_policy import Policy,PolicyEngine\n"
             "class H:\n    pid=202\n    def poll(self): return None\n"
             "class W:\n    def open_or_activate(self,flow_id): return H()\n"
@@ -54,8 +58,11 @@ class CrossRuntimeContractTests(unittest.TestCase):
             "s.bootstrap_normal_for_test()\na=ActionStateStore(r/'action-state.json')\n"
             "l=ActionLedger(a,a.bootstrap_empty_for_test())\n"
             "g=GuardLifecycle(s,s.load(),W(),O(),l)\n"
+            "j=JournalStore(r/'journal.jsonl')\nj.bootstrap_empty_for_test()\n"
+            "q=RequestStateStore(r/'request-control-state.json')\n"
+            "u=AuthorityAudit(Journal(j),RequestController(q,q.bootstrap_empty_for_test()))\n"
             f"p=Policy.from_dict({policy!r})\n"
-            f"GuardServer({self.pipe!r},AuthorityService(g,PolicyEngine(p))).serve_forever()\n"
+            f"GuardServer({self.pipe!r},AuthorityService(g,PolicyEngine(p),u)).serve_forever()\n"
         )
 
     def _client_code(self) -> str:
@@ -70,10 +77,10 @@ class CrossRuntimeContractTests(unittest.TestCase):
             "'max_total_fee_wei':'500'};"
             f"c=PipeClient({self.pipe!r},2.0,1.0);"
             "h=c.request(MessageKind.HEALTH_REQUEST);"
-            "ok=c.exchange(make_envelope(MessageKind.PREPARE_TRANSFER,p,action_id=new_action_id()),os.getpid());"
-            "p['network']='ethereum';"
-            "no=c.exchange(make_envelope(MessageKind.PREPARE_TRANSFER,p,action_id=new_action_id()),os.getpid());"
-            "print(json.dumps([h.to_dict(),ok.to_dict(),no.to_dict()]))"
+            "a=c.exchange(make_envelope(MessageKind.PREPARE_TRANSFER,p,action_id=new_action_id()),os.getpid());"
+            "b=c.exchange(make_envelope(MessageKind.PREPARE_TRANSFER,p,action_id=new_action_id()),os.getpid());"
+            "d=c.exchange(make_envelope(MessageKind.PREPARE_TRANSFER,p,action_id=new_action_id()),os.getpid());"
+            "print(json.dumps([h.to_dict(),a.to_dict(),b.to_dict(),d.to_dict()]))"
         )
 
     def _stop(self) -> None:
@@ -96,10 +103,12 @@ class CrossRuntimeContractTests(unittest.TestCase):
             [self.hermes, "-I", "-c", self._client_code()], check=True,
             capture_output=True, text=True, timeout=8, creationflags=0x08000000,
         )
-        health, allowed, refused = json.loads(completed.stdout)
+        health, allowed, active, blocked = json.loads(completed.stdout)
         self.assertEqual(health["payload"]["guard_state"], "NORMAL")
         self.assertEqual(allowed["kind"], "protected_flow_started")
-        self.assertEqual(refused["payload"]["code"], "NETWORK_NOT_ALLOWED")
+        self.assertEqual(active["payload"]["code"], "ACTION_ALREADY_ACTIVE")
+        self.assertEqual(blocked["payload"]["code"], "REQUEST_TEMPORARILY_BLOCKED")
+        self.assertEqual(blocked["kind"], "refusal")
 
 
 if __name__ == "__main__":

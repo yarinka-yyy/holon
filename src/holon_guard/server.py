@@ -7,6 +7,7 @@ import threading
 from multiprocessing.connection import Connection, Listener
 
 from holon_contracts import ContractViolation, SecurityCode
+from holon_journal import EventType
 from holon_guard_ipc.codec import (
     MAX_MESSAGE_BYTES, decode_message, encode_message, make_response, validate_request,
 )
@@ -39,6 +40,9 @@ class GuardServer:
             try:
                 response = self.authority.handle(request, owner_pid)
             except Exception:
+                self.authority.audit_system(
+                    EventType.TECHNICAL_ERROR, SecurityCode.IPC_INVALID_REQUEST.value
+                )
                 response = self.authority.error(
                     request, SecurityCode.IPC_INVALID_REQUEST.value,
                     "Guard could not process the request.",
@@ -46,6 +50,7 @@ class GuardServer:
             encoded = encode_message(make_response(response))
             connection.send_bytes(encoded)
         except ContractViolation as violation:
+            self.authority.audit_system(EventType.REFUSAL, violation.code)
             try:
                 connection.send_bytes(contract_failure(frame, violation))
             except Exception:
@@ -54,6 +59,9 @@ class GuardServer:
                 except Exception:
                     return
         except Exception:
+            self.authority.audit_system(
+                EventType.TECHNICAL_ERROR, SecurityCode.IPC_INVALID_REQUEST.value
+            )
             try:
                 connection.send_bytes(generic_error())
             except Exception:
@@ -81,7 +89,10 @@ class GuardServer:
                     connection = None
                 if connection is not None:
                     self._handle_connection(connection)
-                self.authority.lifecycle.monitor_once()
+                snapshot = self.authority.lifecycle.snapshot
+                result = self.authority.lifecycle.monitor_once()
+                if result.state is not snapshot.state or result.code not in {"OK", snapshot.reason}:
+                    self.authority.audit_monitor(result, snapshot.action_id, snapshot.flow_id)
         finally:
             self._stop.set()
             self._listener.close()

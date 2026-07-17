@@ -92,7 +92,7 @@ class GuardProcessTests(unittest.TestCase):
         refused = PipeClient(self.pipe, 1.0, 1.0).exchange(
             transfer_request(), owner_pid=os.getpid()
         )
-        self.assertEqual(refused.payload["code"], "POLICY_AUTHORITY_DISABLED")
+        self.assertEqual(refused.payload["code"], "JOURNAL_STATE_INVALID")
 
         snapshot_before = (self.data_dir / "guard-state.json").read_bytes()
         second = self._start()

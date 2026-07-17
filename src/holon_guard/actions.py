@@ -57,6 +57,13 @@ class ActionLedger:
         )
 
     def preflight(self, action_id: str, fingerprint: str) -> None:
+        self.check_identity(action_id, fingerprint)
+        if self.snapshot.current is not None:
+            raise ActionLedgerFailure(RefusalCode.ACTION_ALREADY_ACTIVE.value)
+        if len(self.snapshot.terminal) >= MAX_TERMINAL_ACTIONS:
+            raise ActionLedgerFailure(SecurityCode.ACTION_STATE_INVALID.value)
+
+    def check_identity(self, action_id: str, fingerprint: str) -> None:
         existing = self.find(action_id)
         if existing is not None:
             code = (
@@ -65,10 +72,16 @@ class ActionLedger:
                 else RefusalCode.ACTION_REPLAYED.value
             )
             raise ActionLedgerFailure(code)
-        if self.snapshot.current is not None:
-            raise ActionLedgerFailure(RefusalCode.ACTION_ALREADY_ACTIVE.value)
+
+    def refuse(self, action_id: str, fingerprint: str, code: str) -> ActionRecord:
+        self.check_identity(action_id, fingerprint)
         if len(self.snapshot.terminal) >= MAX_TERMINAL_ACTIONS:
             raise ActionLedgerFailure(SecurityCode.ACTION_STATE_INVALID.value)
+        record = ActionRecord(action_id, fingerprint, ActionState.REFUSED, code, self.clock())
+        self._save(
+            ActionStateSnapshot(self.snapshot.current, self.snapshot.terminal + (record,))
+        )
+        return record
 
     def begin(self, action_id: str, fingerprint: str) -> ActionRecord:
         self.preflight(action_id, fingerprint)
