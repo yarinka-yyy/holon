@@ -5,19 +5,40 @@ import unittest
 from pathlib import Path
 
 
-PLUGIN_ROOT = Path(__file__).parents[1] / "src" / "holon_hermes_plugin"
-ALLOWED_IMPORT_ROOTS = {"__future__", "dataclasses", "enum", "json", "typing"}
+SOURCE_ROOT = Path(__file__).parents[1] / "src"
+COMPATIBLE_PACKAGES = ("holon_hermes_plugin", "holon_guard_ipc")
+ALLOWED_IMPORT_ROOTS = {
+    "__future__",
+    "ctypes",
+    "dataclasses",
+    "enum",
+    "holon_guard_ipc",
+    "json",
+    "multiprocessing",
+    "subprocess",
+    "sys",
+    "time",
+    "typing",
+}
+
+
+def compatible_sources() -> list[Path]:
+    return [
+        source_path
+        for package in COMPATIBLE_PACKAGES
+        for source_path in (SOURCE_ROOT / package).glob("*.py")
+    ]
 
 
 class Python311CompatibilityTests(unittest.TestCase):
     def test_plugin_sources_parse_as_python311(self) -> None:
-        for source_path in PLUGIN_ROOT.glob("*.py"):
+        for source_path in compatible_sources():
             source = source_path.read_text(encoding="utf-8")
             ast.parse(source, filename=str(source_path), feature_version=(3, 11))
 
     def test_plugin_imports_only_python_standard_library_and_itself(self) -> None:
         imported_roots: set[str] = set()
-        for source_path in PLUGIN_ROOT.glob("*.py"):
+        for source_path in compatible_sources():
             tree = ast.parse(source_path.read_text(encoding="utf-8"))
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):

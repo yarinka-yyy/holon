@@ -1,66 +1,19 @@
-"""Plugin-side Guard boundary; the real Guard adapter arrives in M2.02."""
+"""Plugin-side Guard boundary and bounded process launcher."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from enum import Enum
+import subprocess
+import sys
 from typing import Protocol
 
-
-class GuardAvailability(str, Enum):
-    AVAILABLE = "AVAILABLE"
-    UNAVAILABLE = "UNAVAILABLE"
-    UNCERTAIN = "UNCERTAIN"
-
-
-class GuardState(str, Enum):
-    NORMAL = "NORMAL"
-    ENTERING = "ENTERING"
-    ACTIVE = "ACTIVE"
-    EXITING = "EXITING"
-    RECOVERY_REQUIRED = "RECOVERY_REQUIRED"
-    SIGNING_DISABLED = "SIGNING_DISABLED"
-    UNKNOWN = "UNKNOWN"
-
-
-PROTECTED_STATES = frozenset(
-    {
-        GuardState.ENTERING,
-        GuardState.ACTIVE,
-        GuardState.EXITING,
-        GuardState.RECOVERY_REQUIRED,
-    }
+from holon_guard_ipc import (
+    PROTECTED_STATES,
+    GuardAvailability,
+    GuardHealth,
+    GuardState,
+    PipeGuardClient,
 )
-
-
-@dataclass(frozen=True, slots=True)
-class GuardHealth:
-    availability: GuardAvailability
-    state: GuardState
-    code: str
-    message: str
-
-    @classmethod
-    def available(cls, state: GuardState) -> "GuardHealth":
-        return cls(GuardAvailability.AVAILABLE, state, "OK", "Guard status is available.")
-
-    @classmethod
-    def unavailable(cls) -> "GuardHealth":
-        return cls(
-            GuardAvailability.UNAVAILABLE,
-            GuardState.UNKNOWN,
-            "GUARD_UNAVAILABLE",
-            "Wallet authority is unavailable.",
-        )
-
-    @classmethod
-    def uncertain(cls) -> "GuardHealth":
-        return cls(
-            GuardAvailability.UNCERTAIN,
-            GuardState.UNKNOWN,
-            "GUARD_STATE_UNCERTAIN",
-            "Wallet authority state is uncertain.",
-        )
+from holon_guard_ipc.client import wait_for_pipe
 
 
 class GuardClient(Protocol):
@@ -79,6 +32,35 @@ class UnavailableGuardClient:
 class DisabledGuardLauncher:
     def start(self) -> None:
         raise RuntimeError("Guard implementation is not installed")
+
+
+class SubprocessGuardLauncher:
+    def __init__(
+        self, command: tuple[str, ...], pipe_name: str, startup_timeout: float = 3.0
+    ) -> None:
+        if not command:
+            raise ValueError("Guard command must not be empty")
+        self._command = command
+        self._pipe_name = pipe_name
+        self._startup_timeout = startup_timeout
+
+    def start(self) -> None:
+        creationflags = 0x08000000 if sys.platform == "win32" else 0
+        process = subprocess.Popen(
+            list(self._command),
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            creationflags=creationflags,
+        )
+        try:
+            wait_for_pipe(self._pipe_name, self._startup_timeout)
+        except Exception:
+            if process.poll() is None:
+                process.terminate()
+            raise
 
 
 class GuardConnector:

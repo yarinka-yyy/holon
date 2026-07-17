@@ -12,7 +12,7 @@ from .guard import (
     GuardConnector,
     GuardHealth,
     GuardState,
-    UnavailableGuardClient,
+    PipeGuardClient,
 )
 
 HEALTH_TOOL = "holon_health"
@@ -89,7 +89,7 @@ class PluginRuntime:
         }
 
 
-_runtime = PluginRuntime(GuardConnector(UnavailableGuardClient(), DisabledGuardLauncher()))
+_runtime = PluginRuntime(GuardConnector(PipeGuardClient(), DisabledGuardLauncher()))
 
 
 def _handle_health(params: Optional[dict] = None, **kwargs: Any) -> str:
@@ -111,12 +111,7 @@ def register(ctx: Any) -> None:
         schema={
             "name": HEALTH_TOOL,
             "description": "Return safe Holon and Guard health status.",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": [],
-                "additionalProperties": False,
-            },
+            "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
         },
         handler=_handle_health,
         description="Return safe Holon health status.",

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from holon_hermes_plugin.guard import (
     GuardAvailability,
     GuardConnector,
     GuardHealth,
     GuardState,
+    SubprocessGuardLauncher,
 )
 
 
@@ -32,6 +34,18 @@ class FakeLauncher:
         self.calls += 1
         if self.failure:
             raise self.failure
+
+
+class FakeProcess:
+    def __init__(self, running: bool = True) -> None:
+        self.running = running
+        self.terminated = False
+
+    def poll(self) -> None | int:
+        return None if self.running else 3
+
+    def terminate(self) -> None:
+        self.terminated = True
 
 
 class GuardConnectorTests(unittest.TestCase):
@@ -79,14 +93,27 @@ class GuardConnectorTests(unittest.TestCase):
         self.assertEqual(result, GuardHealth.uncertain())
 
     def test_guard_text_is_normalized_before_crossing_boundary(self) -> None:
-        raw = GuardHealth(
-            GuardAvailability.AVAILABLE,
-            GuardState.NORMAL,
-            "PRIVATE_CODE",
-            "C:\\private\\implementation",
-        )
+        raw = GuardHealth(GuardAvailability.AVAILABLE, GuardState.NORMAL, "PRIVATE_CODE", "private")
         result = GuardConnector(FakeClient(raw), FakeLauncher()).probe()
         self.assertEqual(result, GuardHealth.available(GuardState.NORMAL))
+
+    @patch("holon_hermes_plugin.guard.wait_for_pipe")
+    @patch("holon_hermes_plugin.guard.subprocess.Popen")
+    def test_test_launcher_uses_fixed_command_and_bounded_wait(self, popen, wait) -> None:
+        popen.return_value = FakeProcess()
+        SubprocessGuardLauncher(("python", "guard.py"), "test-pipe").start()
+        self.assertEqual(popen.call_args.args[0], ["python", "guard.py"])
+        self.assertFalse(popen.call_args.kwargs["shell"])
+        wait.assert_called_once_with("test-pipe", 3.0)
+
+    @patch("holon_hermes_plugin.guard.wait_for_pipe", side_effect=TimeoutError())
+    @patch("holon_hermes_plugin.guard.subprocess.Popen")
+    def test_test_launcher_terminates_failed_start(self, popen, _wait) -> None:
+        process = FakeProcess()
+        popen.return_value = process
+        with self.assertRaises(TimeoutError):
+            SubprocessGuardLauncher(("python",), "test-pipe").start()
+        self.assertTrue(process.terminated)
 
 
 if __name__ == "__main__":
