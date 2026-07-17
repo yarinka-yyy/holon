@@ -8,10 +8,13 @@ import uuid
 from multiprocessing.connection import Client, Listener
 from pathlib import Path
 
+from holon_contracts import MessageKind
 from holon_guard import GuardLifecycle, SnapshotStore
+from holon_guard.authority import AuthorityService
 from holon_guard.server import GuardServer
 from holon_guard_ipc import MAX_MESSAGE_BYTES, PipeClient, PipeProtocolError, PipeUnavailable
-from holon_guard_ipc.codec import decode_message
+from holon_guard_ipc.codec import decode_message, validate_response
+from guard_support import ACTION_ID, enabled_policy, make_ledger, transfer_request
 
 
 class RunningHandle:
@@ -45,51 +48,51 @@ class GuardServerTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         root = Path(self.temporary.name)
-        store = SnapshotStore(root / "state.json")
+        store = SnapshotStore(root / "guard-state.json")
         store.bootstrap_normal_for_test(1.0)
-        lifecycle = GuardLifecycle(store, store.load(), MockWallet(), LiveOwner())
+        ledger = make_ledger(root)
+        lifecycle = GuardLifecycle(store, store.load(), MockWallet(), LiveOwner(), ledger)
+        authority = AuthorityService(lifecycle, enabled_policy())
         self.pipe = rf"\\.\pipe\Holon.Guard.test.{uuid.uuid4()}"
-        self.server = GuardServer(self.pipe, lifecycle, 0.02)
+        self.server = GuardServer(self.pipe, authority, 0.02)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.client = PipeClient(self.pipe, connect_timeout=2.0, response_timeout=1.0)
-        self.assertEqual(self.client.command("health")["state"], "NORMAL")
+        health = self.client.request(MessageKind.HEALTH_REQUEST)
+        self.assertEqual(health.payload["guard_state"], "NORMAL")
 
     def tearDown(self) -> None:
         self.server.stop()
         self.thread.join(timeout=2.0)
         self.assertFalse(self.thread.is_alive())
 
-    def test_health_start_cancel_and_recovery_calls(self) -> None:
-        started = self.client.command("start_flow", {"owner_pid": 101})
-        self.assertTrue(started["ok"])
-        flow_id = started["flow_id"]
-        mismatch = self.client.command("cancel_flow", {"flow_id": "wrong"})
-        self.assertEqual(mismatch["code"], "FLOW_ID_MISMATCH")
-        exiting = self.client.command("cancel_flow", {"flow_id": flow_id})
-        self.assertEqual(exiting["state"], "EXITING")
-        deadline = time.monotonic() + 1.0
-        while time.monotonic() < deadline:
-            health = self.client.command("health")
-            if health["state"] == "NORMAL":
-                break
-        self.assertEqual(health["state"], "NORMAL")
+    def test_prepare_status_cancel_and_terminal_replay(self) -> None:
+        started = self.client.exchange(transfer_request(), owner_pid=101)
+        self.assertEqual(started.kind, MessageKind.PROTECTED_FLOW_STARTED)
+        status = self.client.request(MessageKind.ACTION_STATUS_REQUEST, action_id=ACTION_ID)
+        self.assertEqual(status.payload["action_state"], "AWAITING_LOCAL_CONFIRMATION")
+        cancelling = self.client.request(MessageKind.CANCEL_ACTION, action_id=ACTION_ID)
+        self.assertEqual(cancelling.payload["guard_state"], "EXITING")
+        health = self.client.request(MessageKind.HEALTH_REQUEST)
+        self.assertEqual(health.payload["guard_state"], "NORMAL")
+        replay = self.client.exchange(transfer_request(), owner_pid=101)
+        self.assertEqual(replay.payload["code"], "ACTION_REPLAYED")
 
-    def test_malformed_and_oversized_messages_are_safely_normalized(self) -> None:
-        for raw in (b"{broken", b"x" * (MAX_MESSAGE_BYTES + 1)):
+    def test_malformed_oversized_and_legacy_frames_are_safe(self) -> None:
+        legacy = b'{"ipc_version":"1","command":"health","payload":{}}'
+        for raw in (b"{broken", b"x" * (MAX_MESSAGE_BYTES + 1), legacy):
             connection = Client(self.pipe, family="AF_PIPE", authkey=None)
             with connection:
                 connection.send_bytes(raw)
-                response = decode_message(connection.recv_bytes(MAX_MESSAGE_BYTES + 1))
-            self.assertEqual(response["code"], "IPC_INVALID_REQUEST")
-            self.assertNotIn("broken", response["message"])
-        self.assertEqual(self.client.command("health")["code"], "OK")
+                frame = decode_message(connection.recv_bytes(MAX_MESSAGE_BYTES + 1))
+            response = validate_response(frame)
+            self.assertEqual(response.payload["code"], "IPC_INVALID_REQUEST")
+            self.assertNotIn("broken", response.payload["message"])
 
     def test_unavailable_pipe_and_response_timeout_are_bounded(self) -> None:
         missing = rf"\\.\pipe\Holon.Guard.missing.{uuid.uuid4()}"
         with self.assertRaises(PipeUnavailable):
-            PipeClient(missing, 0.02, 0.02).command("health")
-
+            PipeClient(missing, 0.02, 0.02).request(MessageKind.HEALTH_REQUEST)
         slow_pipe = rf"\\.\pipe\Holon.Guard.slow.{uuid.uuid4()}"
         ready = threading.Event()
 
@@ -105,15 +108,12 @@ class GuardServerTests(unittest.TestCase):
         thread.start()
         ready.wait(1.0)
         with self.assertRaises(PipeProtocolError):
-            PipeClient(slow_pipe, 0.5, 0.02).command("health")
+            PipeClient(slow_pipe, 0.5, 0.02).request(MessageKind.HEALTH_REQUEST)
         thread.join(timeout=1.0)
 
     def test_silent_connection_does_not_stall_guard(self) -> None:
         silent = Client(self.pipe, family="AF_PIPE", authkey=None)
         time.sleep(0.05)
         silent.close()
-        self.assertEqual(self.client.command("health")["code"], "OK")
-
-
-if __name__ == "__main__":
-    unittest.main()
+        health = self.client.request(MessageKind.HEALTH_REQUEST)
+        self.assertEqual(health.payload["code"], "OK")

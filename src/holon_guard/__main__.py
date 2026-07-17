@@ -7,7 +7,14 @@ import os
 from pathlib import Path
 
 from holon_guard_ipc import PIPE_NAME
+from holon_contracts import RefusalCode, SecurityCode
+from holon_policy import Policy, PolicyEngine, PolicyLoadError
+from holon_policy.baseline import load_baseline_policy
 
+from .action_model import ActionStateSnapshot
+from .action_store import ActionStateStore, InvalidActionState, MissingActionState
+from .actions import ActionLedger
+from .authority import AuthorityService
 from .lifecycle import GuardLifecycle
 from .lock import GuardAlreadyRunning, SingleInstanceLock
 from .server import GuardServer
@@ -35,10 +42,30 @@ def main(argv: list[str] | None = None) -> int:
     try:
         with SingleInstanceLock(data_dir / "guard.lock"):
             store = SnapshotStore(data_dir / "guard-state.json")
+            action_store = ActionStateStore(data_dir / "action-state.json")
+            action_failure: str | None = None
+            try:
+                action_snapshot = action_store.load()
+            except (MissingActionState, InvalidActionState):
+                action_snapshot = ActionStateSnapshot(None, ())
+                action_failure = SecurityCode.ACTION_STATE_INVALID.value
+            policy_failure: str | None = None
+            try:
+                policy = load_baseline_policy()
+            except PolicyLoadError as exc:
+                policy = Policy("1", "1", False, ())
+                policy_failure = exc.code
+            ledger = ActionLedger(action_store, action_snapshot)
             lifecycle = GuardLifecycle.restore(
-                store, UnavailableWalletController(), WindowsOwnerProbe()
+                store, UnavailableWalletController(), WindowsOwnerProbe(), ledger
             )
-            GuardServer(args.pipe_name, lifecycle).serve_forever()
+            failure = policy_failure or action_failure
+            if failure is not None:
+                lifecycle.disable_signing(failure)
+            elif not policy.authority_enabled:
+                lifecycle.disable_signing(RefusalCode.POLICY_AUTHORITY_DISABLED.value)
+            authority = AuthorityService(lifecycle, PolicyEngine(policy))
+            GuardServer(args.pipe_name, authority).serve_forever()
     except GuardAlreadyRunning:
         return 3
     except KeyboardInterrupt:

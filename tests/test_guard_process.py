@@ -9,8 +9,10 @@ import unittest
 import uuid
 from pathlib import Path
 
+from holon_contracts import MessageKind
 from holon_guard_ipc import PipeClient
 from holon_guard_ipc.client import wait_for_pipe
+from guard_support import transfer_request
 
 
 HERMES_PYTHON_ENV = "HOLON_TEST_HERMES_PYTHON"
@@ -68,8 +70,9 @@ class GuardProcessTests(unittest.TestCase):
         code = (
             "import json,sys;"
             f"sys.path.insert(0,{str(self.source)!r});"
-            "from holon_guard_ipc import PipeClient;"
-            f"print(json.dumps(PipeClient({self.pipe!r},2.0,1.0).command('health')))"
+            "from holon_contracts import MessageKind;from holon_guard_ipc import PipeClient;"
+            f"r=PipeClient({self.pipe!r},2.0,1.0).request(MessageKind.HEALTH_REQUEST);"
+            "print(json.dumps(r.to_dict()))"
         )
         completed = subprocess.run(
             [self.hermes_python, "-I", "-c", code],
@@ -85,12 +88,11 @@ class GuardProcessTests(unittest.TestCase):
         first = self._start()
         wait_for_pipe(self.pipe, 3.0)
         health = self._cross_runtime_health()
-        self.assertEqual(health["state"], "SIGNING_DISABLED")
-        self.assertEqual(health["code"], "SIGNING_DISABLED")
-        refused = PipeClient(self.pipe, 1.0, 1.0).command(
-            "start_flow", {"owner_pid": os.getpid()}
+        self.assertEqual(health["payload"]["guard_state"], "SIGNING_DISABLED")
+        refused = PipeClient(self.pipe, 1.0, 1.0).exchange(
+            transfer_request(), owner_pid=os.getpid()
         )
-        self.assertEqual(refused["code"], "SIGNING_DISABLED")
+        self.assertEqual(refused.payload["code"], "POLICY_AUTHORITY_DISABLED")
 
         snapshot_before = (self.data_dir / "guard-state.json").read_bytes()
         second = self._start()
@@ -101,8 +103,8 @@ class GuardProcessTests(unittest.TestCase):
 
         third = self._start()
         wait_for_pipe(self.pipe, 3.0)
-        recovered = PipeClient(self.pipe, 1.0, 1.0).command("health")
-        self.assertEqual(recovered["state"], "SIGNING_DISABLED")
+        recovered = PipeClient(self.pipe, 1.0, 1.0).request(MessageKind.HEALTH_REQUEST)
+        self.assertEqual(recovered.payload["guard_state"], "SIGNING_DISABLED")
 
 
 if __name__ == "__main__":

@@ -46,6 +46,8 @@ def restore_snapshot(store: SnapshotStore) -> GuardSnapshot:
                 None,
                 "GUARD_RESTARTED",
                 time.time(),
+                snapshot.action_id,
+                snapshot.action_fingerprint,
             )
             best_effort_save(store, snapshot)
     return snapshot

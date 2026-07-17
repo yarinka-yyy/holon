@@ -1,83 +1,63 @@
-"""Windows named-pipe server for the local Guard lifecycle."""
+"""Windows named-pipe server for versioned Guard contracts."""
 
 from __future__ import annotations
 
 import queue
 import threading
 from multiprocessing.connection import Connection, Listener
-from typing import Any
 
+from holon_contracts import ContractViolation, SecurityCode
 from holon_guard_ipc.codec import (
-    MAX_MESSAGE_BYTES,
-    decode_message,
-    encode_message,
-    make_response,
-    validate_request,
+    MAX_MESSAGE_BYTES, decode_message, encode_message, make_response, validate_request,
 )
 
-from .lifecycle import GuardLifecycle
-from .model import GuardResult
+from .authority import AuthorityService
+from .server_responses import contract_failure, generic_error
 
 MONITOR_INTERVAL = 0.25
 
 
 class GuardServer:
     def __init__(
-        self,
-        pipe_name: str,
-        lifecycle: GuardLifecycle,
+        self, pipe_name: str, authority: AuthorityService,
         monitor_interval: float = MONITOR_INTERVAL,
     ) -> None:
         self.pipe_name = pipe_name
-        self.lifecycle = lifecycle
+        self.authority = authority
         self.monitor_interval = monitor_interval
         self._stop = threading.Event()
         self._listener: Listener | None = None
         self._connections: queue.Queue[Connection] = queue.Queue()
 
-    def _dispatch(self, request: dict[str, Any]) -> GuardResult:
-        command = request["command"]
-        payload = request["payload"]
-        if command == "health":
-            return self.lifecycle.health()
-        if command == "start_flow":
-            return self.lifecycle.start_flow(payload["owner_pid"])
-        if command == "cancel_flow":
-            return self.lifecycle.cancel_flow(payload["flow_id"])
-        return self.lifecycle.recover_flow(payload["flow_id"])
-
-    def _safe_response(self, result: GuardResult) -> bytes:
-        return encode_message(
-            make_response(
-                ok=result.ok,
-                code=result.code,
-                state=result.state,
-                message=result.message,
-                flow_id=result.flow_id,
-            )
-        )
-
     def _handle_connection(self, connection: Connection) -> None:
+        frame: object = None
         try:
+            if not connection.poll(self.monitor_interval):
+                raise TimeoutError("Guard request timed out")
+            frame = decode_message(connection.recv_bytes(MAX_MESSAGE_BYTES + 1))
+            request, owner_pid = validate_request(frame)
             try:
-                if not connection.poll(self.monitor_interval):
-                    raise TimeoutError("Guard request timed out")
-                raw = connection.recv_bytes(MAX_MESSAGE_BYTES + 1)
-                request = decode_message(raw)
-                validate_request(request)
-                response = self._safe_response(self._dispatch(request))
+                response = self.authority.handle(request, owner_pid)
             except Exception:
-                result = GuardResult(
-                    False,
-                    "IPC_INVALID_REQUEST",
-                    self.lifecycle.snapshot.state,
-                    "Guard rejected an invalid request.",
-                    self.lifecycle.snapshot.flow_id,
+                response = self.authority.error(
+                    request, SecurityCode.IPC_INVALID_REQUEST.value,
+                    "Guard could not process the request.",
                 )
-                response = self._safe_response(result)
-            connection.send_bytes(response)
+            encoded = encode_message(make_response(response))
+            connection.send_bytes(encoded)
+        except ContractViolation as violation:
+            try:
+                connection.send_bytes(contract_failure(frame, violation))
+            except Exception:
+                try:
+                    connection.send_bytes(generic_error())
+                except Exception:
+                    return
         except Exception:
-            return
+            try:
+                connection.send_bytes(generic_error())
+            except Exception:
+                return
         finally:
             connection.close()
 
@@ -101,7 +81,7 @@ class GuardServer:
                     connection = None
                 if connection is not None:
                     self._handle_connection(connection)
-                self.lifecycle.monitor_once()
+                self.authority.lifecycle.monitor_once()
         finally:
             self._stop.set()
             self._listener.close()

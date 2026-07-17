@@ -8,6 +8,7 @@ from unittest.mock import patch
 from holon_guard import GuardLifecycle, SnapshotStore
 from holon_guard.store import InvalidSnapshot
 from holon_guard_ipc import GuardState
+from guard_support import ACTION_ID, FINGERPRINT, make_ledger
 
 
 class NoWallet:
@@ -50,9 +51,19 @@ class GuardFailureTests(unittest.TestCase):
 
     def test_persistence_failure_disables_signing_before_wallet_launch(self) -> None:
         snapshot = self.store.bootstrap_normal_for_test(1.0)
-        guard = GuardLifecycle(self.store, snapshot, NoWallet(), AliveOwner())
+        ledger = make_ledger(Path(self.temporary.name))
+        guard = GuardLifecycle(self.store, snapshot, NoWallet(), AliveOwner(), ledger)
         with patch.object(self.store, "save", side_effect=OSError("disk failure")):
-            result = guard.start_flow(101)
+            result = guard.start_flow(101, ACTION_ID, FINGERPRINT)
+        self.assertEqual(result.code, "SIGNING_DISABLED")
+        self.assertIs(result.state, GuardState.SIGNING_DISABLED)
+
+    def test_action_state_write_failure_disables_signing_before_wallet_launch(self) -> None:
+        snapshot = self.store.bootstrap_normal_for_test(1.0)
+        ledger = make_ledger(Path(self.temporary.name))
+        guard = GuardLifecycle(self.store, snapshot, NoWallet(), AliveOwner(), ledger)
+        with patch.object(ledger.store, "save", side_effect=OSError("disk failure")):
+            result = guard.start_flow(101, ACTION_ID, FINGERPRINT)
         self.assertEqual(result.code, "SIGNING_DISABLED")
         self.assertIs(result.state, GuardState.SIGNING_DISABLED)
 

@@ -1,18 +1,18 @@
-"""Bounded JSON codec for the private M2.02 Guard transport."""
+"""Bounded transport frame carrying shared contract envelopes."""
 
 from __future__ import annotations
 
 import json
 from typing import Any, Mapping
 
-from .model import GuardState
+from holon_contracts import ContractEnvelope, ContractViolation, MessageKind, parse_envelope
+from holon_contracts.schemas import REQUEST_KINDS
 
 IPC_VERSION = "1"
 MAX_MESSAGE_BYTES = 8 * 1024
 PIPE_NAME = r"\\.\pipe\Holon.Guard.v1"
-COMMANDS = frozenset({"health", "start_flow", "cancel_flow", "recover_flow"})
-TOP_LEVEL_FIELDS = frozenset({"ipc_version", "command", "payload"})
-RESPONSE_FIELDS = frozenset({"ok", "code", "state", "flow_id", "message"})
+REQUEST_FIELDS = frozenset({"ipc_version", "message", "owner_pid"})
+RESPONSE_FIELDS = frozenset({"ipc_version", "message"})
 
 
 class CodecError(ValueError):
@@ -43,70 +43,51 @@ def decode_message(raw: bytes) -> dict[str, Any]:
     return value
 
 
-def make_request(command: str, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
-    request = {"ipc_version": IPC_VERSION, "command": command, "payload": dict(payload or {})}
+def make_request(envelope: ContractEnvelope, owner_pid: int | None = None) -> dict[str, Any]:
+    request = {
+        "ipc_version": IPC_VERSION,
+        "message": envelope.to_dict(),
+        "owner_pid": owner_pid,
+    }
     validate_request(request)
     return request
 
 
-def validate_request(request: Mapping[str, Any]) -> None:
-    if set(request) != TOP_LEVEL_FIELDS or request.get("ipc_version") != IPC_VERSION:
-        raise CodecError("Invalid IPC request envelope")
-    command = request.get("command")
-    payload = request.get("payload")
-    if command not in COMMANDS or not isinstance(payload, dict):
-        raise CodecError("Invalid IPC command")
-    expected = {
-        "health": set(),
-        "start_flow": {"owner_pid"},
-        "cancel_flow": {"flow_id"},
-        "recover_flow": {"flow_id"},
-    }[command]
-    if set(payload) != expected:
-        raise CodecError("Invalid IPC command payload")
-    if command == "start_flow":
-        owner_pid = payload["owner_pid"]
-        if type(owner_pid) is not int or owner_pid <= 0:
-            raise CodecError("Invalid owner PID")
-    elif command in {"cancel_flow", "recover_flow"}:
-        flow_id = payload["flow_id"]
-        if not isinstance(flow_id, str) or not flow_id or len(flow_id) > 64:
-            raise CodecError("Invalid flow ID")
-
-
-def make_response(
-    *, ok: bool, code: str, state: GuardState, message: str, flow_id: str | None
-) -> dict[str, Any]:
-    return {
-        "ok": bool(ok),
-        "code": code,
-        "state": state.value,
-        "flow_id": flow_id,
-        "message": message,
-    }
-
-
-def validate_response(response: Mapping[str, Any]) -> None:
-    if set(response) != RESPONSE_FIELDS:
-        raise CodecError("Invalid IPC response envelope")
-    if type(response.get("ok")) is not bool:
-        raise CodecError("Invalid IPC response status")
-    code = response.get("code")
-    message = response.get("message")
-    if (
-        not isinstance(code, str)
-        or not code
-        or len(code) > 64
-        or not isinstance(message, str)
-        or len(message) > 256
-    ):
-        raise CodecError("Invalid IPC response text")
+def validate_request(request: Mapping[str, Any]) -> tuple[ContractEnvelope, int | None]:
+    if set(request) != REQUEST_FIELDS:
+        raise CodecError("Invalid IPC request frame")
+    if request.get("ipc_version") != IPC_VERSION:
+        raise CodecError("Unsupported IPC version")
     try:
-        state = GuardState(response.get("state"))
+        envelope = parse_envelope(request.get("message"))
+    except ContractViolation:
+        raise
     except (TypeError, ValueError) as exc:
-        raise CodecError("Invalid IPC response state") from exc
-    if state is GuardState.UNKNOWN:
-        raise CodecError("Unknown Guard state is not a valid response")
-    flow_id = response.get("flow_id")
-    if flow_id is not None and (not isinstance(flow_id, str) or len(flow_id) > 64):
-        raise CodecError("Invalid IPC response flow ID")
+        raise CodecError("Invalid contract envelope") from exc
+    if envelope.kind not in REQUEST_KINDS:
+        raise CodecError("Contract message is not a request")
+    owner_pid = request.get("owner_pid")
+    requires_owner = envelope.kind is MessageKind.PREPARE_TRANSFER
+    if requires_owner and (type(owner_pid) is not int or owner_pid <= 0):
+        raise CodecError("Invalid owner PID")
+    if not requires_owner and owner_pid is not None:
+        raise CodecError("Unexpected owner PID")
+    return envelope, owner_pid
+
+
+def make_response(envelope: ContractEnvelope) -> dict[str, Any]:
+    response = {"ipc_version": IPC_VERSION, "message": envelope.to_dict()}
+    validate_response(response)
+    return response
+
+
+def validate_response(response: Mapping[str, Any]) -> ContractEnvelope:
+    if set(response) != RESPONSE_FIELDS or response.get("ipc_version") != IPC_VERSION:
+        raise CodecError("Invalid IPC response frame")
+    try:
+        envelope = parse_envelope(response.get("message"))
+    except (TypeError, ValueError) as exc:
+        raise CodecError("Invalid contract response") from exc
+    if envelope.kind in REQUEST_KINDS:
+        raise CodecError("Contract message is not a response")
+    return envelope

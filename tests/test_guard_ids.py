@@ -6,6 +6,7 @@ import uuid
 from pathlib import Path
 
 from holon_guard import GuardLifecycle, SnapshotStore
+from guard_support import ACTION_ID, FINGERPRINT, make_ledger
 
 
 class Handle:
@@ -35,7 +36,9 @@ class GuardIdentifierTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             store = SnapshotStore(Path(temporary) / "state.json")
             snapshot = store.bootstrap_normal_for_test(1.0)
-            result = GuardLifecycle(store, snapshot, Wallet(), Owner()).start_flow(101)
+            ledger = make_ledger(Path(temporary))
+            guard = GuardLifecycle(store, snapshot, Wallet(), Owner(), ledger)
+            result = guard.start_flow(101, ACTION_ID, FINGERPRINT)
         identifier = uuid.UUID(result.flow_id)
         self.assertEqual(identifier.version, 4)
         self.assertEqual(str(identifier), result.flow_id)
