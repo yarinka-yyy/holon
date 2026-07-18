@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import subprocess
-import sys
 from typing import Protocol
 
 from holon_guard_ipc import (
@@ -13,7 +11,11 @@ from holon_guard_ipc import (
     GuardState,
     PipeGuardClient,
 )
-from holon_guard_ipc.client import wait_for_pipe
+
+from .launcher import (
+    DisabledGuardLauncher, InstalledGuardLauncher, SubprocessGuardLauncher,
+    production_launcher,
+)
 
 
 class GuardClient(Protocol):
@@ -27,40 +29,6 @@ class GuardLauncher(Protocol):
 class UnavailableGuardClient:
     def probe(self) -> GuardHealth:
         return GuardHealth.unavailable()
-
-
-class DisabledGuardLauncher:
-    def start(self) -> None:
-        raise RuntimeError("Guard implementation is not installed")
-
-
-class SubprocessGuardLauncher:
-    def __init__(
-        self, command: tuple[str, ...], pipe_name: str, startup_timeout: float = 3.0
-    ) -> None:
-        if not command:
-            raise ValueError("Guard command must not be empty")
-        self._command = command
-        self._pipe_name = pipe_name
-        self._startup_timeout = startup_timeout
-
-    def start(self) -> None:
-        creationflags = 0x08000000 if sys.platform == "win32" else 0
-        process = subprocess.Popen(
-            list(self._command),
-            shell=False,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            close_fds=True,
-            creationflags=creationflags,
-        )
-        try:
-            wait_for_pipe(self._pipe_name, self._startup_timeout)
-        except Exception:
-            if process.poll() is None:
-                process.terminate()
-            raise
 
 
 class GuardConnector:

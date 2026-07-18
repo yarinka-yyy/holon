@@ -7,12 +7,12 @@ from typing import Any, Optional
 
 from .guard import (
     PROTECTED_STATES,
-    DisabledGuardLauncher,
     GuardAvailability,
     GuardConnector,
     GuardHealth,
     GuardState,
     PipeGuardClient,
+    production_launcher,
 )
 
 HEALTH_TOOL = "holon_health"
@@ -89,7 +89,7 @@ class PluginRuntime:
         }
 
 
-_runtime = PluginRuntime(GuardConnector(PipeGuardClient(), DisabledGuardLauncher()))
+_runtime = PluginRuntime(GuardConnector(PipeGuardClient(), production_launcher()))
 
 
 def _handle_health(params: Optional[dict] = None, **kwargs: Any) -> str:

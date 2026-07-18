@@ -1,4 +1,4 @@
-"""Standalone Guard entry point. Packaging wiring remains M2.05 scope."""
+"""Standalone Guard entry point with optional installed-package integrity."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from holon_contracts import RefusalCode, SecurityCode
 from holon_policy import Policy, PolicyEngine, PolicyLoadError
 from holon_policy.baseline import load_baseline_policy
 from holon_journal import EventType
+from holon_installation import verify_installed
 
 from .action_model import ActionStateSnapshot
 from .action_store import ActionStateStore, InvalidActionState, MissingActionState
@@ -35,7 +36,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="holon-guard")
     parser.add_argument("--data-dir", type=Path, default=None)
     parser.add_argument("--pipe-name", default=PIPE_NAME)
+    parser.add_argument("--require-install-integrity", action="store_true")
+    parser.add_argument("--manifest-path", type=Path, default=None)
+    parser.add_argument("--app-root", type=Path, default=None)
+    parser.add_argument("--plugin-root", type=Path, default=None)
+    parser.add_argument("--hermes-version", default="")
     return parser
+
+
+def _integrity_failure(args: argparse.Namespace) -> str | None:
+    if not args.require_install_integrity:
+        return None
+    if not all((args.manifest_path, args.app_root, args.plugin_root)):
+        return SecurityCode.PACKAGE_MANIFEST_INVALID.value
+    result = verify_installed(
+        args.manifest_path, args.app_root, args.plugin_root, args.hermes_version,
+    )
+    return None if result.ok else result.code
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -62,7 +79,8 @@ def main(argv: list[str] | None = None) -> int:
                 store, UnavailableWalletController(), WindowsOwnerProbe(), ledger
             )
             audit, audit_failure = load_authority_audit(data_dir)
-            failure = audit_failure or policy_failure or action_failure
+            install_failure = _integrity_failure(args)
+            failure = install_failure or audit_failure or policy_failure or action_failure
             if failure is not None:
                 lifecycle.disable_signing(failure)
             elif not policy.authority_enabled:

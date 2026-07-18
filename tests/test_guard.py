@@ -97,8 +97,8 @@ class GuardConnectorTests(unittest.TestCase):
         result = GuardConnector(FakeClient(raw), FakeLauncher()).probe()
         self.assertEqual(result, GuardHealth.available(GuardState.NORMAL))
 
-    @patch("holon_hermes_plugin.guard.wait_for_pipe")
-    @patch("holon_hermes_plugin.guard.subprocess.Popen")
+    @patch("holon_hermes_plugin.launcher.wait_for_pipe")
+    @patch("holon_hermes_plugin.launcher.subprocess.Popen")
     def test_test_launcher_uses_fixed_command_and_bounded_wait(self, popen, wait) -> None:
         popen.return_value = FakeProcess()
         SubprocessGuardLauncher(("python", "guard.py"), "test-pipe").start()
@@ -106,8 +106,8 @@ class GuardConnectorTests(unittest.TestCase):
         self.assertFalse(popen.call_args.kwargs["shell"])
         wait.assert_called_once_with("test-pipe", 3.0)
 
-    @patch("holon_hermes_plugin.guard.wait_for_pipe", side_effect=TimeoutError())
-    @patch("holon_hermes_plugin.guard.subprocess.Popen")
+    @patch("holon_hermes_plugin.launcher.wait_for_pipe", side_effect=TimeoutError())
+    @patch("holon_hermes_plugin.launcher.subprocess.Popen")
     def test_test_launcher_terminates_failed_start(self, popen, _wait) -> None:
         process = FakeProcess()
         popen.return_value = process
