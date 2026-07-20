@@ -94,7 +94,7 @@ def test_create_ui_persists_after_done_and_enables_wallet_controls(
     assert repository.exists
     assert app.controller.backupWords == []
     assert QGuiApplication.clipboard().text() == ""
-    assert not child(app, "sendAction").property("enabled")
+    assert child(app, "sendAction").property("enabled")
     assert not child(app, "transactionsAction").property("enabled")
     assert child(app, "settingsAction").property("enabled")
 
@@ -144,6 +144,66 @@ def test_locked_restart_has_masked_password_and_generic_failure(tmp_path, qt_app
         assert app.controller.errorMessage == "Authentication failed"
         set_text(app, "passwordTextInput", password)
         invoke(child(app, "passwordSubmitButton"), "trigger")
+        assert app.controller.currentScreen == "main"
+    finally:
+        app.close()
+
+
+def test_mock_action_review_password_result_and_cancel(tmp_path, qt_app) -> None:
+    repository = VaultRepository(WalletPaths(tmp_path))
+    password = fresh_password()
+    repository.create_new(
+        password, repository.new_record(generate_mnemonic(), "Main Account"),
+    )
+    app = WalletApplication(qt_app, repository)
+    try:
+        set_text(app, "passwordTextInput", password)
+        invoke(child(app, "passwordSubmitButton"), "trigger")
+        invoke(child(app, "sendAction"), "trigger")
+        qt_app.processEvents()
+
+        assert app.controller.currentScreen == "mock_review"
+        assert child(app, "mockNetwork").property("text") == "Base  ·  8453"
+        assert child(app, "mockAmount").property("text") == "1 USDC"
+        assert "not a real address" in child(app, "mockRecipient").property("text")
+        assert "no RPC request" in child(app, "mockFee").property("text")
+        assert child(app, "mockExpiry").property("text").endswith("UTC")
+
+        invoke(child(app, "mockContinueButton"), "trigger")
+        qt_app.processEvents()
+        assert app.controller.currentScreen == "mock_password"
+        assert not child(app, "mockPasswordField").property("revealed")
+        assert not child(app, "mockAuthorizeButton").property("enabled")
+        set_text(app, "mockPasswordTextInput", fresh_password())
+        qt_app.processEvents()
+        assert child(app, "mockAuthorizeButton").property("enabled")
+        invoke(child(app, "mockAuthorizeButton"), "trigger")
+        qt_app.processEvents()
+
+        assert app.controller.currentScreen == "mock_result"
+        assert child(app, "mockResultTitle").property("text") == "Authentication failed"
+        assert "No transaction was signed or sent" in child(
+            app, "mockResultMessage",
+        ).property("text")
+        invoke(child(app, "mockResultDoneButton"), "trigger")
+
+        invoke(child(app, "sendAction"), "trigger")
+        invoke(child(app, "mockContinueButton"), "trigger")
+        set_text(app, "mockPasswordTextInput", password)
+        invoke(child(app, "mockAuthorizeButton"), "trigger")
+        qt_app.processEvents()
+        assert app.controller.currentScreen == "mock_result"
+        assert child(app, "mockResultTitle").property("text") == "Simulation authorized"
+        assert app.controller.actionResultSuccess
+        invoke(child(app, "mockResultDoneButton"), "trigger")
+
+        invoke(child(app, "sendAction"), "trigger")
+        invoke(child(app, "mockContinueButton"), "trigger")
+        invoke(child(app, "mockCancelButton"), "trigger")
+        assert app.controller.currentScreen == "main"
+
+        invoke(child(app, "sendAction"), "trigger")
+        invoke(child(app, "mockRejectButton"), "trigger")
         assert app.controller.currentScreen == "main"
     finally:
         app.close()

@@ -5,6 +5,7 @@ from __future__ import annotations
 from PySide6.QtCore import Property, QObject, QTimer, Signal, Slot
 from PySide6.QtGui import QGuiApplication
 
+from .authority import ActionOutcome, CriticalActionCoordinator, PreparedMockAction
 from .model import ProfileSummary, WalletShellState
 from .settings import SettingsStore
 from .storage import StorageError
@@ -60,6 +61,8 @@ class WalletController(QObject):
     flowChanged = Signal()
     errorMessageChanged = Signal()
     backupWordsChanged = Signal()
+    mockActionChanged = Signal()
+    actionResultChanged = Signal()
 
     def __init__(self, repository: VaultRepository | None = None) -> None:
         super().__init__()
@@ -72,6 +75,11 @@ class WalletController(QObject):
         self._pending_record: ProfileRecord | None = None
         self._pending_vault: PreparedVault | None = None
         self._backup_words: tuple[str, ...] = ()
+        self._authority = CriticalActionCoordinator()
+        self._mock_action_digest = ""
+        self._action_result_title = ""
+        self._action_result_message = ""
+        self._action_result_success = False
         self._copied_phrase: str | None = None
         self._clipboard_timer = QTimer(self)
         self._clipboard_timer.setSingleShot(True)
@@ -141,6 +149,25 @@ class WalletController(QObject):
     def importPrivateOnly(self) -> bool:
         return self._flow == "add_private"
 
+    @Property("QVariantMap", notify=mockActionChanged)
+    def mockAction(self) -> dict[str, object]:
+        action = self._authority.current
+        if action is None:
+            return {}
+        return _mock_action_map(action)
+
+    @Property(str, notify=actionResultChanged)
+    def actionResultTitle(self) -> str:
+        return self._action_result_title
+
+    @Property(str, notify=actionResultChanged)
+    def actionResultMessage(self) -> str:
+        return self._action_result_message
+
+    @Property(bool, notify=actionResultChanged)
+    def actionResultSuccess(self) -> bool:
+        return self._action_result_success
+
     @Slot()
     def beginCreate(self) -> None:
         if self._repository.exists:
@@ -158,6 +185,90 @@ class WalletController(QObject):
         if not self._state.profiles:
             return
         self._begin_flow("add_private", "import")
+
+    @Slot(result=bool)
+    def beginMockAction(self) -> bool:
+        active = self._state.active_profile
+        if active is None:
+            return False
+        self._set_error("")
+        try:
+            action = self._authority.prepare(active)
+        except RuntimeError:
+            return False
+        self._mock_action_digest = action.digest
+        self.mockActionChanged.emit()
+        self._set_screen("mock_review")
+        return True
+
+    @Slot(result=bool)
+    def continueMockAction(self) -> bool:
+        action = self._authority.current
+        if action is None:
+            return False
+        outcome = self._authority.preflight(action.action_id, self._mock_action_digest)
+        if outcome is not None:
+            self._finish_mock_action(outcome)
+            return False
+        self._set_screen("mock_password")
+        return True
+
+    @Slot(str, result=bool)
+    def submitMockPassword(self, password: str) -> bool:
+        action = self._authority.current
+        if action is None:
+            return False
+        outcome = self._authority.preflight(action.action_id, self._mock_action_digest)
+        if outcome is not None:
+            self._finish_mock_action(outcome)
+            return False
+        try:
+            profiles = self._repository.authenticate(password)
+        except AuthenticationFailedError:
+            outcome = self._authority.authentication_failed(action.action_id)
+            self._finish_mock_action(outcome)
+            return False
+        except VaultUnavailableError:
+            self._authority.fail()
+            self._clear_mock_action()
+            self._set_screen("unavailable")
+            return False
+        except (StorageError, VaultValidationError):
+            self._finish_mock_action(self._authority.fail())
+            return False
+        authenticated = next(
+            (profile for profile in profiles if profile.profile_id == action.profile_id), None,
+        )
+        if (
+            authenticated is None
+            or authenticated.address != action.sender
+            or authenticated.label != action.account_label
+            or self._state.active_profile_id != action.profile_id
+        ):
+            self._finish_mock_action(self._authority.fail())
+            return False
+        outcome = self._authority.authorize_and_consume(
+            action.action_id, self._mock_action_digest, self._consume_simulation,
+        )
+        self._finish_mock_action(outcome)
+        return outcome is ActionOutcome.AUTHORIZED
+
+    @Slot()
+    def rejectMockAction(self) -> None:
+        self._authority.reject()
+        self._clear_mock_action()
+        self._set_screen("main")
+
+    @Slot()
+    def cancelMockAction(self) -> None:
+        self._authority.cancel()
+        self._clear_mock_action()
+        self._set_screen("main")
+
+    @Slot()
+    def finishMockResult(self) -> None:
+        self._clear_action_result()
+        self._set_screen("main")
 
     @Slot(str, str, result=bool)
     def submitImport(self, import_type: str, value: str) -> bool:
@@ -279,7 +390,11 @@ class WalletController(QObject):
             self._set_error("Active Account could not be saved")
             return False
         if self._state.select_profile(profile_id):
+            invalidated = self._authority.profile_changed(profile_id)
             self.activeProfileChanged.emit()
+            if invalidated:
+                self._clear_mock_action()
+                self._set_screen("main")
             return True
         return False
 
@@ -295,6 +410,8 @@ class WalletController(QObject):
 
     @Slot()
     def shutdown(self) -> None:
+        self._authority.close()
+        self._clear_mock_action()
         self._clear_sensitive()
 
     def _initialize(self) -> None:
@@ -345,6 +462,8 @@ class WalletController(QObject):
         self._set_screen(screen)
 
     def _begin_flow(self, flow: str, screen: str) -> None:
+        self._authority.close()
+        self._clear_mock_action()
         self._clear_sensitive()
         self._set_error("")
         self._flow = flow
@@ -361,6 +480,55 @@ class WalletController(QObject):
         if self._backup_words:
             self._backup_words = ()
             self.backupWordsChanged.emit()
+
+    @staticmethod
+    def _consume_simulation(_action: PreparedMockAction) -> None:
+        return
+
+    def _finish_mock_action(self, outcome: ActionOutcome) -> None:
+        results = {
+            ActionOutcome.AUTHORIZED: (
+                "Simulation authorized",
+                "Authorization was used once. No transaction was signed or sent.",
+                True,
+            ),
+            ActionOutcome.AUTHENTICATION_FAILED: (
+                "Authentication failed",
+                "The action was closed. No transaction was signed or sent.",
+                False,
+            ),
+            ActionOutcome.EXPIRED: (
+                "Action expired",
+                "Prepare a new simulation. No transaction was signed or sent.",
+                False,
+            ),
+        }
+        title, message, success = results.get(
+            outcome,
+            (
+                "Authorization unavailable",
+                "The action was closed. No transaction was signed or sent.",
+                False,
+            ),
+        )
+        self._action_result_title = title
+        self._action_result_message = message
+        self._action_result_success = success
+        self.actionResultChanged.emit()
+        self._clear_mock_action()
+        self._set_screen("mock_result")
+
+    def _clear_mock_action(self) -> None:
+        if self._mock_action_digest or self._authority.current is not None:
+            self._mock_action_digest = ""
+            self.mockActionChanged.emit()
+
+    def _clear_action_result(self) -> None:
+        if self._action_result_title or self._action_result_message:
+            self._action_result_title = ""
+            self._action_result_message = ""
+            self._action_result_success = False
+            self.actionResultChanged.emit()
 
     def _clear_clipboard(self) -> None:
         self._clipboard_timer.stop()
@@ -379,3 +547,20 @@ class WalletController(QObject):
         if screen != self._current_screen:
             self._current_screen = screen
             self.currentScreenChanged.emit()
+
+
+def _mock_action_map(action: PreparedMockAction) -> dict[str, object]:
+    return {
+        "actionId": action.action_id,
+        "shortActionId": f"{action.action_id[:12]}…",
+        "accountLabel": action.account_label,
+        "sender": action.sender,
+        "shortSender": f"{action.sender[:8]}…{action.sender[-6:]}",
+        "network": action.network,
+        "chainId": action.chain_id,
+        "token": action.token,
+        "amount": action.amount_display,
+        "recipient": action.recipient,
+        "feeStatus": action.fee_status,
+        "expiresAt": action.expires_at.strftime("%H:%M:%S UTC"),
+    }

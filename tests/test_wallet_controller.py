@@ -3,6 +3,7 @@ from __future__ import annotations
 import secrets
 
 from holon_wallet.controller import WalletController
+from holon_wallet.authority import WalletAuthorityState
 from holon_wallet.storage import WalletPaths
 from holon_wallet.vault import VaultRepository
 from holon_wallet.wallet_crypto import generate_mnemonic, import_private_key
@@ -97,3 +98,65 @@ def test_cancel_and_unknown_selection_leave_state_unchanged(tmp_path) -> None:
     assert item.backupWords == []
     assert list(tmp_path.iterdir()) == []
     assert not item.selectProfile("unknown")
+
+
+def test_mock_action_success_is_single_use_and_writes_nothing(tmp_path) -> None:
+    item = controller(tmp_path)
+    secret = password()
+    item.beginCreate()
+    assert item.submitPassword(secret, secret)
+    assert item.finishBackup()
+    before = {
+        path.name: path.read_bytes() for path in tmp_path.iterdir() if path.is_file()
+    }
+
+    assert item.beginMockAction()
+    action_id = item.mockAction["actionId"]
+    assert item.currentScreen == "mock_review"
+    assert item.mockAction["network"] == "Base"
+    assert item.mockAction["amount"] == "1 USDC"
+    assert not item.beginMockAction()
+    assert item.continueMockAction()
+    assert item.currentScreen == "mock_password"
+    assert item.submitMockPassword(secret)
+
+    assert item.currentScreen == "mock_result"
+    assert item.actionResultSuccess
+    assert "No transaction was signed or sent" in item.actionResultMessage
+    assert item.mockAction == {}
+    assert item._authority.state is WalletAuthorityState.LOCKED
+    assert item._authority.preflight(action_id, "unused") is not None
+    assert {
+        path.name: path.read_bytes() for path in tmp_path.iterdir() if path.is_file()
+    } == before
+    item.finishMockResult()
+    assert item.currentScreen == "main"
+
+
+def test_mock_action_wrong_password_cancel_and_profile_change_are_terminal(tmp_path) -> None:
+    item = controller(tmp_path)
+    secret = password()
+    item.beginCreate()
+    assert item.submitPassword(secret, secret)
+    assert item.finishBackup()
+
+    assert item.beginMockAction()
+    assert item.continueMockAction()
+    assert not item.submitMockPassword(password())
+    assert item.currentScreen == "mock_result"
+    assert item.actionResultTitle == "Authentication failed"
+    assert item._authority.state is WalletAuthorityState.LOCKED
+
+    item.finishMockResult()
+    assert item.beginMockAction()
+    item.cancelMockAction()
+    assert item.currentScreen == "main"
+    assert item._authority.state is WalletAuthorityState.LOCKED
+
+    second = item._repository.new_record(import_private_key(raw_private_key()), "Account 2")
+    profiles = item._repository.append(secret, second)
+    item._replace_profiles(profiles, profiles[0].profile_id)
+    assert item.beginMockAction()
+    assert item.selectProfile(second.summary.profile_id)
+    assert item.currentScreen == "main"
+    assert item._authority.state is WalletAuthorityState.LOCKED

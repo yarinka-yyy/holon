@@ -6,6 +6,7 @@ Item {
     property string label: "Action"
     property url iconSource
     property bool controlEnabled: false
+    property string badge: ""
     signal triggered()
     enabled: root.controlEnabled
 
@@ -43,6 +44,19 @@ Item {
         color: root.controlEnabled ? Design.text : Design.textMuted
         font.family: Design.fontFamily
         font.pixelSize: 13
+    }
+
+    Rectangle {
+        anchors.top: parent.top; anchors.right: parent.right
+        anchors.topMargin: 8; anchors.rightMargin: 8
+        width: 31; height: 15; radius: 5
+        visible: root.badge.length > 0
+        color: "#34206A"; border.width: 1; border.color: Design.purple
+        Text {
+            anchors.centerIn: parent; text: root.badge
+            color: Design.purpleBright; font.family: Design.fontFamily
+            font.pixelSize: 7; font.weight: Font.Bold; font.letterSpacing: 0.4
+        }
     }
 
     MouseArea {

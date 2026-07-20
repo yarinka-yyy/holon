@@ -56,6 +56,24 @@ Item {
             visible: opacity > 0.01; opacity: enabled ? 1 : 0
             Behavior on opacity { NumberAnimation { duration: Design.normalMotion } }
         }
+        MockReviewPage {
+            objectName: "mockReviewPage"; anchors.fill: parent
+            enabled: walletController.currentScreen === "mock_review"
+            visible: opacity > 0.01; opacity: enabled ? 1 : 0
+            Behavior on opacity { NumberAnimation { duration: Design.normalMotion } }
+        }
+        MockPasswordPage {
+            objectName: "mockPasswordPage"; anchors.fill: parent
+            enabled: walletController.currentScreen === "mock_password"
+            visible: opacity > 0.01; opacity: enabled ? 1 : 0
+            Behavior on opacity { NumberAnimation { duration: Design.normalMotion } }
+        }
+        MockResultPage {
+            objectName: "mockResultPage"; anchors.fill: parent
+            enabled: walletController.currentScreen === "mock_result"
+            visible: opacity > 0.01; opacity: enabled ? 1 : 0
+            Behavior on opacity { NumberAnimation { duration: Design.normalMotion } }
+        }
         MainPage {
             objectName: "mainPage"; anchors.fill: parent
             enabled: walletController.currentScreen === "main"
