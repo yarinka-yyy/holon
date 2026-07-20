@@ -1,45 +1,52 @@
-from holon_wallet.model import PROTOTYPE_PROFILES, ProfileSummary, WalletShellState
+from __future__ import annotations
+
+from holon_wallet.model import ProfileSummary, WalletShellState
+from holon_wallet.wallet_crypto import DERIVATION_PATH, MNEMONIC_PROFILE
 
 
-def test_prototype_state_starts_with_public_simulated_main_account() -> None:
-    state = WalletShellState()
-
-    assert state.active_profile_id == "main"
-    assert state.active_profile == PROTOTYPE_PROFILES[0]
-    assert all(profile.simulated for profile in state.profiles)
-    assert all(len(profile.address) == 42 for profile in state.profiles)
-
-
-def test_profile_selection_is_in_memory_and_rejects_unknown_id() -> None:
-    state = WalletShellState()
-
-    assert state.select_profile("trading")
-    assert state.active_profile_id == "trading"
-    assert not state.select_profile("unknown")
-    assert state.active_profile_id == "trading"
-    assert WalletShellState().active_profile_id == "main"
-
-
-def test_profile_summary_exposes_only_short_public_address() -> None:
-    profile = ProfileSummary(
-        "profile", "Test Account", "0x1234567890123456789012345678901234567890",
+def profile(profile_id: str, label: str) -> ProfileSummary:
+    return ProfileSummary(
+        profile_id,
+        label,
+        "0x" + profile_id[-1] * 40,
+        MNEMONIC_PROFILE,
+        DERIVATION_PATH,
+        "2026-07-20T00:00:00Z",
     )
 
-    assert profile.short_address == "0x1234...67890"
+
+def test_empty_state_has_no_active_profile() -> None:
+    state = WalletShellState()
+
+    assert state.profiles == ()
+    assert state.active_profile_id is None
+    assert state.active_profile is None
+    assert not state.select_profile("unknown")
 
 
-def test_state_requires_profiles_with_unique_ids() -> None:
+def test_state_selects_and_replaces_public_profiles() -> None:
+    first = profile("00000000-0000-4000-8000-000000000001", "Main Account")
+    second = profile("00000000-0000-4000-8000-000000000002", "Account 2")
+    state = WalletShellState((first, second), second.profile_id)
+
+    assert state.active_profile == second
+    assert state.select_profile(first.profile_id)
+    assert not state.select_profile("unknown")
+    state.replace_profiles((first, second), "unknown")
+    assert state.active_profile == first
+
+
+def test_profile_summary_exposes_short_public_address() -> None:
+    item = profile("00000000-0000-4000-8000-000000000003", "Account")
+
+    assert item.short_address == "0x3333...33333"
+
+
+def test_state_rejects_duplicate_profile_ids() -> None:
+    item = profile("00000000-0000-4000-8000-000000000004", "Account")
     try:
-        WalletShellState(())
+        WalletShellState((item, item))
     except ValueError as error:
-        assert str(error) == "At least one prototype profile is required"
-    else:
-        raise AssertionError("Empty prototype state must fail")
-
-    profile = PROTOTYPE_PROFILES[0]
-    try:
-        WalletShellState((profile, profile))
-    except ValueError as error:
-        assert str(error) == "Prototype profile IDs must be unique"
+        assert str(error) == "Profile IDs must be unique"
     else:
         raise AssertionError("Duplicate profile IDs must fail")

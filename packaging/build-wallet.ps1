@@ -34,6 +34,8 @@ try {
         --name HolonWallet `
         --paths $sourceRoot `
         --add-data "$qmlRoot;holon_wallet/qml" `
+        --collect-data bip_utils `
+        --collect-all coincurve `
         --hidden-import PySide6.QtQml `
         --hidden-import PySide6.QtQuick `
         --hidden-import PySide6.QtSvg `

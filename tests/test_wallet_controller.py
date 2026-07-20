@@ -1,30 +1,99 @@
+from __future__ import annotations
+
+import secrets
+
 from holon_wallet.controller import WalletController
+from holon_wallet.storage import WalletPaths
+from holon_wallet.vault import VaultRepository
+from holon_wallet.wallet_crypto import generate_mnemonic, import_private_key
 
 
-def test_controller_exposes_public_simulated_profile_maps() -> None:
-    controller = WalletController()
-
-    assert controller.currentScreen == "main"
-    assert controller.activeProfileId == "main"
-    assert controller.activeProfile["label"] == "Main Account"
-    assert [profile["id"] for profile in controller.profiles] == [
-        "main", "trading", "savings",
-    ]
-    assert all(profile["simulated"] for profile in controller.profiles)
-    assert [profile["initials"] for profile in controller.profiles] == [
-        "A1", "T1", "S2",
-    ]
+def password() -> str:
+    return secrets.token_urlsafe(18)
 
 
-def test_controller_selection_and_navigation_fail_safely() -> None:
-    controller = WalletController()
+def raw_private_key() -> str:
+    while True:
+        candidate = secrets.token_hex(32)
+        try:
+            import_private_key(candidate)
+            return candidate
+        except ValueError:
+            continue
 
-    assert controller.selectProfile("trading")
-    assert controller.activeProfileId == "trading"
-    assert not controller.selectProfile("unknown")
-    assert controller.activeProfileId == "trading"
 
-    controller.showWallets()
-    assert controller.currentScreen == "wallets"
-    controller.showMain()
-    assert controller.currentScreen == "main"
+def controller(tmp_path) -> WalletController:
+    return WalletController(VaultRepository(WalletPaths(tmp_path)))
+
+
+def test_create_persists_only_after_backup_acknowledgement(tmp_path) -> None:
+    item = controller(tmp_path)
+    secret = password()
+
+    assert item.currentScreen == "welcome"
+    item.beginCreate()
+    assert item.currentScreen == "password"
+    assert item.passwordConfirmRequired
+    assert not item.submitPassword(secret, secret + "x")
+    assert item.submitPassword(secret, secret)
+    assert item.currentScreen == "backup"
+    assert len(item.backupWords) == 12
+    assert not (tmp_path / "wallet-vault.json").exists()
+    assert item.finishBackup()
+    assert item.currentScreen == "main"
+    assert item.backupWords == []
+    assert len(item.profiles) == 1
+    assert item.profiles[0]["typeLabel"] == "Seed phrase"
+
+
+def test_locked_restart_rejects_wrong_password_without_session(tmp_path) -> None:
+    original = controller(tmp_path)
+    secret = password()
+    original.beginCreate()
+    assert original.submitPassword(secret, secret)
+    assert original.finishBackup()
+
+    restarted = controller(tmp_path)
+    assert restarted.currentScreen == "password"
+    assert restarted.passwordTitle == "Unlock Wallet"
+    assert not restarted.passwordConfirmRequired
+    assert not restarted.submitPassword(password(), "")
+    assert restarted.errorMessage == "Authentication failed"
+    assert restarted.submitPassword(secret, "")
+    assert restarted.currentScreen == "main"
+    assert restarted.passwordTitle == "Enter Password"
+
+
+def test_first_import_supports_seed_and_existing_vault_adds_only_raw_key(tmp_path) -> None:
+    item = controller(tmp_path)
+    secret = password()
+    mnemonic = generate_mnemonic().value
+
+    item.beginImport()
+    assert item.currentScreen == "import"
+    assert item.submitImport("seed", mnemonic)
+    assert item.submitPassword(secret, secret)
+    assert item.activeProfile["label"] == "Main Account"
+
+    item.showWallets()
+    item.beginAddPrivateKey()
+    assert item.importPrivateOnly
+    assert not item.submitImport("seed", mnemonic)
+    assert item.submitImport("private", raw_private_key())
+    assert item.submitPassword(secret, "")
+    assert len(item.profiles) == 2
+    assert item.activeProfile["label"] == "Account 2"
+    assert item.activeProfile["typeLabel"] == "Private key"
+
+
+def test_cancel_and_unknown_selection_leave_state_unchanged(tmp_path) -> None:
+    item = controller(tmp_path)
+    secret = password()
+    item.beginCreate()
+    assert item.submitPassword(secret, secret)
+    item.cancelFlow()
+
+    assert item.currentScreen == "welcome"
+    assert item.backupWords == []
+    assert list(tmp_path.iterdir()) == []
+    assert not item.selectProfile("unknown")

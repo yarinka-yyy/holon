@@ -10,8 +10,8 @@ from PySide6.QtGui import QColor, QGuiApplication, QIcon
 from PySide6.QtQuick import QQuickView
 
 from .controller import WalletController
-from .model import WalletShellState
 from .single_instance import ProcessInstance
+from .vault import VaultRepository
 
 WINDOW_TITLE = "Holon Wallet"
 MUTEX_NAME = r"Local\HolonWallet.M3.01"
@@ -23,7 +23,7 @@ class WalletApplication:
     def __init__(
         self,
         qt_app: QGuiApplication | None = None,
-        state: WalletShellState | None = None,
+        repository: VaultRepository | None = None,
     ) -> None:
         self.qt_app = qt_app or QGuiApplication.instance()
         if self.qt_app is None:
@@ -34,7 +34,7 @@ class WalletApplication:
         with as_file(qml_package.joinpath("assets/holon.svg")) as icon_path:
             self.qt_app.setWindowIcon(QIcon(str(icon_path)))
 
-        self.controller = WalletController(state)
+        self.controller = WalletController(repository)
         self.window = QQuickView()
         self.engine = self.window.engine()
         self.qml_warnings: list[str] = []
@@ -53,6 +53,7 @@ class WalletApplication:
         if self.window.status() == QQuickView.Error or self.window.rootObject() is None:
             details = "; ".join(self.qml_warnings) or "unknown QML error"
             raise RuntimeError(f"Wallet QML failed to load: {details}")
+        self.window.visibleChanged.connect(self._handle_visibility)
         self.window.show()
 
     def _record_warnings(self, warnings: list[object]) -> None:
@@ -62,9 +63,14 @@ class WalletApplication:
         return self.qt_app.exec()
 
     def close(self) -> None:
+        self.controller.shutdown()
         self.window.close()
         self.window.deleteLater()
         self.qt_app.processEvents()
+
+    def _handle_visibility(self) -> None:
+        if not self.window.isVisible():
+            self.controller.shutdown()
 
 
 def main() -> int:

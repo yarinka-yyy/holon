@@ -61,6 +61,15 @@ Item {
         opacity: 0.7
     }
 
+    Text {
+        x: root.prominent ? 285 : 275
+        y: root.prominent ? 58 : 47
+        text: root.profile.typeLabel || ""
+        color: Design.textFaint
+        font.family: Design.fontFamily
+        font.pixelSize: 9
+    }
+
     Rectangle {
         x: root.prominent ? 302 : 278
         y: root.prominent ? 23 : 16

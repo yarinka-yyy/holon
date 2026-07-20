@@ -1,4 +1,9 @@
-from holon_wallet.single_instance import ProcessInstance
+import sys
+import uuid
+
+import pytest
+
+from holon_wallet.single_instance import ProcessInstance, WindowsInstanceBackend
 
 
 class Backend:
@@ -45,3 +50,19 @@ def test_second_process_activates_first_and_does_not_keep_handle() -> None:
     assert backend.closed == [backend.handle]
     instance.release()
     assert backend.closed == [backend.handle]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows named mutex only")
+def test_real_windows_named_mutex_has_only_one_owner() -> None:
+    backend = WindowsInstanceBackend()
+    name = rf"Local\HolonWallet.Test.{uuid.uuid4()}"
+    first_handle, first_owned = backend.create(name)
+    try:
+        second_handle, second_owned = backend.create(name)
+        try:
+            assert first_owned
+            assert not second_owned
+        finally:
+            backend.close(second_handle)
+    finally:
+        backend.close(first_handle)

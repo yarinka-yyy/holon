@@ -17,7 +17,7 @@ Item {
     }
     Text {
         x: 24; y: 76
-        text: "PROTOTYPE  ·  SIMULATED DATA"
+        text: "LOCAL WALLET  ·  NETWORK DATA UNAVAILABLE"
         color: Design.purpleBright
         font.family: Design.fontFamily
         font.pixelSize: 9
@@ -118,7 +118,7 @@ Item {
         }
     }
     Text {
-        x: 24; y: 655; text: "Prototype data only"
+        x: 24; y: 655; text: "Encrypted local Account"
         color: Design.textFaint; font.family: Design.fontFamily; font.pixelSize: 9
     }
     Text {

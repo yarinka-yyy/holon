@@ -1,4 +1,4 @@
-"""Public-only in-memory state for the M3.01 Wallet shell."""
+"""Public Wallet profile state shared by the vault and QML controller."""
 
 from __future__ import annotations
 
@@ -10,47 +10,44 @@ class ProfileSummary:
     profile_id: str
     label: str
     address: str
-    simulated: bool = True
+    profile_type: str
+    derivation_path: str | None
+    created_at: str
 
     @property
     def short_address(self) -> str:
         return f"{self.address[:6]}...{self.address[-5:]}"
 
 
-PROTOTYPE_PROFILES = (
-    ProfileSummary(
-        "main", "Main Account", "0x1111111111111111111111111111111111111111",
-    ),
-    ProfileSummary(
-        "trading", "Trading Account", "0x2222222222222222222222222222222222222222",
-    ),
-    ProfileSummary(
-        "savings", "Savings Account", "0x3333333333333333333333333333333333333333",
-    ),
-)
-
-
 class WalletShellState:
-    """Keeps prototype profile selection in memory for one process lifetime."""
+    """Keeps locked public summaries and the selected public profile."""
 
-    def __init__(self, profiles: tuple[ProfileSummary, ...] = PROTOTYPE_PROFILES) -> None:
-        if not profiles:
-            raise ValueError("At least one prototype profile is required")
+    def __init__(
+        self,
+        profiles: tuple[ProfileSummary, ...] = (),
+        active_profile_id: str | None = None,
+    ) -> None:
         if len({profile.profile_id for profile in profiles}) != len(profiles):
-            raise ValueError("Prototype profile IDs must be unique")
+            raise ValueError("Profile IDs must be unique")
         self._profiles = profiles
-        self._active_profile_id = profiles[0].profile_id
+        ids = {profile.profile_id for profile in profiles}
+        self._active_profile_id = (
+            active_profile_id if active_profile_id in ids
+            else profiles[0].profile_id if profiles else None
+        )
 
     @property
     def profiles(self) -> tuple[ProfileSummary, ...]:
         return self._profiles
 
     @property
-    def active_profile_id(self) -> str:
+    def active_profile_id(self) -> str | None:
         return self._active_profile_id
 
     @property
-    def active_profile(self) -> ProfileSummary:
+    def active_profile(self) -> ProfileSummary | None:
+        if self._active_profile_id is None:
+            return None
         return next(
             profile for profile in self._profiles
             if profile.profile_id == self._active_profile_id
@@ -61,3 +58,18 @@ class WalletShellState:
             return False
         self._active_profile_id = profile_id
         return True
+
+    def replace_profiles(
+        self,
+        profiles: tuple[ProfileSummary, ...],
+        active_profile_id: str | None = None,
+    ) -> None:
+        if not profiles:
+            raise ValueError("At least one profile is required")
+        if len({profile.profile_id for profile in profiles}) != len(profiles):
+            raise ValueError("Profile IDs must be unique")
+        self._profiles = profiles
+        ids = {profile.profile_id for profile in profiles}
+        self._active_profile_id = (
+            active_profile_id if active_profile_id in ids else profiles[0].profile_id
+        )

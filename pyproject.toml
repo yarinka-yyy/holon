@@ -3,7 +3,13 @@ name = "holon"
 version = "0.1.0a0"
 description = "Crypto-native security boundary for Hermes"
 requires-python = ">=3.13,<3.14"
-dependencies = ["pyside6-essentials==6.11.1"]
+dependencies = [
+    "bip-utils==2.12.1",
+    "cryptography==49.0.0",
+    "eth-account==0.13.7",
+    "eth-keys==0.7.0",
+    "pyside6-essentials==6.11.1",
+]
 
 [dependency-groups]
 dev = ["pyinstaller==6.21.0", "pytest>=8,<10"]

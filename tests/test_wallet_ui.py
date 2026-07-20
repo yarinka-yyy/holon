@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import secrets
 
 os.environ.setdefault("QT_PREFERRED_PHYSICAL_DEVICE", "cpu")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -11,6 +12,9 @@ from PySide6.QtCore import QObject, QMetaObject, Qt
 from PySide6.QtGui import QGuiApplication
 
 from holon_wallet.application import WalletApplication
+from holon_wallet.storage import WalletPaths, atomic_write_json
+from holon_wallet.vault import VaultRepository
+from holon_wallet.wallet_crypto import generate_mnemonic
 
 
 @pytest.fixture(scope="module")
@@ -19,10 +23,11 @@ def qt_app() -> QGuiApplication:
 
 
 @pytest.fixture
-def wallet_app(qt_app: QGuiApplication):
-    app = WalletApplication(qt_app)
+def wallet_app(tmp_path, qt_app: QGuiApplication):
+    repository = VaultRepository(WalletPaths(tmp_path))
+    app = WalletApplication(qt_app, repository)
     qt_app.processEvents()
-    yield app
+    yield app, repository
     app.close()
 
 
@@ -36,9 +41,18 @@ def invoke(item: QObject, method: str) -> None:
     assert QMetaObject.invokeMethod(item, method, Qt.DirectConnection)
 
 
-def test_window_geometry_chrome_and_qml_load_cleanly(wallet_app) -> None:
-    app = wallet_app
+def set_text(app: WalletApplication, name: str, value: str) -> None:
+    assert child(app, name).setProperty("text", value)
 
+
+def fresh_password() -> str:
+    return secrets.token_urlsafe(18)
+
+
+def test_window_geometry_chrome_and_qml_load_cleanly(wallet_app) -> None:
+    app, _repository = wallet_app
+
+    assert app.controller.currentScreen == "welcome"
     assert app.window.title() == "Holon Wallet"
     assert (app.window.width(), app.window.height()) == (514, 686)
     assert (app.window.minimumWidth(), app.window.minimumHeight()) == (430, 575)
@@ -47,57 +61,111 @@ def test_window_geometry_chrome_and_qml_load_cleanly(wallet_app) -> None:
     assert child(app, "windowDragArea")
     assert child(app, "minimizeButton")
     assert child(app, "closeButton")
+    assert child(app, "createAccountButton").property("enabled")
+    assert child(app, "importAccountButton").property("enabled")
 
 
-def test_routes_and_future_controls_have_expected_state(wallet_app) -> None:
-    app = wallet_app
-    send = child(app, "sendAction")
-    transactions = child(app, "transactionsAction")
-    settings = child(app, "settingsAction")
+def test_create_ui_persists_after_done_and_enables_wallet_controls(
+    wallet_app, qt_app,
+) -> None:
+    app, repository = wallet_app
+    password = fresh_password()
 
-    assert not send.property("enabled")
-    assert not transactions.property("enabled")
-    assert settings.property("enabled")
+    invoke(child(app, "createAccountButton"), "trigger")
+    qt_app.processEvents()
+    assert app.controller.currentScreen == "password"
+    assert not child(app, "passwordField").property("revealed")
+    set_text(app, "passwordTextInput", password)
+    set_text(app, "confirmPasswordTextInput", password)
+    qt_app.processEvents()
+    invoke(child(app, "passwordSubmitButton"), "trigger")
+    qt_app.processEvents()
+    assert app.controller.currentScreen == "backup"
+    assert len(app.controller.backupWords) == 12
+    assert not repository.exists
+    invoke(child(app, "copySeedButton"), "trigger")
+    copied = QGuiApplication.clipboard().text()
+    assert len(copied.split()) == 12
+    assert app.controller._clipboard_timer.isActive()
+
+    invoke(child(app, "finishBackupButton"), "trigger")
+    qt_app.processEvents()
+    assert app.controller.currentScreen == "main"
+    assert repository.exists
+    assert app.controller.backupWords == []
+    assert QGuiApplication.clipboard().text() == ""
+    assert not child(app, "sendAction").property("enabled")
+    assert not child(app, "transactionsAction").property("enabled")
+    assert child(app, "settingsAction").property("enabled")
+
+    invoke(child(app, "settingsAction"), "trigger")
+    qt_app.processEvents()
+    assert app.controller.currentScreen == "wallets"
     assert not child(app, "searchCard").property("enabled")
-    assert not child(app, "addAccount").property("enabled")
-
-    invoke(settings, "trigger")
+    assert child(app, "addAccount").property("enabled")
+    invoke(child(app, "addAccount"), "trigger")
+    qt_app.processEvents()
+    assert app.controller.currentScreen == "import"
+    assert app.controller.importPrivateOnly
+    assert child(app, "importPage").property("selectedType") == "private"
+    invoke(child(app, "importBackButton"), "trigger")
+    qt_app.processEvents()
     assert app.controller.currentScreen == "wallets"
     invoke(child(app, "backButton"), "trigger")
     assert app.controller.currentScreen == "main"
 
 
-def test_selection_updates_both_qml_screens_in_memory(wallet_app, qt_app) -> None:
-    app = wallet_app
-    label = child(app, "mainAccountLabel")
+def test_import_navigation_and_cancel_clear_fields(wallet_app, qt_app) -> None:
+    app, repository = wallet_app
+    phrase = generate_mnemonic().value
 
-    invoke(child(app, "accountCard"), "trigger")
+    invoke(child(app, "importAccountButton"), "trigger")
     qt_app.processEvents()
-    assert child(app, "accountSelector").property("open")
-    assert app.controller.selectProfile("trading")
+    assert app.controller.currentScreen == "import"
+    set_text(app, "seedPhraseInput", phrase)
+    invoke(child(app, "importBackButton"), "trigger")
     qt_app.processEvents()
-    assert app.controller.activeProfileId == "trading"
-    assert label.property("text") == "Trading Account"
-
-    assert app.controller.selectProfile("savings")
-    assert not app.controller.selectProfile("unknown")
-    assert app.controller.activeProfileId == "savings"
-    assert child(app, "walletRow_savings").property("active")
+    assert app.controller.currentScreen == "welcome"
+    assert child(app, "seedPhraseInput").property("text") == ""
+    assert not repository.exists
 
 
-def test_resize_and_close_are_clean(wallet_app, qt_app) -> None:
-    app = wallet_app
-    app.window.resize(430, 575)
-    qt_app.processEvents()
-    assert (app.window.width(), app.window.height()) == (430, 575)
-
-
-def test_application_creates_no_user_files(tmp_path, monkeypatch, qt_app) -> None:
-    monkeypatch.chdir(tmp_path)
-    app = WalletApplication(qt_app)
+def test_locked_restart_has_masked_password_and_generic_failure(tmp_path, qt_app) -> None:
+    repository = VaultRepository(WalletPaths(tmp_path))
+    password = fresh_password()
+    record = repository.new_record(generate_mnemonic(), "Main Account")
+    repository.create_new(password, record)
+    app = WalletApplication(qt_app, repository)
     try:
-        app.controller.selectProfile("trading")
-        qt_app.processEvents()
-        assert list(tmp_path.iterdir()) == []
+        assert app.controller.currentScreen == "password"
+        assert app.controller.passwordTitle == "Unlock Wallet"
+        set_text(app, "passwordTextInput", fresh_password())
+        invoke(child(app, "passwordSubmitButton"), "trigger")
+        assert app.controller.errorMessage == "Authentication failed"
+        set_text(app, "passwordTextInput", password)
+        invoke(child(app, "passwordSubmitButton"), "trigger")
+        assert app.controller.currentScreen == "main"
     finally:
         app.close()
+
+
+def test_malformed_existing_vault_is_not_replaced(tmp_path, qt_app) -> None:
+    repository = VaultRepository(WalletPaths(tmp_path))
+    atomic_write_json(repository.paths.vault, {"schema_version": 999})
+    before = repository.paths.vault.read_bytes()
+    app = WalletApplication(qt_app, repository)
+    try:
+        assert app.controller.currentScreen == "unavailable"
+        assert child(app, "retryWalletButton").property("enabled")
+        assert repository.paths.vault.read_bytes() == before
+    finally:
+        app.close()
+
+
+def test_resize_close_and_idle_first_run_create_no_files(wallet_app, qt_app) -> None:
+    app, repository = wallet_app
+    app.window.resize(430, 575)
+    qt_app.processEvents()
+
+    assert (app.window.width(), app.window.height()) == (430, 575)
+    assert list(repository.paths.data_dir.iterdir()) == []

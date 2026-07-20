@@ -1,5 +1,5 @@
-"""Standalone Holon Wallet shell."""
+"""Standalone Holon Wallet application."""
 
-from .model import PROTOTYPE_PROFILES, ProfileSummary, WalletShellState
+from .model import ProfileSummary, WalletShellState
 
-__all__ = ["PROTOTYPE_PROFILES", "ProfileSummary", "WalletShellState"]
+__all__ = ["ProfileSummary", "WalletShellState"]
