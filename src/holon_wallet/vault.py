@@ -105,6 +105,16 @@ class VaultRepository:
         self._decrypt_records(password, header, ciphertext, summaries)
         return summaries
 
+    def _authenticate_profile(self, password: str, profile_id: str) -> ProfileRecord:
+        """Return one authenticated record only to an in-process Wallet operation."""
+        document = self._read_document()
+        summaries, header, ciphertext = self._parse_envelope(document)
+        records = self._decrypt_records(password, header, ciphertext, summaries)
+        for record in records:
+            if record.summary.profile_id == profile_id:
+                return record
+        raise AuthenticationFailedError("Authentication failed")
+
     def append(
         self, password: str, record: ProfileRecord,
     ) -> tuple[ProfileSummary, ...]:

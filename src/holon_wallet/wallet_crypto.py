@@ -85,6 +85,23 @@ def rederive(material: SecretMaterial) -> str:
     raise InvalidSecretError("Profile type is unsupported")
 
 
+def private_key_bytes(material: SecretMaterial) -> bytes:
+    """Derive one transient signing key from supported local secret material."""
+    if material.profile_type == MNEMONIC_PROFILE:
+        normalized = import_mnemonic(material.value)
+        seed = Bip39SeedGenerator(
+            normalized.value, Bip39Languages.ENGLISH,
+        ).Generate()
+        return (
+            Bip44.FromSeed(seed, Bip44Coins.ETHEREUM)
+            .Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT)
+            .AddressIndex(0).PrivateKey().Raw().ToBytes()
+        )
+    if material.profile_type == RAW_KEY_PROFILE:
+        return bytes.fromhex(import_private_key(material.value).value)
+    raise InvalidSecretError("Profile type is unsupported")
+
+
 def _address_from_private_bytes(value: bytes) -> str:
     try:
         return keys.PrivateKey(value).public_key.to_checksum_address()

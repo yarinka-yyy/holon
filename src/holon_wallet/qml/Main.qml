@@ -68,6 +68,18 @@ Item {
             visible: opacity > 0.01; opacity: enabled ? 1 : 0
             Behavior on opacity { NumberAnimation { duration: Design.normalMotion } }
         }
+        SignPage {
+            objectName: "offlineSignPage"; anchors.fill: parent
+            enabled: walletController.currentScreen === "sign_transfer"
+            visible: opacity > 0.01; opacity: enabled ? 1 : 0
+            Behavior on opacity { NumberAnimation { duration: Design.normalMotion } }
+        }
+        OfflineResultPage {
+            objectName: "offlineResultPage"; anchors.fill: parent
+            enabled: walletController.currentScreen === "sign_result"
+            visible: opacity > 0.01; opacity: enabled ? 1 : 0
+            Behavior on opacity { NumberAnimation { duration: Design.normalMotion } }
+        }
         MainPage {
             objectName: "mainPage"; anchors.fill: parent
             enabled: walletController.currentScreen === "main"

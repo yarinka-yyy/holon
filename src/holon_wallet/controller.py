@@ -27,10 +27,17 @@ from .public_data import (
     snapshot_to_map,
 )
 from .settings import SettingsStore
+from .signer import (
+    OfflineSigningCode,
+    OfflineSigningResult,
+    OfflineTransferSigner,
+    offline_signing_result_to_map,
+)
 from .storage import StorageError
 from .transfer import (
     PreparedTransferAction,
     TransferFlowCoordinator,
+    TransferFlowState,
     TransferPreflightCode,
     TransferPreflightError,
     TransferPreflightService,
@@ -95,6 +102,7 @@ class WalletController(QObject):
     historyChanged = Signal()
     _publicDataReady = Signal(int, object)
     _transferReady = Signal(int, object)
+    _offlineSigningReady = Signal(int, object)
 
     def __init__(
         self,
@@ -104,6 +112,7 @@ class WalletController(QObject):
         public_data_executor: Executor | None = None,
         transfer_preflight_service: TransferPreflightService | None = None,
         transfer_executor: Executor | None = None,
+        offline_signer: OfflineTransferSigner | None = None,
     ) -> None:
         super().__init__()
         self._repository = repository or VaultRepository()
@@ -121,6 +130,9 @@ class WalletController(QObject):
             max_workers=1, thread_name_prefix="holon-transfer-preflight",
         )
         self._owns_transfer_executor = transfer_executor is None
+        self._offline_signer = offline_signer or OfflineTransferSigner(
+            self._repository,
+        )
         self._state = WalletShellState()
         self._current_screen = "welcome"
         self._flow = "none"
@@ -133,6 +145,8 @@ class WalletController(QObject):
         self._transfer_preparing = False
         self._transfer_error = ""
         self._transfer_recipient = ""
+        self._offline_signing_in_progress = False
+        self._offline_signing_result: OfflineSigningResult | None = None
         self._selected_network = "all"
         self._network_snapshots = {
             spec.network_id: NetworkSnapshot.unavailable(spec, "NOT_REFRESHED")
@@ -154,6 +168,7 @@ class WalletController(QObject):
         self._transfer_expiry_timer.timeout.connect(self._expire_transfer)
         self._publicDataReady.connect(self._accept_public_data)
         self._transferReady.connect(self._accept_transfer_preflight)
+        self._offlineSigningReady.connect(self._accept_offline_signing)
         self._initialize()
 
     @Property("QVariantList", notify=profilesChanged)
@@ -234,6 +249,42 @@ class WalletController(QObject):
     @Property(str, notify=transferChanged)
     def transferRecipient(self) -> str:
         return self._transfer_recipient
+
+    @Property(bool, notify=transferChanged)
+    def offlineSigningAvailable(self) -> bool:
+        action = self._transfer_flow.current
+        return (
+            action is not None
+            and self._transfer_flow.state is TransferFlowState.PREPARED
+            and not self._offline_signing_in_progress
+            and self._offline_signer.policy.evaluate(action) is None
+        )
+
+    @Property(str, notify=transferChanged)
+    def offlineSigningLimit(self) -> str:
+        return self._offline_signer.policy.display
+
+    @Property(str, notify=transferChanged)
+    def offlineSigningGateMessage(self) -> str:
+        action = self._transfer_flow.current
+        if action is None:
+            return ""
+        code = self._offline_signer.policy.evaluate(action)
+        if code is OfflineSigningCode.POLICY_UNAVAILABLE:
+            return "Set HOLON_BASE_MAX_TOTAL_FEE_WEI to enable offline signing"
+        if code is OfflineSigningCode.FEE_LIMIT_EXCEEDED:
+            return "Maximum fee exceeds the local signing limit"
+        return "Fresh password authorizes this action once"
+
+    @Property(bool, notify=transferChanged)
+    def offlineSigningInProgress(self) -> bool:
+        return self._offline_signing_in_progress
+
+    @Property("QVariantMap", notify=transferChanged)
+    def offlineSigningResult(self) -> dict[str, object]:
+        if self._offline_signing_result is None:
+            return {}
+        return offline_signing_result_to_map(self._offline_signing_result)
 
     @Property(str, notify=selectedNetworkChanged)
     def selectedNetwork(self) -> str:
@@ -324,6 +375,7 @@ class WalletController(QObject):
     def showSend(self) -> None:
         if not self._state.profiles:
             return
+        self._clear_offline_signing_result()
         self._cancel_transfer_request(clear_recipient=True)
         self._set_screen("send")
 
@@ -365,11 +417,13 @@ class WalletController(QObject):
 
     @Slot()
     def cancelTransfer(self) -> None:
+        self._clear_offline_signing_result()
         self._cancel_transfer_request(clear_recipient=True)
         self._set_screen("main")
 
     @Slot()
     def editTransfer(self) -> None:
+        self._clear_offline_signing_result()
         action = self._transfer_flow.current
         if action is None:
             self._cancel_transfer_request(clear_recipient=False)
@@ -381,6 +435,78 @@ class WalletController(QObject):
 
     @Slot()
     def finishTransfer(self) -> None:
+        self._clear_offline_signing_result()
+        self._cancel_transfer_request(clear_recipient=True)
+        self._set_screen("main")
+
+    @Slot(result=bool)
+    def beginOfflineSigning(self) -> bool:
+        action = self._transfer_flow.current
+        if (
+            action is None
+            or self._closed
+            or self._transfer_flow.state is not TransferFlowState.PREPARED
+            or self._offline_signer.policy.evaluate(action) is not None
+        ):
+            return False
+        if self._transfer_flow.is_expired():
+            self._show_signing_failure(action, OfflineSigningCode.ACTION_EXPIRED)
+            return False
+        self._clear_offline_signing_result()
+        self._set_screen("sign_transfer")
+        return True
+
+    @Slot(str, result=bool)
+    def submitOfflineSigning(self, password: str) -> bool:
+        action = self._transfer_flow.current
+        active = self._state.active_profile
+        if (
+            len(password) < MIN_PASSWORD_LENGTH
+            or action is None
+            or active is None
+            or self._closed
+            or self._current_screen != "sign_transfer"
+            or self._offline_signing_in_progress
+        ):
+            return False
+        expected_digest = self._transfer_flow.accepted_digest
+        permit = self._transfer_flow.begin_signing(
+            action.action_id,
+            expected_digest,
+            active.profile_id,
+        )
+        if permit is None:
+            self._show_signing_failure(action, OfflineSigningCode.ACTION_INVALID)
+            return False
+        self._offline_signing_in_progress = True
+        self._offline_signing_result = None
+        self._transfer_generation += 1
+        generation = self._transfer_generation
+        self.transferChanged.emit()
+        future = self._transfer_executor.submit(
+            self._offline_signer.sign,
+            action,
+            expected_digest,
+            password,
+            permit,
+        )
+        del password
+        future.add_done_callback(
+            lambda completed, current=generation: self._offline_signing_finished(
+                current, completed,
+            ),
+        )
+        return True
+
+    @Slot()
+    def cancelOfflineSigning(self) -> None:
+        self._clear_offline_signing_result()
+        self._cancel_transfer_request(clear_recipient=True)
+        self._set_screen("main")
+
+    @Slot()
+    def finishOfflineSigning(self) -> None:
+        self._clear_offline_signing_result()
         self._cancel_transfer_request(clear_recipient=True)
         self._set_screen("main")
 
@@ -549,6 +675,8 @@ class WalletController(QObject):
             if invalidated:
                 self._transfer_generation += 1
                 self._transfer_preparing = False
+                self._offline_signing_in_progress = False
+                self._offline_signing_result = None
                 self._transfer_recipient = ""
                 self._set_transfer_error("")
                 self.transferChanged.emit()
@@ -580,6 +708,7 @@ class WalletController(QObject):
             return
         self._closed = True
         self._public_data_generation += 1
+        self._clear_offline_signing_result()
         self._cancel_transfer_request(clear_recipient=True)
         self._clear_sensitive()
         if self._owns_public_data_executor:
@@ -588,6 +717,7 @@ class WalletController(QObject):
             self._transfer_executor.shutdown(wait=False, cancel_futures=True)
 
     def _initialize(self) -> None:
+        self._clear_offline_signing_result()
         self._cancel_transfer_request(clear_recipient=True)
         self._clear_sensitive()
         self._set_error("")
@@ -637,6 +767,7 @@ class WalletController(QObject):
         self._set_screen(screen)
 
     def _begin_flow(self, flow: str, screen: str) -> None:
+        self._clear_offline_signing_result()
         self._cancel_transfer_request(clear_recipient=True)
         self._clear_sensitive()
         self._set_error("")
@@ -679,6 +810,40 @@ class WalletController(QObject):
         except Exception:
             result = TransferPreflightError(TransferPreflightCode.RPC_UNAVAILABLE)
         self._transferReady.emit(generation, result)
+
+    def _offline_signing_finished(
+        self, generation: int, future: Future[OfflineSigningResult],
+    ) -> None:
+        if self._closed:
+            return
+        try:
+            result: object = future.result()
+        except Exception:
+            result = None
+        self._offlineSigningReady.emit(generation, result)
+
+    @Slot(int, object)
+    def _accept_offline_signing(self, generation: int, result: object) -> None:
+        if generation != self._transfer_generation or self._closed:
+            return
+        action = self._transfer_flow.current
+        self._offline_signing_in_progress = False
+        if (
+            not isinstance(result, OfflineSigningResult)
+            or action is None
+            or result.action_id != action.action_id
+            or not self._transfer_flow.complete_signing(action.action_id)
+        ):
+            if action is None:
+                return
+            result = self._safe_signing_result(
+                action, OfflineSigningCode.SIGNING_FAILED,
+            )
+            self._transfer_flow.close()
+        self._transfer_expiry_timer.stop()
+        self._offline_signing_result = result
+        self.transferChanged.emit()
+        self._set_screen("sign_result")
 
     @Slot(int, object)
     def _accept_transfer_preflight(self, generation: int, result: object) -> None:
@@ -736,6 +901,7 @@ class WalletController(QObject):
     def _cancel_transfer_request(self, clear_recipient: bool) -> None:
         changed = (
             self._transfer_preparing
+            or self._offline_signing_in_progress
             or self._transfer_flow.pending is not None
             or self._transfer_flow.current is not None
             or bool(self._transfer_error)
@@ -745,6 +911,7 @@ class WalletController(QObject):
         self._transfer_expiry_timer.stop()
         self._transfer_flow.close()
         self._transfer_preparing = False
+        self._offline_signing_in_progress = False
         self._transfer_error = ""
         if clear_recipient:
             self._transfer_recipient = ""
@@ -753,6 +920,7 @@ class WalletController(QObject):
 
     def _expire_transfer(self) -> None:
         self._transfer_expiry_timer.stop()
+        action = self._transfer_flow.current
         if not self._transfer_flow.is_expired():
             action = self._transfer_flow.current
             if action is not None:
@@ -762,10 +930,48 @@ class WalletController(QObject):
                 )
                 self._transfer_expiry_timer.start(remaining_ms)
             return
+        if action is not None and self._current_screen in {"sign_transfer", "sign_result"}:
+            self._show_signing_failure(action, OfflineSigningCode.ACTION_EXPIRED)
+            return
         self._transfer_preparing = False
         self._set_transfer_error("Transaction preparation expired")
         self.transferChanged.emit()
         self._set_screen("send")
+
+    def _show_signing_failure(
+        self, action: PreparedTransferAction, code: OfflineSigningCode,
+    ) -> None:
+        self._transfer_generation += 1
+        self._transfer_expiry_timer.stop()
+        self._transfer_flow.close()
+        self._transfer_preparing = False
+        self._offline_signing_in_progress = False
+        self._offline_signing_result = self._safe_signing_result(action, code)
+        self.transferChanged.emit()
+        self._set_screen("sign_result")
+
+    @staticmethod
+    def _safe_signing_result(
+        action: PreparedTransferAction, code: OfflineSigningCode,
+    ) -> OfflineSigningResult:
+        timestamp = (
+            datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        )
+        return OfflineSigningResult(
+            False,
+            code,
+            action.action_id,
+            action.digest,
+            "",
+            "",
+            timestamp,
+            action.simulation,
+        )
+
+    def _clear_offline_signing_result(self) -> None:
+        if self._offline_signing_result is not None:
+            self._offline_signing_result = None
+            self.transferChanged.emit()
 
     def _set_transfer_error(self, message: str) -> None:
         if message != self._transfer_error:

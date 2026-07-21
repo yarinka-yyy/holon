@@ -25,8 +25,8 @@ Item {
         Text {
             anchors.centerIn: parent
             text: action.simulation
-                ? "SIMULATED TEST DATA  ·  NOTHING WILL BE SIGNED OR SENT"
-                : "UNSIGNED PREPARATION  ·  NOTHING WILL BE SIGNED OR SENT"
+                ? "SIMULATED TEST DATA  ·  OFFLINE SIGNING ONLY"
+                : "OFFLINE SIGNING  ·  NOTHING WILL BE SENT"
             color: action.simulation ? Design.purpleBright : "#87A6FF"
             font.family: Design.fontFamily
             font.pixelSize: 9; font.weight: Font.Bold; font.letterSpacing: 0.35
@@ -38,10 +38,10 @@ Item {
         objectName: "transferReviewScroll"
         x: 18; y: 150; width: 478; height: 512
         clip: true; contentWidth: width
-        contentHeight: root.detailsOpen ? 690 : 438
+        contentHeight: root.detailsOpen ? 760 : 500
 
         Rectangle {
-            x: 0; y: 0; width: 478; height: 252; radius: 15
+            x: 0; y: 0; width: 478; height: 280; radius: 15
             color: Design.surface; border.width: 1; border.color: Design.border
             GlowWave { x: 230; y: 185; width: 248; height: 67; opacity: 0.27 }
 
@@ -66,13 +66,15 @@ Item {
             Text { objectName: "transferReviewAmount"; anchors.right: parent.right; anchors.rightMargin: 20; y: 151; text: action.amount || ""; color: Design.text; font.family: Design.fontFamily; font.pixelSize: 17; font.weight: Font.DemiBold }
             Text { x: 20; y: 194; text: "Maximum network fee"; color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 10 }
             Text { objectName: "transferReviewFee"; anchors.right: parent.right; anchors.rightMargin: 20; y: 192; text: action.maxFeeDisplay || ""; color: Design.purpleBright; font.family: Design.fontFamily; font.pixelSize: 11; font.weight: Font.DemiBold }
-            Text { x: 20; y: 224; text: "Expires"; color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 10 }
-            Text { objectName: "transferReviewExpiry"; anchors.right: parent.right; anchors.rightMargin: 20; y: 222; text: action.expiresAt || ""; color: Design.text; font.family: Design.fontFamily; font.pixelSize: 10 }
+            Text { x: 20; y: 224; text: "Local signing limit"; color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 10 }
+            Text { objectName: "offlineSigningLimit"; anchors.right: parent.right; anchors.rightMargin: 20; y: 222; text: walletController.offlineSigningLimit; color: walletController.offlineSigningAvailable ? "#76E1C0" : "#FF91AF"; font.family: Design.fontFamily; font.pixelSize: 10 }
+            Text { x: 20; y: 253; text: "Expires"; color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 10 }
+            Text { objectName: "transferReviewExpiry"; anchors.right: parent.right; anchors.rightMargin: 20; y: 251; text: action.expiresAt || ""; color: Design.text; font.family: Design.fontFamily; font.pixelSize: 10 }
         }
 
         Item {
             objectName: "transferDetailsButton"
-            x: 0; y: 268; width: 478; height: 42
+            x: 0; y: 296; width: 478; height: 42
             function trigger() { root.detailsOpen = !root.detailsOpen }
             Rectangle {
                 anchors.fill: parent; radius: 10
@@ -98,7 +100,7 @@ Item {
 
         Rectangle {
             visible: root.detailsOpen
-            x: 0; y: 322; width: 478; height: 244; radius: 12
+            x: 0; y: 350; width: 478; height: 244; radius: 12
             color: Design.surface; border.width: 1; border.color: Design.border
             Column {
                 x: 16; y: 13; width: 446; spacing: 8
@@ -133,14 +135,23 @@ Item {
         }
 
         FormButton {
-            objectName: "finishTransferButton"
-            x: 68; y: root.detailsOpen ? 584 : 328; width: 342; height: 55
-            label: "Done"; controlEnabled: true
-            onTriggered: walletController.finishTransfer()
+            objectName: "continueOfflineSigningButton"
+            x: 68; y: root.detailsOpen ? 612 : 356; width: 342; height: 55
+            label: "Continue to sign"
+            primary: walletController.offlineSigningAvailable
+            controlEnabled: walletController.offlineSigningAvailable
+            onTriggered: walletController.beginOfflineSigning()
+        }
+        Text {
+            x: 24; y: root.detailsOpen ? 674 : 417; width: 430
+            horizontalAlignment: Text.AlignHCenter
+            text: walletController.offlineSigningGateMessage
+            color: walletController.offlineSigningAvailable ? Design.textFaint : "#FF91AF"
+            font.family: Design.fontFamily; font.pixelSize: 9
         }
         FormButton {
             objectName: "editTransferButton"
-            x: 68; y: root.detailsOpen ? 650 : 394; width: 342; height: 44
+            x: 68; y: root.detailsOpen ? 698 : 440; width: 342; height: 44
             label: "Edit recipient"; controlEnabled: true; primary: false
             onTriggered: walletController.editTransfer()
         }

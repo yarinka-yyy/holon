@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 from holon_wallet.controller import WalletController
 from holon_wallet.history import HistoryStatus
+from holon_wallet.signer import OfflineSigningPolicy, OfflineTransferSigner
 from holon_wallet.storage import StorageError, WalletPaths
 from holon_wallet.transfer import TransferFlowState, TransferPreflightCode, TransferPreflightError
 from holon_wallet.vault import VaultRepository
@@ -34,12 +35,16 @@ def raw_private_key() -> str:
 
 
 def controller(tmp_path) -> WalletController:
+    repository = VaultRepository(WalletPaths(tmp_path))
     return WalletController(
-        VaultRepository(WalletPaths(tmp_path)),
+        repository,
         StubPublicDataService(),
         public_data_executor=ImmediateExecutor(),
         transfer_preflight_service=StubTransferPreflightService(),
         transfer_executor=ImmediateExecutor(),
+        offline_signer=OfflineTransferSigner(
+            repository, OfflineSigningPolicy(10**18),
+        ),
     )
 
 
@@ -145,6 +150,181 @@ def test_unsigned_preflight_writes_public_history_without_authentication(
     item.finishTransfer()
     assert item.currentScreen == "main"
     assert item._transfer_flow.state is TransferFlowState.LOCKED
+
+
+def test_offline_signing_success_returns_public_proof_and_keeps_history_prepared(
+    tmp_path,
+) -> None:
+    item = controller(tmp_path)
+    secret = password()
+    item.beginCreate()
+    assert item.submitPassword(secret, secret)
+    assert item.finishBackup()
+    vault_before = item._repository.paths.vault.read_bytes()
+
+    item.showSend()
+    assert item.prepareTransfer("0x" + "44" * 20)
+    action_id = item.transferAction["actionId"]
+    assert item.offlineSigningAvailable
+    assert item.offlineSigningLimit.endswith("ETH")
+    assert item.beginOfflineSigning()
+    assert item.currentScreen == "sign_transfer"
+    assert item.submitOfflineSigning(secret)
+
+    assert item.currentScreen == "sign_result"
+    assert item.offlineSigningResult["success"] is True
+    assert item.offlineSigningResult["actionId"] == action_id
+    assert item.offlineSigningResult["transactionHash"].startswith("0x")
+    assert item.offlineSigningResult["recoveredSigner"] == item.activeProfile["address"]
+    assert item._transfer_flow.state is TransferFlowState.LOCKED
+    assert item.historyRecords[0]["status"] == HistoryStatus.PREPARED.value
+    assert item.historyRecords[0]["transactionHash"] == ""
+    assert item._repository.paths.vault.read_bytes() == vault_before
+
+    item.finishOfflineSigning()
+    assert item.currentScreen == "main"
+    assert item.offlineSigningResult == {}
+
+
+def test_wrong_password_cancel_and_late_signing_result_are_terminal(tmp_path) -> None:
+    item = controller(tmp_path)
+    secret = password()
+    item.beginCreate()
+    assert item.submitPassword(secret, secret)
+    assert item.finishBackup()
+    item.showSend()
+    assert item.prepareTransfer("0x" + "44" * 20)
+    first_id = item.transferAction["actionId"]
+    assert item.beginOfflineSigning()
+    assert item.submitOfflineSigning(password())
+    assert item.currentScreen == "sign_result"
+    assert item.offlineSigningResult["code"] == "AUTHENTICATION_FAILED"
+    assert item._transfer_flow.state is TransferFlowState.LOCKED
+    item.finishOfflineSigning()
+
+    deferred = DeferredExecutor()
+    repository = item._repository
+    second = WalletController(
+        repository,
+        StubPublicDataService(),
+        public_data_executor=ImmediateExecutor(),
+        transfer_preflight_service=StubTransferPreflightService(),
+        transfer_executor=deferred,
+        offline_signer=OfflineTransferSigner(
+            repository, OfflineSigningPolicy(10**18),
+        ),
+    )
+    assert second.submitPassword(secret, "")
+    second.showSend()
+    assert second.prepareTransfer("0x" + "55" * 20)
+    deferred.run_next()
+    assert second.currentScreen == "transfer_review"
+    assert second.transferAction["actionId"] != first_id
+    assert second.beginOfflineSigning()
+    assert second.submitOfflineSigning(secret)
+    assert second.offlineSigningInProgress
+    second.cancelOfflineSigning()
+    deferred.run_next()
+    assert second.currentScreen == "main"
+    assert second.offlineSigningResult == {}
+    assert second._transfer_flow.state is TransferFlowState.LOCKED
+
+
+def test_missing_or_exceeded_local_fee_limit_disables_password_flow(tmp_path) -> None:
+    repository = VaultRepository(WalletPaths(tmp_path))
+    item = WalletController(
+        repository,
+        StubPublicDataService(),
+        public_data_executor=ImmediateExecutor(),
+        transfer_preflight_service=StubTransferPreflightService(),
+        transfer_executor=ImmediateExecutor(),
+        offline_signer=OfflineTransferSigner(
+            repository, OfflineSigningPolicy(None),
+        ),
+    )
+    secret = password()
+    item.beginCreate()
+    assert item.submitPassword(secret, secret)
+    assert item.finishBackup()
+    item.showSend()
+    assert item.prepareTransfer("0x" + "44" * 20)
+    assert not item.offlineSigningAvailable
+    assert item.offlineSigningLimit == "Not configured"
+    assert "HOLON_BASE_MAX_TOTAL_FEE_WEI" in item.offlineSigningGateMessage
+    assert not item.beginOfflineSigning()
+    assert item.currentScreen == "transfer_review"
+
+
+def test_mutation_expiry_profile_change_and_signer_failure_are_terminal(tmp_path) -> None:
+    item = controller(tmp_path)
+    secret = password()
+    item.beginCreate()
+    assert item.submitPassword(secret, secret)
+    assert item.finishBackup()
+    item.showSend()
+    assert item.prepareTransfer("0x" + "44" * 20)
+    action = item._transfer_flow.current
+    assert action is not None
+    item._transfer_flow._current = replace(
+        action,
+        transaction=replace(action.transaction, nonce=action.transaction.nonce + 1),
+    )
+    assert item.beginOfflineSigning()
+    assert not item.submitOfflineSigning(secret)
+    assert item.currentScreen == "sign_result"
+    assert item.offlineSigningResult["code"] == "ACTION_INVALID"
+    item.finishOfflineSigning()
+
+    item.showSend()
+    assert item.prepareTransfer("0x" + "55" * 20)
+    assert item.beginOfflineSigning()
+    action = item._transfer_flow.current
+    assert action is not None
+    item._transfer_flow._current = replace(
+        action, expires_at=datetime.now(UTC) - timedelta(seconds=1),
+    )
+    item._expire_transfer()
+    assert item.currentScreen == "sign_result"
+    assert item.offlineSigningResult["code"] == "ACTION_EXPIRED"
+    item.finishOfflineSigning()
+
+    second = item._repository.new_record(import_private_key(raw_private_key()), "Account 2")
+    profiles = item._repository.append(secret, second)
+    item._replace_profiles(profiles, profiles[0].profile_id)
+    item.showSend()
+    assert item.prepareTransfer("0x" + "66" * 20)
+    assert item.beginOfflineSigning()
+    assert item.selectProfile(second.summary.profile_id)
+    assert item.currentScreen == "main"
+    assert item._transfer_flow.state is TransferFlowState.LOCKED
+
+    class FailingSigner:
+        policy = OfflineSigningPolicy(10**18)
+
+        @staticmethod
+        def sign(*_args):
+            raise RuntimeError("secret-bearing-internal-canary")
+
+    failing_repository = VaultRepository(WalletPaths(tmp_path / "failing"))
+    failing = WalletController(
+        failing_repository,
+        StubPublicDataService(),
+        public_data_executor=ImmediateExecutor(),
+        transfer_preflight_service=StubTransferPreflightService(),
+        transfer_executor=ImmediateExecutor(),
+        offline_signer=FailingSigner(),
+    )
+    failure_password = password()
+    failing.beginCreate()
+    assert failing.submitPassword(failure_password, failure_password)
+    assert failing.finishBackup()
+    failing.showSend()
+    assert failing.prepareTransfer("0x" + "77" * 20)
+    assert failing.beginOfflineSigning()
+    assert failing.submitOfflineSigning(failure_password)
+    assert failing.currentScreen == "sign_result"
+    assert failing.offlineSigningResult["code"] == "SIGNING_FAILED"
+    assert "canary" not in repr(failing.offlineSigningResult).lower()
 
 
 def test_transfer_invalid_edit_and_profile_change_are_terminal(tmp_path) -> None:

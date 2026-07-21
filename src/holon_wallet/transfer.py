@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import Enum
+from threading import Event
 from typing import Mapping, Protocol
 
 from requests import exceptions as request_errors
@@ -38,6 +39,7 @@ class TransferFlowState(str, Enum):
     LOCKED = "LOCKED"
     PREPARING = "PREPARING"
     PREPARED = "PREPARED"
+    SIGNING = "SIGNING"
 
 
 class TransferPreflightCode(str, Enum):
@@ -54,6 +56,20 @@ class TransferPreflightCode(str, Enum):
 
 class TransferFlowError(RuntimeError):
     """A transfer flow transition was rejected."""
+
+
+class SigningPermit:
+    """Thread-safe cancellation signal for one offline signing attempt."""
+
+    def __init__(self) -> None:
+        self._cancelled = Event()
+
+    @property
+    def cancelled(self) -> bool:
+        return self._cancelled.is_set()
+
+    def cancel(self) -> None:
+        self._cancelled.set()
 
 
 class TransferPreflightError(RuntimeError):
@@ -411,6 +427,7 @@ class TransferFlowCoordinator:
         self._pending: PendingTransferRequest | None = None
         self._current: PreparedTransferAction | None = None
         self._accepted_digest = ""
+        self._signing_permit: SigningPermit | None = None
         self._terminal_ids: set[str] = set()
 
     @property
@@ -424,6 +441,10 @@ class TransferFlowCoordinator:
     @property
     def current(self) -> PreparedTransferAction | None:
         return self._current
+
+    @property
+    def accepted_digest(self) -> str:
+        return self._accepted_digest
 
     def begin(self, profile_id: str) -> PendingTransferRequest:
         if self._state is not TransferFlowState.LOCKED:
@@ -495,6 +516,28 @@ class TransferFlowCoordinator:
             return False
         return True
 
+    def begin_signing(
+        self, action_id: str, digest: str, profile_id: str,
+    ) -> SigningPermit | None:
+        if not self.validate(action_id, digest, profile_id):
+            return None
+        permit = SigningPermit()
+        self._signing_permit = permit
+        self._state = TransferFlowState.SIGNING
+        return permit
+
+    def complete_signing(self, action_id: str) -> bool:
+        action = self._current
+        if (
+            self._state is not TransferFlowState.SIGNING
+            or action is None
+            or action.action_id != action_id
+        ):
+            self.close()
+            return False
+        self.close()
+        return True
+
     def profile_changed(self, profile_id: str) -> bool:
         active_profile_id = (
             self._pending.profile_id if self._pending is not None
@@ -514,9 +557,12 @@ class TransferFlowCoordinator:
         )
         if action_id is not None:
             self._terminal_ids.add(action_id)
+        if self._signing_permit is not None:
+            self._signing_permit.cancel()
         self._pending = None
         self._current = None
         self._accepted_digest = ""
+        self._signing_permit = None
         self._state = TransferFlowState.LOCKED
 
 

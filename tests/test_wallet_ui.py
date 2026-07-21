@@ -13,6 +13,7 @@ from PySide6.QtGui import QGuiApplication
 
 from holon_wallet.application import WalletApplication
 from holon_wallet.history import HistoryStatus, HistoryStore, WalletHistoryRecord
+from holon_wallet.signer import OfflineSigningPolicy, OfflineTransferSigner
 from holon_wallet.storage import WalletPaths, atomic_write_json
 from holon_wallet.transfer import TransferPreflightCode, TransferPreflightError
 from holon_wallet.vault import VaultRepository
@@ -63,6 +64,7 @@ def make_app(
     public_data_service: StubPublicDataService | None = None,
     transfer_preflight_service: StubTransferPreflightService | None = None,
     transfer_executor=None,
+    offline_signer: OfflineTransferSigner | None = None,
 ) -> WalletApplication:
     return WalletApplication(
         qt_app,
@@ -72,6 +74,9 @@ def make_app(
         ImmediateExecutor(),
         transfer_preflight_service or StubTransferPreflightService(),
         transfer_executor or ImmediateExecutor(),
+        offline_signer or OfflineTransferSigner(
+            repository, OfflineSigningPolicy(10**18),
+        ),
     )
 
 
@@ -188,7 +193,7 @@ def test_locked_restart_has_masked_password_and_generic_failure(tmp_path, qt_app
         app.close()
 
 
-def test_send_form_unsigned_review_edit_done_and_history(tmp_path, qt_app) -> None:
+def test_send_review_offline_sign_result_and_history(tmp_path, qt_app) -> None:
     repository = VaultRepository(WalletPaths(tmp_path))
     password = fresh_password()
     repository.create_new(
@@ -218,8 +223,9 @@ def test_send_form_unsigned_review_edit_done_and_history(tmp_path, qt_app) -> No
         assert child(app, "transferReviewRecipient").property("text").endswith("444444")
         assert child(app, "transferReviewFee").property("text").endswith("ETH")
         assert child(app, "transferReviewExpiry").property("text").endswith("UTC")
+        assert child(app, "offlineSigningLimit").property("text").endswith("ETH")
         invoke(child(app, "transferDetailsButton"), "trigger")
-        assert child(app, "transferReviewScroll").property("contentHeight") == 690
+        assert child(app, "transferReviewScroll").property("contentHeight") == 760
 
         invoke(child(app, "editTransferButton"), "trigger")
         qt_app.processEvents()
@@ -227,13 +233,84 @@ def test_send_form_unsigned_review_edit_done_and_history(tmp_path, qt_app) -> No
         assert child(app, "transferRecipientInput").property("text") == recipient
         invoke(child(app, "prepareTransferButton"), "trigger")
         qt_app.processEvents()
-        invoke(child(app, "finishTransferButton"), "trigger")
+        assert child(app, "continueOfflineSigningButton").property("enabled")
+        invoke(child(app, "continueOfflineSigningButton"), "trigger")
+        assert app.controller.currentScreen == "sign_transfer"
+        assert not child(app, "offlineSigningPasswordField").property("revealed")
+        assert not child(app, "offlineSignButton").property("enabled")
+        set_text(app, "offlineSigningPasswordInput", password)
+        qt_app.processEvents()
+        assert child(app, "offlineSignButton").property("enabled")
+        invoke(child(app, "offlineSignButton"), "trigger")
+        qt_app.processEvents()
+        assert child(app, "offlineSigningPasswordInput").property("text") == ""
+        assert app.controller.currentScreen == "sign_result"
+        assert child(app, "offlineResultTitle").property("text") == (
+            "Transaction signed locally"
+        )
+        assert child(app, "offlineRecoveredSigner").property("text") == (
+            app.controller.activeProfile["address"]
+        )
+        assert child(app, "offlineTransactionHash").property("text").startswith("0x")
+        invoke(child(app, "offlineResultDoneButton"), "trigger")
         assert app.controller.currentScreen == "main"
         assert len(app.controller.historyRecords) == 2
         assert all(not item["simulated"] for item in app.controller.historyRecords)
+        assert all(item["status"] == "prepared" for item in app.controller.historyRecords)
+        assert all(item["transactionHash"] == "" for item in app.controller.historyRecords)
         QGuiApplication.clipboard().clear()
     finally:
         app.close()
+
+
+def test_offline_signing_fee_gate_wrong_password_and_cancel(tmp_path, qt_app) -> None:
+    repository = VaultRepository(WalletPaths(tmp_path))
+    password = fresh_password()
+    repository.create_new(
+        password, repository.new_record(generate_mnemonic(), "Main Account"),
+    )
+    unavailable = OfflineTransferSigner(repository, OfflineSigningPolicy(None))
+    app = make_app(qt_app, repository, offline_signer=unavailable)
+    try:
+        set_text(app, "passwordTextInput", password)
+        invoke(child(app, "passwordSubmitButton"), "trigger")
+        invoke(child(app, "sendAction"), "trigger")
+        set_text(app, "transferRecipientInput", "0x" + "44" * 20)
+        invoke(child(app, "prepareTransferButton"), "trigger")
+        qt_app.processEvents()
+        assert app.controller.currentScreen == "transfer_review"
+        assert not child(app, "continueOfflineSigningButton").property("enabled")
+        assert child(app, "offlineSigningLimit").property("text") == "Not configured"
+    finally:
+        app.close()
+
+    active = make_app(qt_app, repository)
+    try:
+        set_text(active, "passwordTextInput", password)
+        invoke(child(active, "passwordSubmitButton"), "trigger")
+        invoke(child(active, "sendAction"), "trigger")
+        set_text(active, "transferRecipientInput", "0x" + "55" * 20)
+        invoke(child(active, "prepareTransferButton"), "trigger")
+        invoke(child(active, "continueOfflineSigningButton"), "trigger")
+        invoke(child(active, "offlineSignCancelButton"), "trigger")
+        assert active.controller.currentScreen == "main"
+
+        invoke(child(active, "sendAction"), "trigger")
+        set_text(active, "transferRecipientInput", "0x" + "66" * 20)
+        invoke(child(active, "prepareTransferButton"), "trigger")
+        invoke(child(active, "continueOfflineSigningButton"), "trigger")
+        set_text(active, "offlineSigningPasswordInput", fresh_password())
+        invoke(child(active, "offlineSignButton"), "trigger")
+        qt_app.processEvents()
+        assert active.controller.currentScreen == "sign_result"
+        assert child(active, "offlineResultTitle").property("text") == (
+            "Authentication failed"
+        )
+        assert not child(active, "offlineProofCard").property("visible")
+        invoke(child(active, "offlineResultDoneButton"), "trigger")
+        assert active.controller.currentScreen == "main"
+    finally:
+        active.close()
 
 
 def test_send_failure_remains_on_form_and_writes_no_history(tmp_path, qt_app) -> None:

@@ -14,6 +14,7 @@ from .controller import WalletController
 from .history import HistoryStore
 from .public_data import PublicDataService
 from .single_instance import ProcessInstance
+from .signer import OfflineTransferSigner
 from .transfer import TransferPreflightService
 from .vault import VaultRepository
 
@@ -33,6 +34,7 @@ class WalletApplication:
         public_data_executor: Executor | None = None,
         transfer_preflight_service: TransferPreflightService | None = None,
         transfer_executor: Executor | None = None,
+        offline_signer: OfflineTransferSigner | None = None,
     ) -> None:
         self.qt_app = qt_app or QGuiApplication.instance()
         if self.qt_app is None:
@@ -50,6 +52,7 @@ class WalletApplication:
             public_data_executor,
             transfer_preflight_service,
             transfer_executor,
+            offline_signer,
         )
         self.window = QQuickView()
         self.engine = self.window.engine()
