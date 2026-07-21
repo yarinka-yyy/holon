@@ -1,13 +1,22 @@
 from __future__ import annotations
 
 import secrets
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 
 from holon_wallet.controller import WalletController
-from holon_wallet.authority import WalletAuthorityState
-from holon_wallet.storage import WalletPaths
+from holon_wallet.history import HistoryStatus
+from holon_wallet.storage import StorageError, WalletPaths
+from holon_wallet.transfer import TransferFlowState, TransferPreflightCode, TransferPreflightError
 from holon_wallet.vault import VaultRepository
 from holon_wallet.wallet_crypto import generate_mnemonic, import_private_key
-from wallet_public_support import ImmediateExecutor, StubPublicDataService, public_snapshot
+from wallet_public_support import (
+    DeferredExecutor,
+    ImmediateExecutor,
+    StubPublicDataService,
+    StubTransferPreflightService,
+    public_snapshot,
+)
 
 
 def password() -> str:
@@ -29,6 +38,8 @@ def controller(tmp_path) -> WalletController:
         VaultRepository(WalletPaths(tmp_path)),
         StubPublicDataService(),
         public_data_executor=ImmediateExecutor(),
+        transfer_preflight_service=StubTransferPreflightService(),
+        transfer_executor=ImmediateExecutor(),
     )
 
 
@@ -105,65 +116,176 @@ def test_cancel_and_unknown_selection_leave_state_unchanged(tmp_path) -> None:
     assert not item.selectProfile("unknown")
 
 
-def test_mock_action_success_is_single_use_and_writes_nothing(tmp_path) -> None:
+def test_unsigned_preflight_writes_public_history_without_authentication(
+    tmp_path, monkeypatch,
+) -> None:
     item = controller(tmp_path)
     secret = password()
     item.beginCreate()
     assert item.submitPassword(secret, secret)
     assert item.finishBackup()
-    before = {
-        path.name: path.read_bytes() for path in tmp_path.iterdir() if path.is_file()
-    }
+    vault_before = item._repository.paths.vault.read_bytes()
 
-    assert item.beginMockAction()
-    action_id = item.mockAction["actionId"]
-    assert item.currentScreen == "mock_review"
-    assert item.mockAction["network"] == "Base"
-    assert item.mockAction["amount"] == "1 USDC"
-    assert not item.beginMockAction()
-    assert item.continueMockAction()
-    assert item.currentScreen == "mock_password"
-    assert item.submitMockPassword(secret)
+    def forbidden_authentication(_password: str):
+        raise AssertionError("Unsigned preflight touched vault authentication")
 
-    assert item.currentScreen == "mock_result"
-    assert item.actionResultSuccess
-    assert "No transaction was signed or sent" in item.actionResultMessage
-    assert item.mockAction == {}
-    assert item._authority.state is WalletAuthorityState.LOCKED
-    assert item._authority.preflight(action_id, "unused") is not None
-    assert {
-        path.name: path.read_bytes() for path in tmp_path.iterdir() if path.is_file()
-    } == before
-    item.finishMockResult()
+    monkeypatch.setattr(item._repository, "authenticate", forbidden_authentication)
+    item.showSend()
+    assert item.currentScreen == "send"
+    assert item.prepareTransfer("0x" + "44" * 20)
+    assert item.currentScreen == "transfer_review"
+    assert item.transferAction["network"] == "Base"
+    assert item.transferAction["amount"] == "1 USDC"
+    assert item.transferAction["maxTotalFeeWei"].isdigit()
+    assert "data" not in item.transferAction
+    assert item.historyRecords[0]["status"] == HistoryStatus.PREPARED.value
+    assert item.historyRecords[0]["simulated"] is False
+    assert item._repository.paths.vault.read_bytes() == vault_before
+
+    item.finishTransfer()
     assert item.currentScreen == "main"
+    assert item._transfer_flow.state is TransferFlowState.LOCKED
 
 
-def test_mock_action_wrong_password_cancel_and_profile_change_are_terminal(tmp_path) -> None:
+def test_transfer_invalid_edit_and_profile_change_are_terminal(tmp_path) -> None:
     item = controller(tmp_path)
     secret = password()
     item.beginCreate()
     assert item.submitPassword(secret, secret)
     assert item.finishBackup()
 
-    assert item.beginMockAction()
-    assert item.continueMockAction()
-    assert not item.submitMockPassword(password())
-    assert item.currentScreen == "mock_result"
-    assert item.actionResultTitle == "Authentication failed"
-    assert item._authority.state is WalletAuthorityState.LOCKED
+    item.showSend()
+    assert not item.prepareTransfer("not-an-address")
+    assert item.transferError == "Enter a valid EVM recipient address"
+    assert item.historyRecords == []
 
-    item.finishMockResult()
-    assert item.beginMockAction()
-    item.cancelMockAction()
+    assert item.prepareTransfer("0x" + "44" * 20)
+    first_id = item.transferAction["actionId"]
+    item.editTransfer()
+    assert item.currentScreen == "send"
+    assert item.transferRecipient == "0x" + "44" * 20
+    assert item._transfer_flow.state is TransferFlowState.LOCKED
+    assert item.prepareTransfer(item.transferRecipient)
+    assert item.transferAction["actionId"] != first_id
+
+    second = item._repository.new_record(import_private_key(raw_private_key()), "Account 2")
+    profiles = item._repository.append(secret, second)
+    item._replace_profiles(profiles, profiles[0].profile_id)
+    assert item.selectProfile(second.summary.profile_id)
     assert item.currentScreen == "main"
-    assert item._authority.state is WalletAuthorityState.LOCKED
+    assert item._transfer_flow.state is TransferFlowState.LOCKED
+
+
+def test_transfer_failure_is_safe_and_writes_no_history(tmp_path) -> None:
+    repository = VaultRepository(WalletPaths(tmp_path))
+    service = StubTransferPreflightService(
+        TransferPreflightError(TransferPreflightCode.INSUFFICIENT_USDC),
+    )
+    item = WalletController(
+        repository,
+        StubPublicDataService(),
+        public_data_executor=ImmediateExecutor(),
+        transfer_preflight_service=service,
+        transfer_executor=ImmediateExecutor(),
+    )
+    secret = password()
+    item.beginCreate()
+    assert item.submitPassword(secret, secret)
+    assert item.finishBackup()
+    item.showSend()
+
+    assert item.prepareTransfer("0x" + "44" * 20)
+    assert item.currentScreen == "send"
+    assert item.transferError == "This Account does not have 1 USDC on Base"
+    assert item.historyRecords == []
+    assert not repository.paths.history.exists()
+
+
+def test_cancelled_preflight_ignores_late_response(tmp_path) -> None:
+    repository = VaultRepository(WalletPaths(tmp_path))
+    executor = DeferredExecutor()
+    item = WalletController(
+        repository,
+        StubPublicDataService(),
+        public_data_executor=ImmediateExecutor(),
+        transfer_preflight_service=StubTransferPreflightService(),
+        transfer_executor=executor,
+    )
+    secret = password()
+    item.beginCreate()
+    assert item.submitPassword(secret, secret)
+    assert item.finishBackup()
+    item.showSend()
+    assert item.prepareTransfer("0x" + "44" * 20)
+    assert item.transferPreparing
+
+    item.cancelTransfer()
+    assert item.currentScreen == "main"
+    executor.run_next()
+
+    assert item.currentScreen == "main"
+    assert item.transferAction == {}
+    assert item.historyRecords == []
+    assert not repository.paths.history.exists()
+
+
+def test_history_failure_blocks_review_and_preserves_previous_file(
+    tmp_path, monkeypatch,
+) -> None:
+    item = controller(tmp_path)
+    secret = password()
+    item.beginCreate()
+    assert item.submitPassword(secret, secret)
+    assert item.finishBackup()
+    item.showSend()
+    assert item.prepareTransfer("0x" + "44" * 20)
+    item.finishTransfer()
+    before = item._repository.paths.history.read_bytes()
+
+    def failed_append(_record):
+        raise StorageError("write-canary")
+
+    monkeypatch.setattr(item._history_store, "append", failed_append)
+    item.showSend()
+    assert item.prepareTransfer("0x" + "55" * 20)
+
+    assert item.currentScreen == "send"
+    assert item.transferError == "History unavailable · transaction was not prepared"
+    assert item._transfer_flow.state is TransferFlowState.LOCKED
+    assert item._repository.paths.history.read_bytes() == before
+
+
+def test_prepared_transfer_expiry_returns_to_form(tmp_path) -> None:
+    item = controller(tmp_path)
+    secret = password()
+    item.beginCreate()
+    assert item.submitPassword(secret, secret)
+    assert item.finishBackup()
+    item.showSend()
+    assert item.prepareTransfer("0x" + "44" * 20)
+    action = item._transfer_flow.current
+    assert action is not None
+    item._transfer_flow._current = replace(
+        action,
+        expires_at=datetime.now(UTC) - timedelta(seconds=1),
+    )
+
+    item._expire_transfer()
+
+    assert item.currentScreen == "send"
+    assert item.transferError == "Transaction preparation expired"
+    assert item._transfer_flow.state is TransferFlowState.LOCKED
 
 
 def test_public_refresh_filter_and_stale_result_are_safe(tmp_path) -> None:
     repository = VaultRepository(WalletPaths(tmp_path))
     service = StubPublicDataService()
     item = WalletController(
-        repository, service, public_data_executor=ImmediateExecutor(),
+        repository,
+        service,
+        public_data_executor=ImmediateExecutor(),
+        transfer_preflight_service=StubTransferPreflightService(),
+        transfer_executor=ImmediateExecutor(),
     )
     secret = password()
     item.beginCreate()
@@ -212,7 +334,11 @@ def test_public_refresh_never_authenticates_or_decrypts_vault(tmp_path, monkeypa
     repository = VaultRepository(WalletPaths(tmp_path))
     service = StubPublicDataService()
     item = WalletController(
-        repository, service, public_data_executor=ImmediateExecutor(),
+        repository,
+        service,
+        public_data_executor=ImmediateExecutor(),
+        transfer_preflight_service=StubTransferPreflightService(),
+        transfer_executor=ImmediateExecutor(),
     )
     secret = password()
     item.beginCreate()
@@ -229,7 +355,10 @@ def test_public_refresh_never_authenticates_or_decrypts_vault(tmp_path, monkeypa
     second = item._repository.new_record(import_private_key(raw_private_key()), "Account 2")
     profiles = item._repository.append(secret, second)
     item._replace_profiles(profiles, profiles[0].profile_id)
-    assert item.beginMockAction()
+    item.showSend()
+    assert item.prepareTransfer("0x" + "44" * 20)
+    assert item.currentScreen == "transfer_review"
+    item.editTransfer()
     assert item.selectProfile(second.summary.profile_id)
-    assert item.currentScreen == "main"
-    assert item._authority.state is WalletAuthorityState.LOCKED
+    assert item.currentScreen == "send"
+    assert item._transfer_flow.state is TransferFlowState.LOCKED

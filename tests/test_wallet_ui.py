@@ -14,9 +14,15 @@ from PySide6.QtGui import QGuiApplication
 from holon_wallet.application import WalletApplication
 from holon_wallet.history import HistoryStatus, HistoryStore, WalletHistoryRecord
 from holon_wallet.storage import WalletPaths, atomic_write_json
+from holon_wallet.transfer import TransferPreflightCode, TransferPreflightError
 from holon_wallet.vault import VaultRepository
 from holon_wallet.wallet_crypto import generate_mnemonic
-from wallet_public_support import ImmediateExecutor, StubPublicDataService
+from wallet_public_support import (
+    DeferredExecutor,
+    ImmediateExecutor,
+    StubPublicDataService,
+    StubTransferPreflightService,
+)
 
 
 @pytest.fixture(scope="module")
@@ -55,6 +61,8 @@ def make_app(
     qt_app: QGuiApplication,
     repository: VaultRepository,
     public_data_service: StubPublicDataService | None = None,
+    transfer_preflight_service: StubTransferPreflightService | None = None,
+    transfer_executor=None,
 ) -> WalletApplication:
     return WalletApplication(
         qt_app,
@@ -62,6 +70,8 @@ def make_app(
         public_data_service or StubPublicDataService(),
         HistoryStore(repository.paths),
         ImmediateExecutor(),
+        transfer_preflight_service or StubTransferPreflightService(),
+        transfer_executor or ImmediateExecutor(),
     )
 
 
@@ -178,7 +188,7 @@ def test_locked_restart_has_masked_password_and_generic_failure(tmp_path, qt_app
         app.close()
 
 
-def test_mock_action_review_password_result_and_cancel(tmp_path, qt_app) -> None:
+def test_send_form_unsigned_review_edit_done_and_history(tmp_path, qt_app) -> None:
     repository = VaultRepository(WalletPaths(tmp_path))
     password = fresh_password()
     repository.create_new(
@@ -191,49 +201,94 @@ def test_mock_action_review_password_result_and_cancel(tmp_path, qt_app) -> None
         invoke(child(app, "sendAction"), "trigger")
         qt_app.processEvents()
 
-        assert app.controller.currentScreen == "mock_review"
-        assert child(app, "mockNetwork").property("text") == "Base  ·  8453"
-        assert child(app, "mockAmount").property("text") == "1 USDC"
-        assert "not a real address" in child(app, "mockRecipient").property("text")
-        assert "no RPC request" in child(app, "mockFee").property("text")
-        assert child(app, "mockExpiry").property("text").endswith("UTC")
-
-        invoke(child(app, "mockContinueButton"), "trigger")
+        assert app.controller.currentScreen == "send"
+        assert not child(app, "prepareTransferButton").property("enabled")
+        recipient = "0x" + "44" * 20
+        QGuiApplication.clipboard().setText(recipient)
+        invoke(child(app, "pasteRecipientButton"), "trigger")
         qt_app.processEvents()
-        assert app.controller.currentScreen == "mock_password"
-        assert not child(app, "mockPasswordField").property("revealed")
-        assert not child(app, "mockAuthorizeButton").property("enabled")
-        set_text(app, "mockPasswordTextInput", fresh_password())
-        qt_app.processEvents()
-        assert child(app, "mockAuthorizeButton").property("enabled")
-        invoke(child(app, "mockAuthorizeButton"), "trigger")
+        assert child(app, "transferRecipientInput").property("text") == recipient
+        assert child(app, "prepareTransferButton").property("enabled")
+        invoke(child(app, "prepareTransferButton"), "trigger")
         qt_app.processEvents()
 
-        assert app.controller.currentScreen == "mock_result"
-        assert child(app, "mockResultTitle").property("text") == "Authentication failed"
-        assert "No transaction was signed or sent" in child(
-            app, "mockResultMessage",
-        ).property("text")
-        invoke(child(app, "mockResultDoneButton"), "trigger")
+        assert app.controller.currentScreen == "transfer_review"
+        assert child(app, "transferReviewNetwork").property("text") == "Base  ·  8453"
+        assert child(app, "transferReviewAmount").property("text") == "1 USDC"
+        assert child(app, "transferReviewRecipient").property("text").endswith("444444")
+        assert child(app, "transferReviewFee").property("text").endswith("ETH")
+        assert child(app, "transferReviewExpiry").property("text").endswith("UTC")
+        invoke(child(app, "transferDetailsButton"), "trigger")
+        assert child(app, "transferReviewScroll").property("contentHeight") == 690
 
-        invoke(child(app, "sendAction"), "trigger")
-        invoke(child(app, "mockContinueButton"), "trigger")
-        set_text(app, "mockPasswordTextInput", password)
-        invoke(child(app, "mockAuthorizeButton"), "trigger")
+        invoke(child(app, "editTransferButton"), "trigger")
         qt_app.processEvents()
-        assert app.controller.currentScreen == "mock_result"
-        assert child(app, "mockResultTitle").property("text") == "Simulation authorized"
-        assert app.controller.actionResultSuccess
-        invoke(child(app, "mockResultDoneButton"), "trigger")
-
-        invoke(child(app, "sendAction"), "trigger")
-        invoke(child(app, "mockContinueButton"), "trigger")
-        invoke(child(app, "mockCancelButton"), "trigger")
+        assert app.controller.currentScreen == "send"
+        assert child(app, "transferRecipientInput").property("text") == recipient
+        invoke(child(app, "prepareTransferButton"), "trigger")
+        qt_app.processEvents()
+        invoke(child(app, "finishTransferButton"), "trigger")
         assert app.controller.currentScreen == "main"
+        assert len(app.controller.historyRecords) == 2
+        assert all(not item["simulated"] for item in app.controller.historyRecords)
+        QGuiApplication.clipboard().clear()
+    finally:
+        app.close()
 
+
+def test_send_failure_remains_on_form_and_writes_no_history(tmp_path, qt_app) -> None:
+    repository = VaultRepository(WalletPaths(tmp_path))
+    password = fresh_password()
+    repository.create_new(
+        password, repository.new_record(generate_mnemonic(), "Main Account"),
+    )
+    failure = StubTransferPreflightService(
+        TransferPreflightError(TransferPreflightCode.INSUFFICIENT_USDC),
+    )
+    app = make_app(qt_app, repository, transfer_preflight_service=failure)
+    try:
+        set_text(app, "passwordTextInput", password)
+        invoke(child(app, "passwordSubmitButton"), "trigger")
         invoke(child(app, "sendAction"), "trigger")
-        invoke(child(app, "mockRejectButton"), "trigger")
+        set_text(app, "transferRecipientInput", "0x" + "44" * 20)
+        invoke(child(app, "prepareTransferButton"), "trigger")
+        qt_app.processEvents()
+
+        assert app.controller.currentScreen == "send"
+        assert child(app, "transferErrorLabel").property("text") == (
+            "This Account does not have 1 USDC on Base"
+        )
+        assert app.controller.historyRecords == []
+    finally:
+        app.close()
+
+
+def test_send_loading_back_ignores_late_result(tmp_path, qt_app) -> None:
+    repository = VaultRepository(WalletPaths(tmp_path))
+    password = fresh_password()
+    repository.create_new(
+        password, repository.new_record(generate_mnemonic(), "Main Account"),
+    )
+    executor = DeferredExecutor()
+    app = make_app(qt_app, repository, transfer_executor=executor)
+    try:
+        set_text(app, "passwordTextInput", password)
+        invoke(child(app, "passwordSubmitButton"), "trigger")
+        invoke(child(app, "sendAction"), "trigger")
+        set_text(app, "transferRecipientInput", "0x" + "44" * 20)
+        invoke(child(app, "prepareTransferButton"), "trigger")
+        qt_app.processEvents()
+
+        assert app.controller.currentScreen == "send"
+        assert app.controller.transferPreparing
+        assert not child(app, "prepareTransferButton").property("visible")
+        invoke(child(app, "sendBackButton"), "trigger")
+        executor.run_next()
+        qt_app.processEvents()
+
         assert app.controller.currentScreen == "main"
+        assert app.controller.transferAction == {}
+        assert app.controller.historyRecords == []
     finally:
         app.close()
 

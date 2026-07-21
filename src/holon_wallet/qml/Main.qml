@@ -56,21 +56,15 @@ Item {
             visible: opacity > 0.01; opacity: enabled ? 1 : 0
             Behavior on opacity { NumberAnimation { duration: Design.normalMotion } }
         }
-        MockReviewPage {
-            objectName: "mockReviewPage"; anchors.fill: parent
-            enabled: walletController.currentScreen === "mock_review"
+        SendPage {
+            objectName: "sendPage"; anchors.fill: parent
+            enabled: walletController.currentScreen === "send"
             visible: opacity > 0.01; opacity: enabled ? 1 : 0
             Behavior on opacity { NumberAnimation { duration: Design.normalMotion } }
         }
-        MockPasswordPage {
-            objectName: "mockPasswordPage"; anchors.fill: parent
-            enabled: walletController.currentScreen === "mock_password"
-            visible: opacity > 0.01; opacity: enabled ? 1 : 0
-            Behavior on opacity { NumberAnimation { duration: Design.normalMotion } }
-        }
-        MockResultPage {
-            objectName: "mockResultPage"; anchors.fill: parent
-            enabled: walletController.currentScreen === "mock_result"
+        TransferReviewPage {
+            objectName: "transferReviewPage"; anchors.fill: parent
+            enabled: walletController.currentScreen === "transfer_review"
             visible: opacity > 0.01; opacity: enabled ? 1 : 0
             Behavior on opacity { NumberAnimation { duration: Design.normalMotion } }
         }

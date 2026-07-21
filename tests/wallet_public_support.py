@@ -8,6 +8,7 @@ from holon_wallet.public_data import (
     PortfolioSnapshot,
     PublicDataStatus,
 )
+from holon_wallet.transfer import BASE_CHAIN_ID, TransferPreflightService
 
 
 class ImmediateExecutor(Executor):
@@ -21,6 +22,30 @@ class ImmediateExecutor(Executor):
 
     def shutdown(self, wait=True, *, cancel_futures=False):
         return
+
+
+class DeferredExecutor(Executor):
+    def __init__(self) -> None:
+        self.tasks = []
+
+    def submit(self, fn, /, *args, **kwargs):
+        future = Future()
+        self.tasks.append((future, fn, args, kwargs))
+        return future
+
+    def run_next(self) -> None:
+        future, fn, args, kwargs = self.tasks.pop(0)
+        if future.cancelled():
+            return
+        try:
+            future.set_result(fn(*args, **kwargs))
+        except BaseException as error:
+            future.set_exception(error)
+
+    def shutdown(self, wait=True, *, cancel_futures=False):
+        if cancel_futures:
+            for future, _fn, _args, _kwargs in self.tasks:
+                future.cancel()
 
 
 class StubPublicDataService:
@@ -43,6 +68,50 @@ class StubPublicDataService:
             for network_id in network_ids
         )
         return PortfolioSnapshot(profile_id, address, snapshots)
+
+
+class StubTransferRpc:
+    def __init__(self) -> None:
+        self.estimated_transaction: dict[str, object] | None = None
+
+    def chain_id(self) -> int:
+        return BASE_CHAIN_ID
+
+    def latest_block(self) -> tuple[int, int]:
+        return 12_345_678, 10_000_000
+
+    def native_balance(self, _address: str) -> int:
+        return 10**18
+
+    def token_decimals(self, _contract: str) -> int:
+        return 6
+
+    def token_balance(self, _contract: str, _address: str) -> int:
+        return 2_500_000
+
+    def pending_nonce(self, _address: str) -> int:
+        return 4
+
+    def max_priority_fee_per_gas(self) -> int:
+        return 1_000_000
+
+    def estimate_gas(self, transaction) -> int:
+        self.estimated_transaction = dict(transaction)
+        return 55_000
+
+
+class StubTransferPreflightService:
+    def __init__(self, error: BaseException | None = None) -> None:
+        self.error = error
+        self.rpc = StubTransferRpc()
+        self.calls = []
+        self._service = TransferPreflightService(lambda _endpoint: self.rpc, environ={})
+
+    def prepare(self, request, profile, recipient):
+        self.calls.append((request, profile, recipient))
+        if self.error is not None:
+            raise self.error
+        return self._service.prepare(request, profile, recipient)
 
 
 def public_snapshot(

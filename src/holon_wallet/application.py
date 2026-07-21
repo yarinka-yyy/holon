@@ -14,6 +14,7 @@ from .controller import WalletController
 from .history import HistoryStore
 from .public_data import PublicDataService
 from .single_instance import ProcessInstance
+from .transfer import TransferPreflightService
 from .vault import VaultRepository
 
 WINDOW_TITLE = "Holon Wallet"
@@ -30,6 +31,8 @@ class WalletApplication:
         public_data_service: PublicDataService | None = None,
         history_store: HistoryStore | None = None,
         public_data_executor: Executor | None = None,
+        transfer_preflight_service: TransferPreflightService | None = None,
+        transfer_executor: Executor | None = None,
     ) -> None:
         self.qt_app = qt_app or QGuiApplication.instance()
         if self.qt_app is None:
@@ -45,6 +48,8 @@ class WalletApplication:
             public_data_service,
             history_store,
             public_data_executor,
+            transfer_preflight_service,
+            transfer_executor,
         )
         self.window = QQuickView()
         self.engine = self.window.engine()

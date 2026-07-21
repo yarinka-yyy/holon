@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 from concurrent.futures import Executor, Future, ThreadPoolExecutor
-from datetime import datetime
+from datetime import UTC, datetime
 
 from PySide6.QtCore import Property, QObject, QTimer, Signal, Slot
 from PySide6.QtGui import QGuiApplication
 
-from .authority import ActionOutcome, CriticalActionCoordinator, PreparedMockAction
 from .history import (
+    HistoryStatus,
     HistoryStore,
     HistoryUnavailableError,
+    HistoryValidationError,
     WalletHistoryRecord,
     history_record_to_map,
 )
@@ -27,6 +28,15 @@ from .public_data import (
 )
 from .settings import SettingsStore
 from .storage import StorageError
+from .transfer import (
+    PreparedTransferAction,
+    TransferFlowCoordinator,
+    TransferPreflightCode,
+    TransferPreflightError,
+    TransferPreflightService,
+    normalize_recipient,
+    transfer_action_to_map,
+)
 from .vault import (
     MIN_PASSWORD_LENGTH,
     AuthenticationFailedError,
@@ -79,12 +89,12 @@ class WalletController(QObject):
     flowChanged = Signal()
     errorMessageChanged = Signal()
     backupWordsChanged = Signal()
-    mockActionChanged = Signal()
-    actionResultChanged = Signal()
+    transferChanged = Signal()
     publicDataChanged = Signal()
     selectedNetworkChanged = Signal()
     historyChanged = Signal()
     _publicDataReady = Signal(int, object)
+    _transferReady = Signal(int, object)
 
     def __init__(
         self,
@@ -92,6 +102,8 @@ class WalletController(QObject):
         public_data_service: PublicDataService | None = None,
         history_store: HistoryStore | None = None,
         public_data_executor: Executor | None = None,
+        transfer_preflight_service: TransferPreflightService | None = None,
+        transfer_executor: Executor | None = None,
     ) -> None:
         super().__init__()
         self._repository = repository or VaultRepository()
@@ -102,6 +114,13 @@ class WalletController(QObject):
             max_workers=2, thread_name_prefix="holon-public-read",
         )
         self._owns_public_data_executor = public_data_executor is None
+        self._transfer_preflight_service = (
+            transfer_preflight_service or TransferPreflightService()
+        )
+        self._transfer_executor = transfer_executor or ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="holon-transfer-preflight",
+        )
+        self._owns_transfer_executor = transfer_executor is None
         self._state = WalletShellState()
         self._current_screen = "welcome"
         self._flow = "none"
@@ -109,11 +128,11 @@ class WalletController(QObject):
         self._pending_record: ProfileRecord | None = None
         self._pending_vault: PreparedVault | None = None
         self._backup_words: tuple[str, ...] = ()
-        self._authority = CriticalActionCoordinator()
-        self._mock_action_digest = ""
-        self._action_result_title = ""
-        self._action_result_message = ""
-        self._action_result_success = False
+        self._transfer_flow = TransferFlowCoordinator()
+        self._transfer_generation = 0
+        self._transfer_preparing = False
+        self._transfer_error = ""
+        self._transfer_recipient = ""
         self._selected_network = "all"
         self._network_snapshots = {
             spec.network_id: NetworkSnapshot.unavailable(spec, "NOT_REFRESHED")
@@ -130,7 +149,11 @@ class WalletController(QObject):
         self._clipboard_timer.setSingleShot(True)
         self._clipboard_timer.setInterval(60_000)
         self._clipboard_timer.timeout.connect(self._clear_clipboard)
+        self._transfer_expiry_timer = QTimer(self)
+        self._transfer_expiry_timer.setSingleShot(True)
+        self._transfer_expiry_timer.timeout.connect(self._expire_transfer)
         self._publicDataReady.connect(self._accept_public_data)
+        self._transferReady.connect(self._accept_transfer_preflight)
         self._initialize()
 
     @Property("QVariantList", notify=profilesChanged)
@@ -195,24 +218,22 @@ class WalletController(QObject):
     def importPrivateOnly(self) -> bool:
         return self._flow == "add_private"
 
-    @Property("QVariantMap", notify=mockActionChanged)
-    def mockAction(self) -> dict[str, object]:
-        action = self._authority.current
-        if action is None:
-            return {}
-        return _mock_action_map(action)
+    @Property("QVariantMap", notify=transferChanged)
+    def transferAction(self) -> dict[str, object]:
+        action = self._transfer_flow.current
+        return transfer_action_to_map(action) if action is not None else {}
 
-    @Property(str, notify=actionResultChanged)
-    def actionResultTitle(self) -> str:
-        return self._action_result_title
+    @Property(bool, notify=transferChanged)
+    def transferPreparing(self) -> bool:
+        return self._transfer_preparing
 
-    @Property(str, notify=actionResultChanged)
-    def actionResultMessage(self) -> str:
-        return self._action_result_message
+    @Property(str, notify=transferChanged)
+    def transferError(self) -> str:
+        return self._transfer_error
 
-    @Property(bool, notify=actionResultChanged)
-    def actionResultSuccess(self) -> bool:
-        return self._action_result_success
+    @Property(str, notify=transferChanged)
+    def transferRecipient(self) -> str:
+        return self._transfer_recipient
 
     @Property(str, notify=selectedNetworkChanged)
     def selectedNetwork(self) -> str:
@@ -299,88 +320,68 @@ class WalletController(QObject):
             return
         self._begin_flow("add_private", "import")
 
-    @Slot(result=bool)
-    def beginMockAction(self) -> bool:
-        active = self._state.active_profile
-        if active is None:
-            return False
-        self._set_error("")
-        try:
-            action = self._authority.prepare(active)
-        except RuntimeError:
-            return False
-        self._mock_action_digest = action.digest
-        self.mockActionChanged.emit()
-        self._set_screen("mock_review")
-        return True
-
-    @Slot(result=bool)
-    def continueMockAction(self) -> bool:
-        action = self._authority.current
-        if action is None:
-            return False
-        outcome = self._authority.preflight(action.action_id, self._mock_action_digest)
-        if outcome is not None:
-            self._finish_mock_action(outcome)
-            return False
-        self._set_screen("mock_password")
-        return True
+    @Slot()
+    def showSend(self) -> None:
+        if not self._state.profiles:
+            return
+        self._cancel_transfer_request(clear_recipient=True)
+        self._set_screen("send")
 
     @Slot(str, result=bool)
-    def submitMockPassword(self, password: str) -> bool:
-        action = self._authority.current
-        if action is None:
+    def prepareTransfer(self, recipient: str) -> bool:
+        active = self._state.active_profile
+        if active is None or self._closed or self._transfer_preparing:
             return False
-        outcome = self._authority.preflight(action.action_id, self._mock_action_digest)
-        if outcome is not None:
-            self._finish_mock_action(outcome)
-            return False
+        self._set_transfer_error("")
         try:
-            profiles = self._repository.authenticate(password)
-        except AuthenticationFailedError:
-            outcome = self._authority.authentication_failed(action.action_id)
-            self._finish_mock_action(outcome)
+            normalized = normalize_recipient(recipient, active.address)
+            request = self._transfer_flow.begin(active.profile_id)
+        except TransferPreflightError as error:
+            self._set_transfer_error(_transfer_error_message(error.code))
             return False
-        except VaultUnavailableError:
-            self._authority.fail()
-            self._clear_mock_action()
-            self._set_screen("unavailable")
+        except RuntimeError:
             return False
-        except (StorageError, VaultValidationError):
-            self._finish_mock_action(self._authority.fail())
-            return False
-        authenticated = next(
-            (profile for profile in profiles if profile.profile_id == action.profile_id), None,
+        self._transfer_recipient = normalized
+        self._transfer_preparing = True
+        self._transfer_generation += 1
+        generation = self._transfer_generation
+        self.transferChanged.emit()
+        future = self._transfer_executor.submit(
+            self._transfer_preflight_service.prepare,
+            request,
+            active,
+            normalized,
         )
-        if (
-            authenticated is None
-            or authenticated.address != action.sender
-            or authenticated.label != action.account_label
-            or self._state.active_profile_id != action.profile_id
-        ):
-            self._finish_mock_action(self._authority.fail())
-            return False
-        outcome = self._authority.authorize_and_consume(
-            action.action_id, self._mock_action_digest, self._consume_simulation,
+        future.add_done_callback(
+            lambda completed, current=generation: self._transfer_finished(
+                current, completed,
+            ),
         )
-        self._finish_mock_action(outcome)
-        return outcome is ActionOutcome.AUTHORIZED
+        return True
+
+    @Slot(result=str)
+    def pasteTransferRecipient(self) -> str:
+        return QGuiApplication.clipboard().text()
 
     @Slot()
-    def rejectMockAction(self) -> None:
-        self._authority.reject()
-        self._clear_mock_action()
+    def cancelTransfer(self) -> None:
+        self._cancel_transfer_request(clear_recipient=True)
         self._set_screen("main")
 
     @Slot()
-    def cancelMockAction(self) -> None:
-        self._authority.cancel()
-        self._clear_mock_action()
-        self._set_screen("main")
+    def editTransfer(self) -> None:
+        action = self._transfer_flow.current
+        if action is None:
+            self._cancel_transfer_request(clear_recipient=False)
+            self._set_screen("send")
+            return
+        self._transfer_recipient = action.recipient
+        self._cancel_transfer_request(clear_recipient=False)
+        self._set_screen("send")
 
     @Slot()
-    def finishMockResult(self) -> None:
-        self._clear_action_result()
+    def finishTransfer(self) -> None:
+        self._cancel_transfer_request(clear_recipient=True)
         self._set_screen("main")
 
     @Slot(str, result=bool)
@@ -542,11 +543,15 @@ class WalletController(QObject):
             self._set_error("Active Account could not be saved")
             return False
         if self._state.select_profile(profile_id):
-            invalidated = self._authority.profile_changed(profile_id)
+            invalidated = self._transfer_flow.profile_changed(profile_id)
             self.activeProfileChanged.emit()
             self.historyChanged.emit()
             if invalidated:
-                self._clear_mock_action()
+                self._transfer_generation += 1
+                self._transfer_preparing = False
+                self._transfer_recipient = ""
+                self._set_transfer_error("")
+                self.transferChanged.emit()
                 self._set_screen("main")
             elif self._current_screen in {"main", "history"}:
                 self.refreshPublicData()
@@ -575,13 +580,15 @@ class WalletController(QObject):
             return
         self._closed = True
         self._public_data_generation += 1
-        self._authority.close()
-        self._clear_mock_action()
+        self._cancel_transfer_request(clear_recipient=True)
         self._clear_sensitive()
         if self._owns_public_data_executor:
             self._public_data_executor.shutdown(wait=False, cancel_futures=True)
+        if self._owns_transfer_executor:
+            self._transfer_executor.shutdown(wait=False, cancel_futures=True)
 
     def _initialize(self) -> None:
+        self._cancel_transfer_request(clear_recipient=True)
         self._clear_sensitive()
         self._set_error("")
         if not self._repository.exists:
@@ -630,8 +637,7 @@ class WalletController(QObject):
         self._set_screen(screen)
 
     def _begin_flow(self, flow: str, screen: str) -> None:
-        self._authority.close()
-        self._clear_mock_action()
+        self._cancel_transfer_request(clear_recipient=True)
         self._clear_sensitive()
         self._set_error("")
         self._flow = flow
@@ -660,6 +666,111 @@ class WalletController(QObject):
             self._history_records = records
             self._history_available = available
             self.historyChanged.emit()
+
+    def _transfer_finished(
+        self, generation: int, future: Future[PreparedTransferAction],
+    ) -> None:
+        if self._closed:
+            return
+        try:
+            result: object = future.result()
+        except TransferPreflightError as error:
+            result = error
+        except Exception:
+            result = TransferPreflightError(TransferPreflightCode.RPC_UNAVAILABLE)
+        self._transferReady.emit(generation, result)
+
+    @Slot(int, object)
+    def _accept_transfer_preflight(self, generation: int, result: object) -> None:
+        if generation != self._transfer_generation or self._closed:
+            return
+        self._transfer_preparing = False
+        active = self._state.active_profile
+        if isinstance(result, TransferPreflightError):
+            self._transfer_flow.close()
+            self._set_transfer_error(_transfer_error_message(result.code))
+            self.transferChanged.emit()
+            return
+        if not isinstance(result, PreparedTransferAction) or active is None:
+            self._transfer_flow.close()
+            self._set_transfer_error("Transaction preparation failed")
+            self.transferChanged.emit()
+            return
+        if (
+            active.profile_id != result.profile_id
+            or active.address != result.sender
+            or not self._transfer_flow.still_pending(
+                result.action_id, result.profile_id,
+            )
+            or not self._transfer_flow.accept(result)
+        ):
+            self._transfer_flow.close()
+            self._set_transfer_error("Transaction preparation expired")
+            self.transferChanged.emit()
+            return
+        try:
+            records = self._history_store.append(_history_record(result))
+        except (
+            HistoryUnavailableError,
+            HistoryValidationError,
+            StorageError,
+        ):
+            self._transfer_flow.close()
+            self._history_available = False
+            self.historyChanged.emit()
+            self._set_transfer_error("History unavailable · transaction was not prepared")
+            self.transferChanged.emit()
+            return
+        self._history_records = records
+        self._history_available = True
+        self.historyChanged.emit()
+        remaining_ms = max(
+            1,
+            int((result.expires_at - datetime.now(UTC)).total_seconds() * 1000) + 1,
+        )
+        self._transfer_expiry_timer.start(remaining_ms)
+        self._set_transfer_error("")
+        self.transferChanged.emit()
+        self._set_screen("transfer_review")
+
+    def _cancel_transfer_request(self, clear_recipient: bool) -> None:
+        changed = (
+            self._transfer_preparing
+            or self._transfer_flow.pending is not None
+            or self._transfer_flow.current is not None
+            or bool(self._transfer_error)
+            or (clear_recipient and bool(self._transfer_recipient))
+        )
+        self._transfer_generation += 1
+        self._transfer_expiry_timer.stop()
+        self._transfer_flow.close()
+        self._transfer_preparing = False
+        self._transfer_error = ""
+        if clear_recipient:
+            self._transfer_recipient = ""
+        if changed:
+            self.transferChanged.emit()
+
+    def _expire_transfer(self) -> None:
+        self._transfer_expiry_timer.stop()
+        if not self._transfer_flow.is_expired():
+            action = self._transfer_flow.current
+            if action is not None:
+                remaining_ms = max(
+                    1,
+                    int((action.expires_at - datetime.now(UTC)).total_seconds() * 1000) + 1,
+                )
+                self._transfer_expiry_timer.start(remaining_ms)
+            return
+        self._transfer_preparing = False
+        self._set_transfer_error("Transaction preparation expired")
+        self.transferChanged.emit()
+        self._set_screen("send")
+
+    def _set_transfer_error(self, message: str) -> None:
+        if message != self._transfer_error:
+            self._transfer_error = message
+            self.transferChanged.emit()
 
     def _selected_network_ids(self) -> tuple[str, ...]:
         if self._selected_network == "all":
@@ -716,55 +827,6 @@ class WalletController(QObject):
         )
         self.publicDataChanged.emit()
 
-    @staticmethod
-    def _consume_simulation(_action: PreparedMockAction) -> None:
-        return
-
-    def _finish_mock_action(self, outcome: ActionOutcome) -> None:
-        results = {
-            ActionOutcome.AUTHORIZED: (
-                "Simulation authorized",
-                "Authorization was used once. No transaction was signed or sent.",
-                True,
-            ),
-            ActionOutcome.AUTHENTICATION_FAILED: (
-                "Authentication failed",
-                "The action was closed. No transaction was signed or sent.",
-                False,
-            ),
-            ActionOutcome.EXPIRED: (
-                "Action expired",
-                "Prepare a new simulation. No transaction was signed or sent.",
-                False,
-            ),
-        }
-        title, message, success = results.get(
-            outcome,
-            (
-                "Authorization unavailable",
-                "The action was closed. No transaction was signed or sent.",
-                False,
-            ),
-        )
-        self._action_result_title = title
-        self._action_result_message = message
-        self._action_result_success = success
-        self.actionResultChanged.emit()
-        self._clear_mock_action()
-        self._set_screen("mock_result")
-
-    def _clear_mock_action(self) -> None:
-        if self._mock_action_digest or self._authority.current is not None:
-            self._mock_action_digest = ""
-            self.mockActionChanged.emit()
-
-    def _clear_action_result(self) -> None:
-        if self._action_result_title or self._action_result_message:
-            self._action_result_title = ""
-            self._action_result_message = ""
-            self._action_result_success = False
-            self.actionResultChanged.emit()
-
     def _clear_clipboard(self) -> None:
         self._clipboard_timer.stop()
         if self._copied_phrase is not None:
@@ -785,24 +847,46 @@ class WalletController(QObject):
             if screen == "main" and self._state.active_profile is not None:
                 self.refreshPublicData()
 
-
-def _mock_action_map(action: PreparedMockAction) -> dict[str, object]:
-    return {
-        "actionId": action.action_id,
-        "shortActionId": f"{action.action_id[:12]}…",
-        "accountLabel": action.account_label,
-        "sender": action.sender,
-        "shortSender": f"{action.sender[:8]}…{action.sender[-6:]}",
-        "network": action.network,
-        "chainId": action.chain_id,
-        "token": action.token,
-        "amount": action.amount_display,
-        "recipient": action.recipient,
-        "feeStatus": action.fee_status,
-        "expiresAt": action.expires_at.strftime("%H:%M:%S UTC"),
-    }
-
-
 def _display_utc(timestamp: str) -> str:
     parsed = datetime.fromisoformat(timestamp.removesuffix("Z") + "+00:00")
     return parsed.strftime("%H:%M UTC")
+
+
+def _history_record(action: PreparedTransferAction) -> WalletHistoryRecord:
+    created_at = _utc_timestamp(action.created_at)
+    return WalletHistoryRecord(
+        action_id=action.action_id,
+        profile_id=action.profile_id,
+        action_type="transfer",
+        network=action.network_id,
+        chain_id=action.chain_id,
+        sender=action.sender,
+        recipient=action.recipient,
+        contract=action.token_contract,
+        token=action.token,
+        amount_atomic=str(action.amount_atomic),
+        decimals=action.decimals,
+        transaction_hash=None,
+        status=HistoryStatus.PREPARED,
+        created_at=created_at,
+        updated_at=created_at,
+        simulated=action.simulation,
+    )
+
+
+def _utc_timestamp(value: datetime) -> str:
+    return value.astimezone(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _transfer_error_message(code: TransferPreflightCode) -> str:
+    return {
+        TransferPreflightCode.INVALID_RECIPIENT: "Enter a valid EVM recipient address",
+        TransferPreflightCode.RESERVED_RECIPIENT: "This recipient address is not allowed",
+        TransferPreflightCode.WRONG_CHAIN: "Base network verification failed",
+        TransferPreflightCode.TOKEN_METADATA_INVALID: "USDC contract verification failed",
+        TransferPreflightCode.INSUFFICIENT_USDC: "This Account does not have 1 USDC on Base",
+        TransferPreflightCode.INSUFFICIENT_ETH: "Not enough ETH on Base for the maximum fee",
+        TransferPreflightCode.GAS_ESTIMATE_FAILED: "Network fee estimation failed",
+        TransferPreflightCode.DATA_INVALID: "Base returned invalid transaction data",
+        TransferPreflightCode.RPC_UNAVAILABLE: "Base network data is unavailable",
+    }[code]

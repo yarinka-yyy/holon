@@ -83,7 +83,7 @@ Item {
         objectName: "sendAction"
         x: 24; y: 286; width: 146; height: 78
         label: "Send"; iconSource: "assets/send.svg"; controlEnabled: true
-        badge: "SIM"; onTriggered: walletController.beginMockAction()
+        onTriggered: walletController.showSend()
     }
     ActionCard {
         objectName: "transactionsAction"
