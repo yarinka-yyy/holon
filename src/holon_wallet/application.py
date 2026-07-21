@@ -7,19 +7,36 @@ from concurrent.futures import Executor
 from importlib.resources import as_file, files
 
 from PySide6.QtCore import QSize, Qt, QUrl
-from PySide6.QtGui import QColor, QGuiApplication, QIcon
+from PySide6.QtGui import QColor, QCloseEvent, QGuiApplication, QIcon
 from PySide6.QtQuick import QQuickView
 
+from .broadcast import (
+    BroadcastReceiptTracker,
+    MainnetTransferExecutor,
+)
 from .controller import WalletController
 from .history import HistoryStore
 from .public_data import PublicDataService
 from .single_instance import ProcessInstance
-from .signer import OfflineTransferSigner
 from .transfer import TransferPreflightService
 from .vault import VaultRepository
 
 WINDOW_TITLE = "Holon Wallet"
 MUTEX_NAME = r"Local\HolonWallet.M3.01"
+
+
+class WalletQuickView(QQuickView):
+    """Blocks ordinary close requests during the one-shot submission call."""
+
+    def __init__(self, controller: WalletController) -> None:
+        super().__init__()
+        self._controller = controller
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        if not self._controller.canCloseWallet:
+            event.ignore()
+            return
+        super().closeEvent(event)
 
 
 class WalletApplication:
@@ -34,7 +51,9 @@ class WalletApplication:
         public_data_executor: Executor | None = None,
         transfer_preflight_service: TransferPreflightService | None = None,
         transfer_executor: Executor | None = None,
-        offline_signer: OfflineTransferSigner | None = None,
+        mainnet_executor: MainnetTransferExecutor | None = None,
+        receipt_tracker: BroadcastReceiptTracker | None = None,
+        receipt_executor: Executor | None = None,
     ) -> None:
         self.qt_app = qt_app or QGuiApplication.instance()
         if self.qt_app is None:
@@ -52,9 +71,11 @@ class WalletApplication:
             public_data_executor,
             transfer_preflight_service,
             transfer_executor,
-            offline_signer,
+            mainnet_executor,
+            receipt_tracker,
+            receipt_executor,
         )
-        self.window = QQuickView()
+        self.window = WalletQuickView(self.controller)
         self.engine = self.window.engine()
         self.qml_warnings: list[str] = []
         self.engine.warnings.connect(self._record_warnings)

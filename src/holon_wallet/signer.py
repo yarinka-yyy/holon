@@ -157,7 +157,7 @@ class OfflineTransferSigner:
             if self._clock().astimezone(UTC) >= action.expires_at:
                 return self._failure(action, OfflineSigningCode.ACTION_EXPIRED)
 
-            transaction = _transaction_dict(action)
+            transaction = transaction_dict(action)
             signed = Account.sign_transaction(transaction, bytes(private_key))
             recovered = Web3.to_checksum_address(
                 Account.recover_transaction(signed.raw_transaction),
@@ -168,7 +168,7 @@ class OfflineTransferSigner:
             if (
                 permit.cancelled
                 or recovered.lower() != action.sender.lower()
-                or not _decoded_matches(decoded, action)
+                or not decoded_transaction_matches(decoded, action)
             ):
                 return self._failure(
                     action,
@@ -198,38 +198,11 @@ class OfflineTransferSigner:
     def _validate_action(
         self, action: PreparedTransferAction, expected_digest: str,
     ) -> OfflineSigningCode | None:
-        now = self._clock().astimezone(UTC)
-        if now >= action.expires_at:
-            return OfflineSigningCode.ACTION_EXPIRED
-        tx = action.transaction
-        expected_calldata = encode_usdc_transfer(action.recipient, USDC_AMOUNT_ATOMIC)
-        valid = (
-            action.schema_version == TRANSFER_SCHEMA_VERSION
-            and action.digest == expected_digest
-            and action.expires_at - action.created_at == ACTION_LIFETIME
-            and action.profile_id != ""
-            and Web3.is_checksum_address(action.sender)
-            and Web3.is_checksum_address(action.recipient)
-            and action.network_id == BASE_NETWORK_ID
-            and action.chain_id == BASE_CHAIN_ID
-            and action.token == USDC_SYMBOL
-            and action.token_contract == BASE_USDC
-            and action.amount_atomic == USDC_AMOUNT_ATOMIC
-            and action.decimals == USDC_DECIMALS
-            and tx.transaction_type == 2
-            and tx.chain_id == BASE_CHAIN_ID
-            and tx.to == BASE_USDC
-            and tx.value == 0
-            and tx.data == expected_calldata
-            and tx.nonce >= 0
-            and tx.gas > 0
-            and tx.max_priority_fee_per_gas >= 0
-            and tx.max_fee_per_gas > 0
-            and tx.max_priority_fee_per_gas <= tx.max_fee_per_gas
-            and action.max_total_fee_wei == tx.gas * tx.max_fee_per_gas
-            and action.block_number >= 0
+        return validate_signing_action(
+            action,
+            expected_digest,
+            self._clock().astimezone(UTC),
         )
-        return None if valid else OfflineSigningCode.ACTION_INVALID
 
     def _failure(
         self, action: PreparedTransferAction, code: OfflineSigningCode,
@@ -244,6 +217,45 @@ class OfflineTransferSigner:
             _timestamp(self._clock()),
             action.simulation,
         )
+
+
+def validate_signing_action(
+    action: PreparedTransferAction,
+    expected_digest: str,
+    now: datetime,
+) -> OfflineSigningCode | None:
+    now = now.astimezone(UTC)
+    if now >= action.expires_at:
+        return OfflineSigningCode.ACTION_EXPIRED
+    tx = action.transaction
+    expected_calldata = encode_usdc_transfer(action.recipient, USDC_AMOUNT_ATOMIC)
+    valid = (
+        action.schema_version == TRANSFER_SCHEMA_VERSION
+        and action.digest == expected_digest
+        and action.expires_at - action.created_at == ACTION_LIFETIME
+        and action.profile_id != ""
+        and Web3.is_checksum_address(action.sender)
+        and Web3.is_checksum_address(action.recipient)
+        and action.network_id == BASE_NETWORK_ID
+        and action.chain_id == BASE_CHAIN_ID
+        and action.token == USDC_SYMBOL
+        and action.token_contract == BASE_USDC
+        and action.amount_atomic == USDC_AMOUNT_ATOMIC
+        and action.decimals == USDC_DECIMALS
+        and tx.transaction_type == 2
+        and tx.chain_id == BASE_CHAIN_ID
+        and tx.to == BASE_USDC
+        and tx.value == 0
+        and tx.data == expected_calldata
+        and tx.nonce >= 0
+        and tx.gas > 0
+        and tx.max_priority_fee_per_gas >= 0
+        and tx.max_priority_fee_per_gas <= tx.max_fee_per_gas
+        and tx.max_fee_per_gas > 0
+        and action.max_total_fee_wei == tx.gas * tx.max_fee_per_gas
+        and action.block_number >= 0
+    )
+    return None if valid else OfflineSigningCode.ACTION_INVALID
 
 
 def offline_signing_result_to_map(
@@ -267,7 +279,7 @@ def offline_signing_result_to_map(
     }
 
 
-def _transaction_dict(action: PreparedTransferAction) -> dict[str, object]:
+def transaction_dict(action: PreparedTransferAction) -> dict[str, object]:
     tx = action.transaction
     return {
         "type": 2,
@@ -283,7 +295,7 @@ def _transaction_dict(action: PreparedTransferAction) -> dict[str, object]:
     }
 
 
-def _decoded_matches(
+def decoded_transaction_matches(
     decoded: Mapping[str, object], action: PreparedTransferAction,
 ) -> bool:
     tx = action.transaction

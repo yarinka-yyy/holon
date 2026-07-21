@@ -39,7 +39,8 @@ class TransferFlowState(str, Enum):
     LOCKED = "LOCKED"
     PREPARING = "PREPARING"
     PREPARED = "PREPARED"
-    SIGNING = "SIGNING"
+    EXECUTING = "EXECUTING"
+    SIGNING = "EXECUTING"
 
 
 class TransferPreflightCode(str, Enum):
@@ -59,7 +60,7 @@ class TransferFlowError(RuntimeError):
 
 
 class SigningPermit:
-    """Thread-safe cancellation signal for one offline signing attempt."""
+    """Thread-safe cancellation signal for one critical execution attempt."""
 
     def __init__(self) -> None:
         self._cancelled = Event()
@@ -519,17 +520,25 @@ class TransferFlowCoordinator:
     def begin_signing(
         self, action_id: str, digest: str, profile_id: str,
     ) -> SigningPermit | None:
+        return self.begin_execution(action_id, digest, profile_id)
+
+    def begin_execution(
+        self, action_id: str, digest: str, profile_id: str,
+    ) -> SigningPermit | None:
         if not self.validate(action_id, digest, profile_id):
             return None
         permit = SigningPermit()
         self._signing_permit = permit
-        self._state = TransferFlowState.SIGNING
+        self._state = TransferFlowState.EXECUTING
         return permit
 
     def complete_signing(self, action_id: str) -> bool:
+        return self.complete_execution(action_id)
+
+    def complete_execution(self, action_id: str) -> bool:
         action = self._current
         if (
-            self._state is not TransferFlowState.SIGNING
+            self._state is not TransferFlowState.EXECUTING
             or action is None
             or action.action_id != action_id
         ):

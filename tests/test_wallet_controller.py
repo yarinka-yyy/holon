@@ -4,9 +4,15 @@ import secrets
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
+from holon_wallet.broadcast import (
+    TRANSFER_EVENT_TOPIC,
+    MainnetBroadcastPolicy,
+    MainnetTransferCode,
+    MainnetTransferExecutor,
+)
 from holon_wallet.controller import WalletController
-from holon_wallet.history import HistoryStatus
-from holon_wallet.signer import OfflineSigningPolicy, OfflineTransferSigner
+from holon_wallet.history import HistoryStatus, HistoryStore
+from holon_wallet.signer import OfflineSigningPolicy
 from holon_wallet.storage import StorageError, WalletPaths
 from holon_wallet.transfer import TransferFlowState, TransferPreflightCode, TransferPreflightError
 from holon_wallet.vault import VaultRepository
@@ -16,6 +22,7 @@ from wallet_public_support import (
     ImmediateExecutor,
     StubPublicDataService,
     StubTransferPreflightService,
+    mainnet_services,
     public_snapshot,
 )
 
@@ -36,16 +43,21 @@ def raw_private_key() -> str:
 
 def controller(tmp_path) -> WalletController:
     repository = VaultRepository(WalletPaths(tmp_path))
-    return WalletController(
+    history = HistoryStore(repository.paths)
+    mainnet, tracker, rpc = mainnet_services(repository, history)
+    item = WalletController(
         repository,
         StubPublicDataService(),
+        history,
         public_data_executor=ImmediateExecutor(),
         transfer_preflight_service=StubTransferPreflightService(),
         transfer_executor=ImmediateExecutor(),
-        offline_signer=OfflineTransferSigner(
-            repository, OfflineSigningPolicy(10**18),
-        ),
+        mainnet_executor=mainnet,
+        receipt_tracker=tracker,
+        receipt_executor=ImmediateExecutor(),
     )
+    item._test_mainnet_rpc = rpc
+    return item
 
 
 def test_create_persists_only_after_backup_acknowledgement(tmp_path) -> None:
@@ -152,9 +164,7 @@ def test_unsigned_preflight_writes_public_history_without_authentication(
     assert item._transfer_flow.state is TransferFlowState.LOCKED
 
 
-def test_offline_signing_success_returns_public_proof_and_keeps_history_prepared(
-    tmp_path,
-) -> None:
+def test_mainnet_execution_submits_once_and_updates_public_history(tmp_path) -> None:
     item = controller(tmp_path)
     secret = password()
     item.beginCreate()
@@ -165,28 +175,64 @@ def test_offline_signing_success_returns_public_proof_and_keeps_history_prepared
     item.showSend()
     assert item.prepareTransfer("0x" + "44" * 20)
     action_id = item.transferAction["actionId"]
-    assert item.offlineSigningAvailable
-    assert item.offlineSigningLimit.endswith("ETH")
-    assert item.beginOfflineSigning()
+    assert item.mainnetExecutionAvailable
+    assert item.mainnetFeeLimit.endswith("ETH")
+    assert item.beginMainnetExecution()
     assert item.currentScreen == "sign_transfer"
-    assert item.submitOfflineSigning(secret)
+    assert not item.submitMainnetExecution(secret, False)
+    assert item.submitMainnetExecution(secret, True)
 
-    assert item.currentScreen == "sign_result"
-    assert item.offlineSigningResult["success"] is True
-    assert item.offlineSigningResult["actionId"] == action_id
-    assert item.offlineSigningResult["transactionHash"].startswith("0x")
-    assert item.offlineSigningResult["recoveredSigner"] == item.activeProfile["address"]
+    assert item.currentScreen == "transfer_result"
+    assert item.mainnetResult["code"] == "PENDING"
+    assert item.mainnetResult["actionId"] == action_id
+    assert item.mainnetResult["transactionHash"].startswith("0x")
+    assert item.mainnetResult["recoveredSigner"] == item.activeProfile["address"]
     assert item._transfer_flow.state is TransferFlowState.LOCKED
-    assert item.historyRecords[0]["status"] == HistoryStatus.PREPARED.value
-    assert item.historyRecords[0]["transactionHash"] == ""
+    assert item.historyRecords[0]["status"] == HistoryStatus.PENDING.value
+    assert item.historyRecords[0]["transactionHash"].startswith("0x")
+    assert item._test_mainnet_rpc.send_calls == 1
     assert item._repository.paths.vault.read_bytes() == vault_before
 
-    item.finishOfflineSigning()
+    item.finishMainnetExecution()
     assert item.currentScreen == "main"
-    assert item.offlineSigningResult == {}
+    assert item.mainnetResult == {}
 
 
-def test_wrong_password_cancel_and_late_signing_result_are_terminal(tmp_path) -> None:
+def test_manual_receipt_check_confirms_exact_public_transfer(tmp_path) -> None:
+    item = controller(tmp_path)
+    secret = password()
+    item.beginCreate()
+    assert item.submitPassword(secret, secret)
+    assert item.finishBackup()
+    item.showSend()
+    assert item.prepareTransfer("0x" + "44" * 20)
+    action = item._transfer_flow.current
+    assert action is not None
+    assert item.beginMainnetExecution()
+    assert item.submitMainnetExecution(secret, True)
+    transaction_hash = item.mainnetResult["transactionHash"]
+    sender_topic = "0x" + action.sender[2:].lower().rjust(64, "0")
+    recipient_topic = "0x" + action.recipient[2:].lower().rjust(64, "0")
+    item._test_mainnet_rpc.receipt = {
+        "transactionHash": transaction_hash,
+        "from": action.sender,
+        "to": action.token_contract,
+        "status": 1,
+        "logs": [
+            {
+                "address": action.token_contract,
+                "topics": [TRANSFER_EVENT_TOPIC, sender_topic, recipient_topic],
+                "data": "0x" + action.amount_atomic.to_bytes(32, "big").hex(),
+            },
+        ],
+    }
+
+    assert item.checkMainnetStatus(action.action_id)
+    assert item.mainnetResult["code"] == "CONFIRMED"
+    assert item.historyRecords[0]["status"] == "confirmed"
+
+
+def test_wrong_password_cancel_and_late_execution_result_are_terminal(tmp_path) -> None:
     item = controller(tmp_path)
     secret = password()
     item.beginCreate()
@@ -195,24 +241,27 @@ def test_wrong_password_cancel_and_late_signing_result_are_terminal(tmp_path) ->
     item.showSend()
     assert item.prepareTransfer("0x" + "44" * 20)
     first_id = item.transferAction["actionId"]
-    assert item.beginOfflineSigning()
-    assert item.submitOfflineSigning(password())
-    assert item.currentScreen == "sign_result"
-    assert item.offlineSigningResult["code"] == "AUTHENTICATION_FAILED"
+    assert item.beginMainnetExecution()
+    assert item.submitMainnetExecution(password(), True)
+    assert item.currentScreen == "transfer_result"
+    assert item.mainnetResult["code"] == "AUTHENTICATION_FAILED"
     assert item._transfer_flow.state is TransferFlowState.LOCKED
-    item.finishOfflineSigning()
+    item.finishMainnetExecution()
 
     deferred = DeferredExecutor()
     repository = item._repository
+    history = HistoryStore(repository.paths)
+    mainnet, tracker, _rpc = mainnet_services(repository, history)
     second = WalletController(
         repository,
         StubPublicDataService(),
+        history,
         public_data_executor=ImmediateExecutor(),
         transfer_preflight_service=StubTransferPreflightService(),
         transfer_executor=deferred,
-        offline_signer=OfflineTransferSigner(
-            repository, OfflineSigningPolicy(10**18),
-        ),
+        mainnet_executor=mainnet,
+        receipt_tracker=tracker,
+        receipt_executor=ImmediateExecutor(),
     )
     assert second.submitPassword(secret, "")
     second.showSend()
@@ -220,27 +269,30 @@ def test_wrong_password_cancel_and_late_signing_result_are_terminal(tmp_path) ->
     deferred.run_next()
     assert second.currentScreen == "transfer_review"
     assert second.transferAction["actionId"] != first_id
-    assert second.beginOfflineSigning()
-    assert second.submitOfflineSigning(secret)
-    assert second.offlineSigningInProgress
-    second.cancelOfflineSigning()
+    assert second.beginMainnetExecution()
+    assert second.submitMainnetExecution(secret, True)
+    assert second.mainnetExecutionInProgress
+    assert not second.canCloseWallet
+    second.shutdown()
     deferred.run_next()
-    assert second.currentScreen == "main"
-    assert second.offlineSigningResult == {}
+    assert second.mainnetResult == {}
     assert second._transfer_flow.state is TransferFlowState.LOCKED
 
 
 def test_missing_or_exceeded_local_fee_limit_disables_password_flow(tmp_path) -> None:
     repository = VaultRepository(WalletPaths(tmp_path))
+    history = HistoryStore(repository.paths)
+    mainnet, tracker, _rpc = mainnet_services(repository, history, enabled=False)
     item = WalletController(
         repository,
         StubPublicDataService(),
+        history,
         public_data_executor=ImmediateExecutor(),
         transfer_preflight_service=StubTransferPreflightService(),
         transfer_executor=ImmediateExecutor(),
-        offline_signer=OfflineTransferSigner(
-            repository, OfflineSigningPolicy(None),
-        ),
+        mainnet_executor=mainnet,
+        receipt_tracker=tracker,
+        receipt_executor=ImmediateExecutor(),
     )
     secret = password()
     item.beginCreate()
@@ -248,14 +300,14 @@ def test_missing_or_exceeded_local_fee_limit_disables_password_flow(tmp_path) ->
     assert item.finishBackup()
     item.showSend()
     assert item.prepareTransfer("0x" + "44" * 20)
-    assert not item.offlineSigningAvailable
-    assert item.offlineSigningLimit == "Not configured"
-    assert "HOLON_BASE_MAX_TOTAL_FEE_WEI" in item.offlineSigningGateMessage
-    assert not item.beginOfflineSigning()
+    assert not item.mainnetExecutionAvailable
+    assert item.mainnetFeeLimit == "Not configured"
+    assert "HOLON_BASE_BROADCAST_ENABLED" in item.mainnetGateMessage
+    assert not item.beginMainnetExecution()
     assert item.currentScreen == "transfer_review"
 
 
-def test_mutation_expiry_profile_change_and_signer_failure_are_terminal(tmp_path) -> None:
+def test_mutation_expiry_profile_change_and_executor_failure_are_terminal(tmp_path) -> None:
     item = controller(tmp_path)
     secret = password()
     item.beginCreate()
@@ -269,50 +321,57 @@ def test_mutation_expiry_profile_change_and_signer_failure_are_terminal(tmp_path
         action,
         transaction=replace(action.transaction, nonce=action.transaction.nonce + 1),
     )
-    assert item.beginOfflineSigning()
-    assert not item.submitOfflineSigning(secret)
-    assert item.currentScreen == "sign_result"
-    assert item.offlineSigningResult["code"] == "ACTION_INVALID"
-    item.finishOfflineSigning()
+    assert item.beginMainnetExecution()
+    assert not item.submitMainnetExecution(secret, True)
+    assert item.currentScreen == "transfer_result"
+    assert item.mainnetResult["code"] == "ACTION_INVALID"
+    item.finishMainnetExecution()
 
     item.showSend()
     assert item.prepareTransfer("0x" + "55" * 20)
-    assert item.beginOfflineSigning()
+    assert item.beginMainnetExecution()
     action = item._transfer_flow.current
     assert action is not None
     item._transfer_flow._current = replace(
         action, expires_at=datetime.now(UTC) - timedelta(seconds=1),
     )
     item._expire_transfer()
-    assert item.currentScreen == "sign_result"
-    assert item.offlineSigningResult["code"] == "ACTION_EXPIRED"
-    item.finishOfflineSigning()
+    assert item.currentScreen == "transfer_result"
+    assert item.mainnetResult["code"] == "ACTION_EXPIRED"
+    item.finishMainnetExecution()
 
     second = item._repository.new_record(import_private_key(raw_private_key()), "Account 2")
     profiles = item._repository.append(secret, second)
     item._replace_profiles(profiles, profiles[0].profile_id)
     item.showSend()
     assert item.prepareTransfer("0x" + "66" * 20)
-    assert item.beginOfflineSigning()
+    assert item.beginMainnetExecution()
     assert item.selectProfile(second.summary.profile_id)
     assert item.currentScreen == "main"
     assert item._transfer_flow.state is TransferFlowState.LOCKED
 
-    class FailingSigner:
-        policy = OfflineSigningPolicy(10**18)
+    class FailingExecutor:
+        policy = MainnetBroadcastPolicy(True, OfflineSigningPolicy(10**18))
 
         @staticmethod
-        def sign(*_args):
+        def execute(*_args):
             raise RuntimeError("secret-bearing-internal-canary")
 
     failing_repository = VaultRepository(WalletPaths(tmp_path / "failing"))
+    failing_history = HistoryStore(failing_repository.paths)
+    _mainnet, failing_tracker, _rpc = mainnet_services(
+        failing_repository, failing_history,
+    )
     failing = WalletController(
         failing_repository,
         StubPublicDataService(),
+        failing_history,
         public_data_executor=ImmediateExecutor(),
         transfer_preflight_service=StubTransferPreflightService(),
         transfer_executor=ImmediateExecutor(),
-        offline_signer=FailingSigner(),
+        mainnet_executor=FailingExecutor(),
+        receipt_tracker=failing_tracker,
+        receipt_executor=ImmediateExecutor(),
     )
     failure_password = password()
     failing.beginCreate()
@@ -320,11 +379,11 @@ def test_mutation_expiry_profile_change_and_signer_failure_are_terminal(tmp_path
     assert failing.finishBackup()
     failing.showSend()
     assert failing.prepareTransfer("0x" + "77" * 20)
-    assert failing.beginOfflineSigning()
-    assert failing.submitOfflineSigning(failure_password)
-    assert failing.currentScreen == "sign_result"
-    assert failing.offlineSigningResult["code"] == "SIGNING_FAILED"
-    assert "canary" not in repr(failing.offlineSigningResult).lower()
+    assert failing.beginMainnetExecution()
+    assert failing.submitMainnetExecution(failure_password, True)
+    assert failing.currentScreen == "transfer_result"
+    assert failing.mainnetResult["code"] == "SIGNING_FAILED"
+    assert "canary" not in repr(failing.mainnetResult).lower()
 
 
 def test_transfer_invalid_edit_and_profile_change_are_terminal(tmp_path) -> None:

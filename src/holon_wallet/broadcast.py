@@ -1,0 +1,791 @@
+"""Single-use Base USDC signing, broadcast, and public receipt tracking."""
+
+from __future__ import annotations
+
+import hmac
+import os
+import time
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from enum import Enum
+from threading import Event
+from typing import Protocol
+
+from eth_account import Account
+from eth_account.typed_transactions import TypedTransaction
+from hexbytes import HexBytes
+from requests import exceptions as request_errors
+from web3 import Web3
+from web3.exceptions import (
+    BadFunctionCallOutput,
+    ContractLogicError,
+    TransactionNotFound,
+    Web3Exception,
+)
+
+from .history import (
+    HistoryStatus,
+    HistoryStore,
+    HistoryUnavailableError,
+    HistoryValidationError,
+    WalletHistoryRecord,
+)
+from .public_data import BASE_USDC, USDC_ABI
+from .signer import (
+    OfflineSigningCode,
+    OfflineSigningPolicy,
+    decoded_transaction_matches,
+    transaction_dict,
+    validate_signing_action,
+)
+from .storage import StorageError
+from .transfer import (
+    BASE_CHAIN_ID,
+    USDC_AMOUNT_ATOMIC,
+    USDC_DECIMALS,
+    PreparedTransferAction,
+    SigningPermit,
+)
+from .vault import AuthenticationFailedError, VaultRepository, VaultUnavailableError
+from .wallet_crypto import InvalidSecretError, private_key_bytes, rederive
+
+BROADCAST_ENABLED_ENV = "HOLON_BASE_BROADCAST_ENABLED"
+BASE_RPC_ENV = "HOLON_BASE_RPC_URL"
+DEFAULT_BASE_RPC_URL = "https://base-rpc.publicnode.com"
+TRANSFER_EVENT_TOPIC = Web3.to_hex(
+    Web3.keccak(text="Transfer(address,address,uint256)"),
+)
+
+
+class MainnetTransferCode(str, Enum):
+    CONFIRMED = "CONFIRMED"
+    PENDING = "PENDING"
+    UNKNOWN = "UNKNOWN"
+    FAILED = "FAILED"
+    AUTHENTICATION_FAILED = "AUTHENTICATION_FAILED"
+    POLICY_UNAVAILABLE = "POLICY_UNAVAILABLE"
+    FEE_LIMIT_EXCEEDED = "FEE_LIMIT_EXCEEDED"
+    ACTION_INVALID = "ACTION_INVALID"
+    ACTION_EXPIRED = "ACTION_EXPIRED"
+    REVALIDATION_FAILED = "REVALIDATION_FAILED"
+    HISTORY_UNAVAILABLE = "HISTORY_UNAVAILABLE"
+    CANCELLED = "CANCELLED"
+    SIGNING_FAILED = "SIGNING_FAILED"
+
+
+@dataclass(frozen=True, slots=True)
+class MainnetBroadcastPolicy:
+    enabled: bool
+    fee_policy: OfflineSigningPolicy
+
+    @classmethod
+    def from_environment(
+        cls, environ: Mapping[str, str] | None = None,
+    ) -> MainnetBroadcastPolicy:
+        source = os.environ if environ is None else environ
+        return cls(
+            source.get(BROADCAST_ENABLED_ENV, "").strip() == "1",
+            OfflineSigningPolicy.from_environment(source),
+        )
+
+    @property
+    def available(self) -> bool:
+        return self.enabled and self.fee_policy.available
+
+    @property
+    def display(self) -> str:
+        return self.fee_policy.display
+
+    def evaluate(self, action: PreparedTransferAction) -> MainnetTransferCode | None:
+        if not self.available:
+            return MainnetTransferCode.POLICY_UNAVAILABLE
+        code = self.fee_policy.evaluate(action)
+        if code is OfflineSigningCode.FEE_LIMIT_EXCEEDED:
+            return MainnetTransferCode.FEE_LIMIT_EXCEEDED
+        if code is not None:
+            return MainnetTransferCode.POLICY_UNAVAILABLE
+        return None
+
+
+@dataclass(frozen=True, slots=True)
+class MainnetTransferResult:
+    code: MainnetTransferCode
+    action_id: str
+    digest: str
+    transaction_hash: str
+    recovered_signer: str
+    history_status: HistoryStatus | None
+    completed_at: str
+    broadcast_attempted: bool
+    history_available: bool
+    simulation: bool
+
+    @property
+    def successful_submission(self) -> bool:
+        return self.code in {MainnetTransferCode.PENDING, MainnetTransferCode.CONFIRMED}
+
+
+@dataclass(frozen=True, slots=True)
+class ReceiptTrackingResult:
+    action_id: str
+    transaction_hash: str
+    status: HistoryStatus
+    checked_at: str
+    history_available: bool
+
+
+class MainnetRpc(Protocol):
+    def chain_id(self) -> int: ...
+
+    def latest_block(self) -> tuple[int, int]: ...
+
+    def native_balance(self, address: str) -> int: ...
+
+    def token_decimals(self, contract: str) -> int: ...
+
+    def token_balance(self, contract: str, address: str) -> int: ...
+
+    def pending_nonce(self, address: str) -> int: ...
+
+    def max_priority_fee_per_gas(self) -> int: ...
+
+    def estimate_gas(self, transaction: Mapping[str, object]) -> int: ...
+
+    def send_raw_transaction(self, raw_transaction: bytes) -> str: ...
+
+    def transaction(self, transaction_hash: str) -> Mapping[str, object] | None: ...
+
+    def transaction_receipt(
+        self, transaction_hash: str,
+    ) -> Mapping[str, object] | None: ...
+
+
+class Web3MainnetRpc:
+    """Narrow Base RPC surface with no account or automatic retry APIs."""
+
+    def __init__(self, endpoint: str, timeout_seconds: float = 5.0) -> None:
+        provider = Web3.HTTPProvider(
+            endpoint,
+            request_kwargs={"timeout": timeout_seconds},
+            exception_retry_configuration=None,
+        )
+        self._web3 = Web3(provider)
+
+    def chain_id(self) -> int:
+        return int(self._call(lambda: self._web3.eth.chain_id))
+
+    def latest_block(self) -> tuple[int, int]:
+        block = self._call(lambda: self._web3.eth.get_block("latest"))
+        return int(block["number"]), int(block["baseFeePerGas"])
+
+    def native_balance(self, address: str) -> int:
+        return int(self._call(lambda: self._web3.eth.get_balance(address)))
+
+    def token_decimals(self, contract: str) -> int:
+        token = self._web3.eth.contract(address=contract, abi=USDC_ABI)
+        return int(self._call(lambda: token.functions.decimals().call()))
+
+    def token_balance(self, contract: str, address: str) -> int:
+        token = self._web3.eth.contract(address=contract, abi=USDC_ABI)
+        return int(self._call(lambda: token.functions.balanceOf(address).call()))
+
+    def pending_nonce(self, address: str) -> int:
+        return int(
+            self._call(lambda: self._web3.eth.get_transaction_count(address, "pending"))
+        )
+
+    def max_priority_fee_per_gas(self) -> int:
+        return int(self._call(lambda: self._web3.eth.max_priority_fee))
+
+    def estimate_gas(self, transaction: Mapping[str, object]) -> int:
+        return int(self._call(lambda: self._web3.eth.estimate_gas(dict(transaction))))
+
+    def send_raw_transaction(self, raw_transaction: bytes) -> str:
+        return Web3.to_hex(
+            self._call(lambda: self._web3.eth.send_raw_transaction(raw_transaction))
+        )
+
+    def transaction(self, transaction_hash: str) -> Mapping[str, object] | None:
+        try:
+            return self._call(lambda: self._web3.eth.get_transaction(transaction_hash))
+        except TransactionNotFound:
+            return None
+
+    def transaction_receipt(
+        self, transaction_hash: str,
+    ) -> Mapping[str, object] | None:
+        try:
+            return self._call(
+                lambda: self._web3.eth.get_transaction_receipt(transaction_hash)
+            )
+        except TransactionNotFound:
+            return None
+
+    @staticmethod
+    def _call(call: Callable[[], object]) -> object:
+        try:
+            return call()
+        except (TransactionNotFound, ContractLogicError, BadFunctionCallOutput):
+            raise
+        except (*_TRANSPORT_ERRORS, Web3Exception) as error:
+            raise RuntimeError("Base RPC request failed") from error
+
+
+MainnetRpcFactory = Callable[[str], MainnetRpc]
+
+
+class MainnetTransferExecutor:
+    """Revalidates, authenticates, signs, and attempts one Base broadcast."""
+
+    def __init__(
+        self,
+        repository: VaultRepository,
+        history_store: HistoryStore,
+        policy: MainnetBroadcastPolicy | None = None,
+        rpc_factory: MainnetRpcFactory | None = None,
+        environ: Mapping[str, str] | None = None,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self.repository = repository
+        self.history_store = history_store
+        self.policy = policy or MainnetBroadcastPolicy.from_environment(environ)
+        self._rpc_factory = rpc_factory or (lambda endpoint: Web3MainnetRpc(endpoint))
+        self._environ = os.environ if environ is None else environ
+        self._clock = clock or (lambda: datetime.now(UTC))
+
+    def execute(
+        self,
+        action: PreparedTransferAction,
+        expected_digest: str,
+        password: str,
+        permit: SigningPermit,
+    ) -> MainnetTransferResult:
+        now = self._clock().astimezone(UTC)
+        validation = validate_signing_action(action, expected_digest, now)
+        if validation is OfflineSigningCode.ACTION_EXPIRED:
+            return self._failure(action, MainnetTransferCode.ACTION_EXPIRED)
+        if validation is not None:
+            return self._failure(action, MainnetTransferCode.ACTION_INVALID)
+        policy_code = self.policy.evaluate(action)
+        if policy_code is not None:
+            return self._failure(action, policy_code)
+        if permit.cancelled:
+            return self._failure(action, MainnetTransferCode.CANCELLED)
+
+        endpoint = _endpoint(self._environ)
+        if endpoint is None:
+            return self._failure(action, MainnetTransferCode.POLICY_UNAVAILABLE)
+        try:
+            rpc = self._rpc_factory(endpoint)
+            if not _final_revalidation(rpc, action):
+                return self._failure(action, MainnetTransferCode.REVALIDATION_FAILED)
+        except Exception:
+            return self._failure(action, MainnetTransferCode.REVALIDATION_FAILED)
+        if permit.cancelled:
+            return self._failure(action, MainnetTransferCode.CANCELLED)
+        if self._clock().astimezone(UTC) >= action.expires_at:
+            return self._failure(action, MainnetTransferCode.ACTION_EXPIRED)
+
+        private_key: bytearray | None = None
+        signed = None
+        decoded = None
+        transaction_hash = ""
+        recovered = ""
+        history_status: HistoryStatus | None = None
+        broadcast_attempted = False
+        try:
+            record = self.repository._authenticate_profile(password, action.profile_id)
+            if permit.cancelled:
+                return self._failure(action, MainnetTransferCode.CANCELLED)
+            if self._clock().astimezone(UTC) >= action.expires_at:
+                return self._failure(action, MainnetTransferCode.ACTION_EXPIRED)
+            if (
+                record.summary.profile_id != action.profile_id
+                or not hmac.compare_digest(
+                    record.summary.address.lower(), action.sender.lower(),
+                )
+                or not hmac.compare_digest(
+                    rederive(record.secret).lower(), action.sender.lower(),
+                )
+            ):
+                return self._failure(action, MainnetTransferCode.ACTION_INVALID)
+
+            private_key = bytearray(private_key_bytes(record.secret))
+            signed = Account.sign_transaction(transaction_dict(action), bytes(private_key))
+            recovered = Web3.to_checksum_address(
+                Account.recover_transaction(signed.raw_transaction)
+            )
+            decoded = TypedTransaction.from_bytes(
+                HexBytes(signed.raw_transaction)
+            ).as_dict()
+            if (
+                permit.cancelled
+                or recovered.lower() != action.sender.lower()
+                or not decoded_transaction_matches(decoded, action)
+            ):
+                return self._failure(
+                    action,
+                    MainnetTransferCode.CANCELLED
+                    if permit.cancelled else MainnetTransferCode.SIGNING_FAILED,
+                )
+            transaction_hash = Web3.to_hex(signed.hash)
+            try:
+                self.history_store.update_status(
+                    action.action_id,
+                    HistoryStatus.UNKNOWN,
+                    _timestamp(self._clock()),
+                    transaction_hash,
+                )
+                history_status = HistoryStatus.UNKNOWN
+            except (HistoryUnavailableError, HistoryValidationError, StorageError):
+                return self._failure(action, MainnetTransferCode.HISTORY_UNAVAILABLE)
+            if permit.cancelled:
+                return self._result(
+                    action,
+                    MainnetTransferCode.CANCELLED,
+                    transaction_hash,
+                    recovered,
+                    history_status,
+                    False,
+                )
+
+            broadcast_attempted = True
+            try:
+                remote_hash = rpc.send_raw_transaction(signed.raw_transaction)
+            except Exception:
+                return self._result(
+                    action,
+                    MainnetTransferCode.UNKNOWN,
+                    transaction_hash,
+                    recovered,
+                    history_status,
+                    broadcast_attempted,
+                )
+            if not hmac.compare_digest(remote_hash.lower(), transaction_hash.lower()):
+                return self._result(
+                    action,
+                    MainnetTransferCode.UNKNOWN,
+                    transaction_hash,
+                    recovered,
+                    history_status,
+                    broadcast_attempted,
+                )
+            try:
+                self.history_store.update_status(
+                    action.action_id,
+                    HistoryStatus.PENDING,
+                    _timestamp(self._clock()),
+                    transaction_hash,
+                )
+                history_status = HistoryStatus.PENDING
+                code = MainnetTransferCode.PENDING
+                history_available = True
+            except (HistoryUnavailableError, HistoryValidationError, StorageError):
+                code = MainnetTransferCode.UNKNOWN
+                history_available = False
+            return self._result(
+                action,
+                code,
+                transaction_hash,
+                recovered,
+                history_status,
+                broadcast_attempted,
+                history_available,
+            )
+        except (AuthenticationFailedError, VaultUnavailableError, InvalidSecretError):
+            return self._failure(action, MainnetTransferCode.AUTHENTICATION_FAILED)
+        except Exception:
+            return self._result(
+                action,
+                MainnetTransferCode.SIGNING_FAILED,
+                transaction_hash,
+                recovered,
+                history_status,
+                broadcast_attempted,
+            )
+        finally:
+            if private_key is not None:
+                for index in range(len(private_key)):
+                    private_key[index] = 0
+            del private_key, signed, decoded, password
+
+    def _failure(
+        self, action: PreparedTransferAction, code: MainnetTransferCode,
+    ) -> MainnetTransferResult:
+        return self._result(action, code, "", "", None, False)
+
+    def _result(
+        self,
+        action: PreparedTransferAction,
+        code: MainnetTransferCode,
+        transaction_hash: str,
+        recovered_signer: str,
+        history_status: HistoryStatus | None,
+        broadcast_attempted: bool,
+        history_available: bool = True,
+    ) -> MainnetTransferResult:
+        return MainnetTransferResult(
+            code,
+            action.action_id,
+            action.digest,
+            transaction_hash,
+            recovered_signer,
+            history_status,
+            _timestamp(self._clock()),
+            broadcast_attempted,
+            history_available,
+            action.simulation,
+        )
+
+
+class BroadcastReceiptTracker:
+    """Checks public transaction state without signing or rebroadcasting."""
+
+    def __init__(
+        self,
+        history_store: HistoryStore,
+        rpc_factory: MainnetRpcFactory | None = None,
+        environ: Mapping[str, str] | None = None,
+        clock: Callable[[], datetime] | None = None,
+        monotonic: Callable[[], float] | None = None,
+        sleeper: Callable[[float], None] | None = None,
+        timeout_seconds: float = 120.0,
+        poll_interval_seconds: float = 3.0,
+    ) -> None:
+        self.history_store = history_store
+        self._rpc_factory = rpc_factory or (lambda endpoint: Web3MainnetRpc(endpoint))
+        self._environ = os.environ if environ is None else environ
+        self._clock = clock or (lambda: datetime.now(UTC))
+        self._monotonic = monotonic or time.monotonic
+        self._sleeper = sleeper or time.sleep
+        self.timeout_seconds = max(0.0, float(timeout_seconds))
+        self.poll_interval_seconds = max(0.01, float(poll_interval_seconds))
+
+    def track(
+        self, action_id: str, cancelled: Event | None = None,
+    ) -> ReceiptTrackingResult:
+        deadline = self._monotonic() + self.timeout_seconds
+        result = self.check_once(action_id)
+        while (
+            result.status not in {HistoryStatus.CONFIRMED, HistoryStatus.FAILED}
+            and self._monotonic() < deadline
+            and not (cancelled is not None and cancelled.is_set())
+        ):
+            self._sleeper(
+                min(self.poll_interval_seconds, max(0.0, deadline - self._monotonic()))
+            )
+            if cancelled is not None and cancelled.is_set():
+                break
+            result = self.check_once(action_id)
+        return result
+
+    def check_once(self, action_id: str) -> ReceiptTrackingResult:
+        records = self.history_store.load()
+        record = next((item for item in records if item.action_id == action_id), None)
+        if record is None or record.transaction_hash is None:
+            raise HistoryValidationError("History action cannot be checked")
+        if record.status in {HistoryStatus.CONFIRMED, HistoryStatus.FAILED}:
+            return self._result(record, record.status, True)
+        endpoint = _endpoint(self._environ)
+        if endpoint is None:
+            return self._result(record, record.status, True)
+        observed = record.status
+        try:
+            rpc = self._rpc_factory(endpoint)
+            receipt = rpc.transaction_receipt(record.transaction_hash)
+            if receipt is not None:
+                observed = _receipt_status(receipt, record)
+            elif record.status is HistoryStatus.PENDING:
+                observed = HistoryStatus.PENDING
+            else:
+                transaction = rpc.transaction(record.transaction_hash)
+                observed = (
+                    HistoryStatus.PENDING
+                    if transaction is not None
+                    and _public_transaction_matches(transaction, record)
+                    else HistoryStatus.UNKNOWN
+                )
+        except Exception:
+            observed = (
+                HistoryStatus.PENDING
+                if record.status is HistoryStatus.PENDING
+                else HistoryStatus.UNKNOWN
+            )
+        if observed is record.status:
+            return self._result(record, observed, True)
+        try:
+            updated = self.history_store.update_status(
+                record.action_id,
+                observed,
+                _timestamp(self._clock()),
+                record.transaction_hash,
+            )
+            current = next(item for item in updated if item.action_id == record.action_id)
+            return self._result(current, observed, True)
+        except (HistoryUnavailableError, HistoryValidationError, StorageError):
+            return self._result(record, observed, False)
+
+    def _result(
+        self,
+        record: WalletHistoryRecord,
+        status: HistoryStatus,
+        history_available: bool,
+    ) -> ReceiptTrackingResult:
+        return ReceiptTrackingResult(
+            record.action_id,
+            record.transaction_hash or "",
+            status,
+            _timestamp(self._clock()),
+            history_available,
+        )
+
+
+def mainnet_result_to_map(result: MainnetTransferResult) -> dict[str, object]:
+    title, message = _result_text(result.code)
+    status = result.history_status.value if result.history_status is not None else ""
+    return {
+        "code": result.code.value,
+        "title": title,
+        "message": message,
+        "actionId": result.action_id,
+        "digest": result.digest,
+        "shortDigest": _short_hash(result.digest),
+        "transactionHash": result.transaction_hash,
+        "shortTransactionHash": _short_hash(result.transaction_hash),
+        "recoveredSigner": result.recovered_signer,
+        "shortRecoveredSigner": _short_address(result.recovered_signer),
+        "historyStatus": status,
+        "statusLabel": status.capitalize(),
+        "completedAt": result.completed_at,
+        "broadcastAttempted": result.broadcast_attempted,
+        "historyAvailable": result.history_available,
+        "canCheckStatus": bool(result.transaction_hash)
+        and result.history_status in {HistoryStatus.PENDING, HistoryStatus.UNKNOWN},
+        "confirmed": result.code is MainnetTransferCode.CONFIRMED,
+        "submitted": result.successful_submission,
+        "simulation": result.simulation,
+    }
+
+
+def result_from_tracking(
+    previous: MainnetTransferResult,
+    tracking: ReceiptTrackingResult,
+) -> MainnetTransferResult:
+    code = {
+        HistoryStatus.CONFIRMED: MainnetTransferCode.CONFIRMED,
+        HistoryStatus.FAILED: MainnetTransferCode.FAILED,
+        HistoryStatus.PENDING: MainnetTransferCode.PENDING,
+        HistoryStatus.UNKNOWN: MainnetTransferCode.UNKNOWN,
+    }[tracking.status]
+    return MainnetTransferResult(
+        code,
+        previous.action_id,
+        previous.digest,
+        previous.transaction_hash,
+        previous.recovered_signer,
+        tracking.status,
+        tracking.checked_at,
+        previous.broadcast_attempted,
+        previous.history_available and tracking.history_available,
+        previous.simulation,
+    )
+
+
+def _final_revalidation(rpc: MainnetRpc, action: PreparedTransferAction) -> bool:
+    tx = action.transaction
+    if rpc.chain_id() != BASE_CHAIN_ID:
+        return False
+    block_number, base_fee = rpc.latest_block()
+    native_balance = int(rpc.native_balance(action.sender))
+    decimals = int(rpc.token_decimals(BASE_USDC))
+    token_balance = int(rpc.token_balance(BASE_USDC, action.sender))
+    nonce = int(rpc.pending_nonce(action.sender))
+    priority_fee = int(rpc.max_priority_fee_per_gas())
+    estimate = int(
+        rpc.estimate_gas(
+            {
+                "from": action.sender,
+                "to": tx.to,
+                "value": tx.value,
+                "data": tx.data,
+                "nonce": tx.nonce,
+                "type": tx.transaction_type,
+                "chainId": tx.chain_id,
+                "maxFeePerGas": tx.max_fee_per_gas,
+                "maxPriorityFeePerGas": tx.max_priority_fee_per_gas,
+            }
+        )
+    )
+    current_required_fee = 2 * int(base_fee) + priority_fee
+    return (
+        decimals == USDC_DECIMALS
+        and block_number >= action.block_number
+        and base_fee > 0
+        and token_balance >= USDC_AMOUNT_ATOMIC
+        and native_balance >= action.max_total_fee_wei
+        and nonce == tx.nonce
+        and 0 < estimate <= tx.gas
+        and 0 <= priority_fee <= tx.max_priority_fee_per_gas
+        and 0 < current_required_fee <= tx.max_fee_per_gas
+    )
+
+
+def _receipt_status(
+    receipt: Mapping[str, object], record: WalletHistoryRecord,
+) -> HistoryStatus:
+    try:
+        receipt_hash = _hex_value(receipt["transactionHash"])
+        if receipt_hash.lower() != (record.transaction_hash or "").lower():
+            return HistoryStatus.UNKNOWN
+        sender = str(receipt.get("from", record.sender))
+        target = str(receipt.get("to", record.contract or ""))
+        if sender.lower() != record.sender.lower():
+            return HistoryStatus.UNKNOWN
+        if record.contract is None or target.lower() != record.contract.lower():
+            return HistoryStatus.UNKNOWN
+        status = int(receipt["status"])
+        if status == 0:
+            return HistoryStatus.FAILED
+        if status != 1:
+            return HistoryStatus.UNKNOWN
+        logs = receipt["logs"]
+        if not isinstance(logs, (list, tuple)):
+            return HistoryStatus.UNKNOWN
+        return (
+            HistoryStatus.CONFIRMED
+            if any(_matching_transfer_log(item, record) for item in logs)
+            else HistoryStatus.UNKNOWN
+        )
+    except (KeyError, TypeError, ValueError):
+        return HistoryStatus.UNKNOWN
+
+
+def _matching_transfer_log(value: object, record: WalletHistoryRecord) -> bool:
+    if not isinstance(value, Mapping) or record.contract is None:
+        return False
+    try:
+        if str(value["address"]).lower() != record.contract.lower():
+            return False
+        topics = value["topics"]
+        if not isinstance(topics, (list, tuple)) or len(topics) < 3:
+            return False
+        rendered = [_hex_value(topic).lower() for topic in topics[:3]]
+        sender_topic = "0x" + record.sender[2:].lower().rjust(64, "0")
+        recipient_topic = "0x" + record.recipient[2:].lower().rjust(64, "0")
+        amount = int.from_bytes(HexBytes(value["data"]), "big")
+        return (
+            rendered[0] == TRANSFER_EVENT_TOPIC.lower()
+            and rendered[1] == sender_topic
+            and rendered[2] == recipient_topic
+            and amount == int(record.amount_atomic)
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def _public_transaction_matches(
+    value: Mapping[str, object], record: WalletHistoryRecord,
+) -> bool:
+    try:
+        transaction_hash = _hex_value(value["hash"])
+        sender = str(value["from"])
+        target = str(value["to"])
+        return (
+            transaction_hash.lower() == (record.transaction_hash or "").lower()
+            and sender.lower() == record.sender.lower()
+            and record.contract is not None
+            and target.lower() == record.contract.lower()
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def _endpoint(environ: Mapping[str, str]) -> str | None:
+    value = environ.get(BASE_RPC_ENV, DEFAULT_BASE_RPC_URL).strip()
+    return value or None
+
+
+def _hex_value(value: object) -> str:
+    if isinstance(value, str):
+        if value.startswith("0x"):
+            return value
+        raise ValueError("Hex value is invalid")
+    return Web3.to_hex(value)
+
+
+def _timestamp(value: datetime) -> str:
+    return value.astimezone(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _short_hash(value: str) -> str:
+    return f"{value[:14]}…{value[-10:]}" if value else ""
+
+
+def _short_address(value: str) -> str:
+    return f"{value[:8]}…{value[-6:]}" if value else ""
+
+
+def _result_text(code: MainnetTransferCode) -> tuple[str, str]:
+    return {
+        MainnetTransferCode.CONFIRMED: (
+            "Transfer confirmed",
+            "1 USDC was confirmed on Base Mainnet.",
+        ),
+        MainnetTransferCode.PENDING: (
+            "Transaction submitted",
+            "Broadcast occurred once. Confirmation is still pending.",
+        ),
+        MainnetTransferCode.UNKNOWN: (
+            "Submission status unknown",
+            "The transaction will not be sent again. Check its public hash safely.",
+        ),
+        MainnetTransferCode.FAILED: (
+            "Transaction reverted",
+            "A network fee may have been spent, but the USDC transfer reverted.",
+        ),
+        MainnetTransferCode.AUTHENTICATION_FAILED: (
+            "Authentication failed",
+            "Nothing was sent. Prepare a new action to try again.",
+        ),
+        MainnetTransferCode.POLICY_UNAVAILABLE: (
+            "Mainnet sending disabled",
+            "The local broadcast flag and maximum-fee limit are required.",
+        ),
+        MainnetTransferCode.FEE_LIMIT_EXCEEDED: (
+            "Fee limit exceeded",
+            "Nothing was sent. Prepare a new action when fees are lower.",
+        ),
+        MainnetTransferCode.ACTION_INVALID: (
+            "Transaction changed",
+            "Nothing was sent. The reviewed action is no longer valid.",
+        ),
+        MainnetTransferCode.ACTION_EXPIRED: (
+            "Preparation expired",
+            "Nothing was sent. Live transaction data must be prepared again.",
+        ),
+        MainnetTransferCode.REVALIDATION_FAILED: (
+            "Live revalidation failed",
+            "Nothing was sent. Network data changed or became unavailable.",
+        ),
+        MainnetTransferCode.HISTORY_UNAVAILABLE: (
+            "History unavailable",
+            "Nothing was sent because the public transaction hash could not be saved.",
+        ),
+        MainnetTransferCode.CANCELLED: (
+            "Transfer cancelled",
+            "No automatic retry or broadcast will occur.",
+        ),
+        MainnetTransferCode.SIGNING_FAILED: (
+            "Signing failed",
+            "Nothing was sent. Prepare a new action to try again.",
+        ),
+    }[code]
+
+
+_TRANSPORT_ERRORS = (
+    request_errors.ConnectionError,
+    request_errors.Timeout,
+    request_errors.HTTPError,
+    TimeoutError,
+)

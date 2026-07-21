@@ -1,6 +1,8 @@
 import QtQuick
 import "."
 
+// qmllint disable unqualified
+
 Item {
     id: chrome
     required property var window
@@ -24,6 +26,7 @@ Item {
         width: 30
         height: 26
         radius: 7
+        opacity: walletController.canCloseWallet ? 1 : 0.35
         color: minimizeMouse.containsMouse ? "#162039" : "transparent"
         Behavior on color { ColorAnimation { duration: Design.fastMotion } }
 
@@ -64,6 +67,7 @@ Item {
             id: closeMouse
             anchors.fill: parent
             hoverEnabled: true
+            enabled: walletController.canCloseWallet
             onClicked: chrome.window.close()
         }
     }

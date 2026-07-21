@@ -1,11 +1,16 @@
 import QtQuick
 import "."
 
+// qmllint disable unqualified
+
 Item {
     id: root
     property var record: ({})
     property bool showDateHeader: false
-    height: showDateHeader ? 112 : 86
+    property bool canCheck: record.simulated !== true
+        && (record.status === "pending" || record.status === "unknown")
+        && (record.transactionHash || "").length > 0
+    height: (showDateHeader ? 112 : 86) + (canCheck ? 18 : 0)
 
     Text {
         visible: root.showDateHeader
@@ -18,7 +23,7 @@ Item {
     Rectangle {
         id: card
         x: 0; y: root.showDateHeader ? 26 : 0
-        width: parent.width; height: 82; radius: 13
+        width: parent.width; height: root.canCheck ? 100 : 82; radius: 13
         color: Design.surface
         border.width: 1; border.color: Design.border
         gradient: Gradient {
@@ -76,6 +81,32 @@ Item {
                 color: root.record.status === "confirmed" ? "#55D98A"
                     : root.record.status === "failed" ? "#FF7D91" : Design.textMuted
                 font.family: Design.fontFamily; font.pixelSize: 10
+            }
+        }
+        Item {
+            objectName: "historyCheckStatusButton"
+            visible: root.canCheck
+            anchors.right: parent.right; anchors.rightMargin: 14; y: 68
+            width: 98; height: 23
+            enabled: !walletController.receiptChecking
+            function trigger() {
+                if (enabled)
+                    walletController.checkMainnetStatus(root.record.actionId || "")
+            }
+            Rectangle {
+                anchors.fill: parent; radius: 7
+                color: checkMouse.containsMouse ? Design.surfaceHover : Design.surfaceRaised
+                border.width: 1; border.color: Design.border
+            }
+            Text {
+                anchors.centerIn: parent
+                text: walletController.receiptChecking ? "Checking…" : "Check status"
+                color: Design.purpleBright; font.family: Design.fontFamily; font.pixelSize: 8
+            }
+            MouseArea {
+                id: checkMouse; anchors.fill: parent; hoverEnabled: true
+                enabled: parent.enabled; cursorShape: Qt.PointingHandCursor
+                onClicked: parent.trigger()
             }
         }
     }

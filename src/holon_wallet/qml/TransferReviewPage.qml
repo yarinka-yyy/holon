@@ -18,16 +18,16 @@ Item {
         font.family: Design.fontFamily; font.pixelSize: 25; font.weight: Font.Bold
     }
     Rectangle {
-        objectName: "unsignedTransferBanner"
+        objectName: "mainnetTransferBanner"
         x: 24; y: 98; width: 466; height: 38; radius: 10
         color: action.simulation ? "#28194F" : "#182849"
         border.width: 1; border.color: action.simulation ? Design.purple : Design.blue
         Text {
             anchors.centerIn: parent
             text: action.simulation
-                ? "SIMULATED TEST DATA  ·  OFFLINE SIGNING ONLY"
-                : "OFFLINE SIGNING  ·  NOTHING WILL BE SENT"
-            color: action.simulation ? Design.purpleBright : "#87A6FF"
+                ? "SIMULATED TEST DATA  ·  NO REAL FUNDS"
+                : "MAINNET TRANSFER  ·  REAL FUNDS"
+            color: action.simulation ? Design.purpleBright : "#FFB36D"
             font.family: Design.fontFamily
             font.pixelSize: 9; font.weight: Font.Bold; font.letterSpacing: 0.35
         }
@@ -66,8 +66,8 @@ Item {
             Text { objectName: "transferReviewAmount"; anchors.right: parent.right; anchors.rightMargin: 20; y: 151; text: action.amount || ""; color: Design.text; font.family: Design.fontFamily; font.pixelSize: 17; font.weight: Font.DemiBold }
             Text { x: 20; y: 194; text: "Maximum network fee"; color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 10 }
             Text { objectName: "transferReviewFee"; anchors.right: parent.right; anchors.rightMargin: 20; y: 192; text: action.maxFeeDisplay || ""; color: Design.purpleBright; font.family: Design.fontFamily; font.pixelSize: 11; font.weight: Font.DemiBold }
-            Text { x: 20; y: 224; text: "Local signing limit"; color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 10 }
-            Text { objectName: "offlineSigningLimit"; anchors.right: parent.right; anchors.rightMargin: 20; y: 222; text: walletController.offlineSigningLimit; color: walletController.offlineSigningAvailable ? "#76E1C0" : "#FF91AF"; font.family: Design.fontFamily; font.pixelSize: 10 }
+            Text { x: 20; y: 224; text: "Local mainnet limit"; color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 10 }
+            Text { objectName: "mainnetFeeLimit"; anchors.right: parent.right; anchors.rightMargin: 20; y: 222; text: walletController.mainnetFeeLimit; color: walletController.mainnetExecutionAvailable ? "#76E1C0" : "#FF91AF"; font.family: Design.fontFamily; font.pixelSize: 10 }
             Text { x: 20; y: 253; text: "Expires"; color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 10 }
             Text { objectName: "transferReviewExpiry"; anchors.right: parent.right; anchors.rightMargin: 20; y: 251; text: action.expiresAt || ""; color: Design.text; font.family: Design.fontFamily; font.pixelSize: 10 }
         }
@@ -135,18 +135,18 @@ Item {
         }
 
         FormButton {
-            objectName: "continueOfflineSigningButton"
+            objectName: "continueMainnetButton"
             x: 68; y: root.detailsOpen ? 612 : 356; width: 342; height: 55
-            label: "Continue to sign"
-            primary: walletController.offlineSigningAvailable
-            controlEnabled: walletController.offlineSigningAvailable
-            onTriggered: walletController.beginOfflineSigning()
+            label: "Continue to send"
+            primary: walletController.mainnetExecutionAvailable
+            controlEnabled: walletController.mainnetExecutionAvailable
+            onTriggered: walletController.beginMainnetExecution()
         }
         Text {
             x: 24; y: root.detailsOpen ? 674 : 417; width: 430
             horizontalAlignment: Text.AlignHCenter
-            text: walletController.offlineSigningGateMessage
-            color: walletController.offlineSigningAvailable ? Design.textFaint : "#FF91AF"
+            text: walletController.mainnetGateMessage
+            color: walletController.mainnetExecutionAvailable ? Design.textFaint : "#FF91AF"
             font.family: Design.fontFamily; font.pixelSize: 9
         }
         FormButton {

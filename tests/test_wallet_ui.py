@@ -13,7 +13,6 @@ from PySide6.QtGui import QGuiApplication
 
 from holon_wallet.application import WalletApplication
 from holon_wallet.history import HistoryStatus, HistoryStore, WalletHistoryRecord
-from holon_wallet.signer import OfflineSigningPolicy, OfflineTransferSigner
 from holon_wallet.storage import WalletPaths, atomic_write_json
 from holon_wallet.transfer import TransferPreflightCode, TransferPreflightError
 from holon_wallet.vault import VaultRepository
@@ -23,6 +22,7 @@ from wallet_public_support import (
     ImmediateExecutor,
     StubPublicDataService,
     StubTransferPreflightService,
+    mainnet_services,
 )
 
 
@@ -64,20 +64,28 @@ def make_app(
     public_data_service: StubPublicDataService | None = None,
     transfer_preflight_service: StubTransferPreflightService | None = None,
     transfer_executor=None,
-    offline_signer: OfflineTransferSigner | None = None,
+    mainnet_enabled: bool = True,
 ) -> WalletApplication:
-    return WalletApplication(
-        qt_app,
-        repository,
-        public_data_service or StubPublicDataService(),
-        HistoryStore(repository.paths),
-        ImmediateExecutor(),
-        transfer_preflight_service or StubTransferPreflightService(),
-        transfer_executor or ImmediateExecutor(),
-        offline_signer or OfflineTransferSigner(
-            repository, OfflineSigningPolicy(10**18),
-        ),
+    history = HistoryStore(repository.paths)
+    mainnet, tracker, rpc = mainnet_services(
+        repository, history, enabled=mainnet_enabled,
     )
+    app = WalletApplication(
+        qt_app=qt_app,
+        repository=repository,
+        public_data_service=public_data_service or StubPublicDataService(),
+        history_store=history,
+        public_data_executor=ImmediateExecutor(),
+        transfer_preflight_service=(
+            transfer_preflight_service or StubTransferPreflightService()
+        ),
+        transfer_executor=transfer_executor or ImmediateExecutor(),
+        mainnet_executor=mainnet,
+        receipt_tracker=tracker,
+        receipt_executor=ImmediateExecutor(),
+    )
+    app._test_mainnet_rpc = rpc
+    return app
 
 
 def test_window_geometry_chrome_and_qml_load_cleanly(wallet_app) -> None:
@@ -193,7 +201,7 @@ def test_locked_restart_has_masked_password_and_generic_failure(tmp_path, qt_app
         app.close()
 
 
-def test_send_review_offline_sign_result_and_history(tmp_path, qt_app) -> None:
+def test_send_review_mainnet_confirmation_result_and_history(tmp_path, qt_app) -> None:
     repository = VaultRepository(WalletPaths(tmp_path))
     password = fresh_password()
     repository.create_new(
@@ -223,7 +231,7 @@ def test_send_review_offline_sign_result_and_history(tmp_path, qt_app) -> None:
         assert child(app, "transferReviewRecipient").property("text").endswith("444444")
         assert child(app, "transferReviewFee").property("text").endswith("ETH")
         assert child(app, "transferReviewExpiry").property("text").endswith("UTC")
-        assert child(app, "offlineSigningLimit").property("text").endswith("ETH")
+        assert child(app, "mainnetFeeLimit").property("text").endswith("ETH")
         invoke(child(app, "transferDetailsButton"), "trigger")
         assert child(app, "transferReviewScroll").property("contentHeight") == 760
 
@@ -233,44 +241,57 @@ def test_send_review_offline_sign_result_and_history(tmp_path, qt_app) -> None:
         assert child(app, "transferRecipientInput").property("text") == recipient
         invoke(child(app, "prepareTransferButton"), "trigger")
         qt_app.processEvents()
-        assert child(app, "continueOfflineSigningButton").property("enabled")
-        invoke(child(app, "continueOfflineSigningButton"), "trigger")
+        assert child(app, "continueMainnetButton").property("enabled")
+        invoke(child(app, "continueMainnetButton"), "trigger")
         assert app.controller.currentScreen == "sign_transfer"
-        assert not child(app, "offlineSigningPasswordField").property("revealed")
-        assert not child(app, "offlineSignButton").property("enabled")
-        set_text(app, "offlineSigningPasswordInput", password)
+        assert not child(app, "mainnetPasswordField").property("revealed")
+        assert not child(app, "mainnetSendButton").property("enabled")
+        set_text(app, "mainnetPasswordInput", password)
         qt_app.processEvents()
-        assert child(app, "offlineSignButton").property("enabled")
-        invoke(child(app, "offlineSignButton"), "trigger")
+        assert not child(app, "mainnetSendButton").property("enabled")
+        invoke(child(app, "mainnetConfirmationCheckbox"), "trigger")
         qt_app.processEvents()
-        assert child(app, "offlineSigningPasswordInput").property("text") == ""
-        assert app.controller.currentScreen == "sign_result"
-        assert child(app, "offlineResultTitle").property("text") == (
-            "Transaction signed locally"
+        assert child(app, "mainnetSendButton").property("enabled")
+        invoke(child(app, "mainnetSendButton"), "trigger")
+        qt_app.processEvents()
+        assert child(app, "mainnetPasswordInput").property("text") == ""
+        assert app.controller.currentScreen == "transfer_result"
+        assert child(app, "mainnetResultTitle").property("text") == (
+            "Transaction submitted"
         )
-        assert child(app, "offlineRecoveredSigner").property("text") == (
+        assert child(app, "mainnetRecoveredSigner").property("text") == (
             app.controller.activeProfile["address"]
         )
-        assert child(app, "offlineTransactionHash").property("text").startswith("0x")
-        invoke(child(app, "offlineResultDoneButton"), "trigger")
+        assert child(app, "mainnetTransactionHash").property("text").startswith("0x")
+        assert child(app, "mainnetPublicStatus").property("text") == "Pending"
+        assert app.controller.mainnetResult["canCheckStatus"]
+        invoke(child(app, "checkMainnetStatusButton"), "trigger")
+        qt_app.processEvents()
+        assert child(app, "mainnetPublicStatus").property("text") == "Pending"
+        invoke(child(app, "mainnetResultDoneButton"), "trigger")
         assert app.controller.currentScreen == "main"
         assert len(app.controller.historyRecords) == 2
         assert all(not item["simulated"] for item in app.controller.historyRecords)
-        assert all(item["status"] == "prepared" for item in app.controller.historyRecords)
-        assert all(item["transactionHash"] == "" for item in app.controller.historyRecords)
+        assert {item["status"] for item in app.controller.historyRecords} == {
+            "prepared", "pending",
+        }
+        assert sum(bool(item["transactionHash"]) for item in app.controller.historyRecords) == 1
+        assert app._test_mainnet_rpc.send_calls == 1
+        invoke(child(app, "transactionsAction"), "trigger")
+        qt_app.processEvents()
+        assert child(app, "historyList").property("count") == 2
         QGuiApplication.clipboard().clear()
     finally:
         app.close()
 
 
-def test_offline_signing_fee_gate_wrong_password_and_cancel(tmp_path, qt_app) -> None:
+def test_mainnet_runtime_gate_wrong_password_and_cancel(tmp_path, qt_app) -> None:
     repository = VaultRepository(WalletPaths(tmp_path))
     password = fresh_password()
     repository.create_new(
         password, repository.new_record(generate_mnemonic(), "Main Account"),
     )
-    unavailable = OfflineTransferSigner(repository, OfflineSigningPolicy(None))
-    app = make_app(qt_app, repository, offline_signer=unavailable)
+    app = make_app(qt_app, repository, mainnet_enabled=False)
     try:
         set_text(app, "passwordTextInput", password)
         invoke(child(app, "passwordSubmitButton"), "trigger")
@@ -279,8 +300,8 @@ def test_offline_signing_fee_gate_wrong_password_and_cancel(tmp_path, qt_app) ->
         invoke(child(app, "prepareTransferButton"), "trigger")
         qt_app.processEvents()
         assert app.controller.currentScreen == "transfer_review"
-        assert not child(app, "continueOfflineSigningButton").property("enabled")
-        assert child(app, "offlineSigningLimit").property("text") == "Not configured"
+        assert not child(app, "continueMainnetButton").property("enabled")
+        assert child(app, "mainnetFeeLimit").property("text") == "Not configured"
     finally:
         app.close()
 
@@ -291,26 +312,65 @@ def test_offline_signing_fee_gate_wrong_password_and_cancel(tmp_path, qt_app) ->
         invoke(child(active, "sendAction"), "trigger")
         set_text(active, "transferRecipientInput", "0x" + "55" * 20)
         invoke(child(active, "prepareTransferButton"), "trigger")
-        invoke(child(active, "continueOfflineSigningButton"), "trigger")
-        invoke(child(active, "offlineSignCancelButton"), "trigger")
+        invoke(child(active, "continueMainnetButton"), "trigger")
+        invoke(child(active, "mainnetCancelButton"), "trigger")
         assert active.controller.currentScreen == "main"
 
         invoke(child(active, "sendAction"), "trigger")
         set_text(active, "transferRecipientInput", "0x" + "66" * 20)
         invoke(child(active, "prepareTransferButton"), "trigger")
-        invoke(child(active, "continueOfflineSigningButton"), "trigger")
-        set_text(active, "offlineSigningPasswordInput", fresh_password())
-        invoke(child(active, "offlineSignButton"), "trigger")
+        invoke(child(active, "continueMainnetButton"), "trigger")
+        set_text(active, "mainnetPasswordInput", fresh_password())
+        invoke(child(active, "mainnetConfirmationCheckbox"), "trigger")
+        invoke(child(active, "mainnetSendButton"), "trigger")
         qt_app.processEvents()
-        assert active.controller.currentScreen == "sign_result"
-        assert child(active, "offlineResultTitle").property("text") == (
+        assert active.controller.currentScreen == "transfer_result"
+        assert child(active, "mainnetResultTitle").property("text") == (
             "Authentication failed"
         )
-        assert not child(active, "offlineProofCard").property("visible")
-        invoke(child(active, "offlineResultDoneButton"), "trigger")
+        assert not child(active, "mainnetProofCard").property("visible")
+        invoke(child(active, "mainnetResultDoneButton"), "trigger")
         assert active.controller.currentScreen == "main"
     finally:
         active.close()
+
+
+def test_ordinary_window_close_is_blocked_only_during_submission(
+    tmp_path, qt_app,
+) -> None:
+    repository = VaultRepository(WalletPaths(tmp_path))
+    password = fresh_password()
+    repository.create_new(
+        password, repository.new_record(generate_mnemonic(), "Main Account"),
+    )
+    deferred = DeferredExecutor()
+    app = make_app(qt_app, repository, transfer_executor=deferred)
+    try:
+        set_text(app, "passwordTextInput", password)
+        invoke(child(app, "passwordSubmitButton"), "trigger")
+        invoke(child(app, "sendAction"), "trigger")
+        set_text(app, "transferRecipientInput", "0x" + "44" * 20)
+        invoke(child(app, "prepareTransferButton"), "trigger")
+        deferred.run_next()
+        invoke(child(app, "continueMainnetButton"), "trigger")
+        set_text(app, "mainnetPasswordInput", password)
+        invoke(child(app, "mainnetConfirmationCheckbox"), "trigger")
+        invoke(child(app, "mainnetSendButton"), "trigger")
+        assert app.controller.mainnetExecutionInProgress
+
+        app.window.close()
+        qt_app.processEvents()
+        assert app.window.isVisible()
+
+        deferred.run_next()
+        qt_app.processEvents()
+        assert app.controller.currentScreen == "transfer_result"
+        assert app.controller.canCloseWallet
+        app.window.close()
+        qt_app.processEvents()
+        assert not app.window.isVisible()
+    finally:
+        app.close()
 
 
 def test_send_failure_remains_on_form_and_writes_no_history(tmp_path, qt_app) -> None:

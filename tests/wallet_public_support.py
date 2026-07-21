@@ -2,6 +2,15 @@ from __future__ import annotations
 
 from concurrent.futures import Executor, Future
 
+from web3 import Web3
+
+from holon_wallet.broadcast import (
+    BASE_RPC_ENV,
+    BroadcastReceiptTracker,
+    MainnetBroadcastPolicy,
+    MainnetTransferExecutor,
+)
+from holon_wallet.history import HistoryStore
 from holon_wallet.public_data import (
     AssetBalance,
     NetworkSnapshot,
@@ -9,6 +18,7 @@ from holon_wallet.public_data import (
     PublicDataStatus,
 )
 from holon_wallet.transfer import BASE_CHAIN_ID, TransferPreflightService
+from holon_wallet.signer import OfflineSigningPolicy
 
 
 class ImmediateExecutor(Executor):
@@ -98,6 +108,47 @@ class StubTransferRpc:
     def estimate_gas(self, transaction) -> int:
         self.estimated_transaction = dict(transaction)
         return 55_000
+
+
+class StubMainnetRpc(StubTransferRpc):
+    def __init__(self) -> None:
+        super().__init__()
+        self.send_calls = 0
+        self.receipt = None
+        self.public_transaction = None
+
+    def send_raw_transaction(self, raw_transaction) -> str:
+        self.send_calls += 1
+        return Web3.to_hex(Web3.keccak(raw_transaction))
+
+    def transaction(self, _transaction_hash):
+        return self.public_transaction
+
+    def transaction_receipt(self, _transaction_hash):
+        return self.receipt
+
+
+def mainnet_services(repository, history_store: HistoryStore, enabled: bool = True):
+    rpc = StubMainnetRpc()
+    policy = MainnetBroadcastPolicy(
+        enabled,
+        OfflineSigningPolicy(10**18 if enabled else None),
+    )
+    environ = {BASE_RPC_ENV: "fixture://base"}
+    executor = MainnetTransferExecutor(
+        repository,
+        history_store,
+        policy,
+        lambda _endpoint: rpc,
+        environ,
+    )
+    tracker = BroadcastReceiptTracker(
+        history_store,
+        lambda _endpoint: rpc,
+        environ,
+        timeout_seconds=0,
+    )
+    return executor, tracker, rpc
 
 
 class StubTransferPreflightService:

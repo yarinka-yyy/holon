@@ -192,7 +192,7 @@ Item {
     Text {
         x: 48; y: 600; width: 418; height: 42
         horizontalAlignment: Text.AlignHCenter; wrapMode: Text.WordWrap
-        text: "Prepare sends public sender and recipient data to PublicNode once. No password, signing, or broadcast."
+        text: "PublicNode receives sender and recipient during preparation and final revalidation. One signed broadcast occurs only after local confirmation."
         color: Design.textFaint; font.family: Design.fontFamily; font.pixelSize: 9
     }
 
