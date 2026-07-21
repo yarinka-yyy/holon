@@ -7,6 +7,7 @@ from holon_wallet.authority import WalletAuthorityState
 from holon_wallet.storage import WalletPaths
 from holon_wallet.vault import VaultRepository
 from holon_wallet.wallet_crypto import generate_mnemonic, import_private_key
+from wallet_public_support import ImmediateExecutor, StubPublicDataService, public_snapshot
 
 
 def password() -> str:
@@ -24,7 +25,11 @@ def raw_private_key() -> str:
 
 
 def controller(tmp_path) -> WalletController:
-    return WalletController(VaultRepository(WalletPaths(tmp_path)))
+    return WalletController(
+        VaultRepository(WalletPaths(tmp_path)),
+        StubPublicDataService(),
+        public_data_executor=ImmediateExecutor(),
+    )
 
 
 def test_create_persists_only_after_backup_acknowledgement(tmp_path) -> None:
@@ -152,6 +157,74 @@ def test_mock_action_wrong_password_cancel_and_profile_change_are_terminal(tmp_p
     item.cancelMockAction()
     assert item.currentScreen == "main"
     assert item._authority.state is WalletAuthorityState.LOCKED
+
+
+def test_public_refresh_filter_and_stale_result_are_safe(tmp_path) -> None:
+    repository = VaultRepository(WalletPaths(tmp_path))
+    service = StubPublicDataService()
+    item = WalletController(
+        repository, service, public_data_executor=ImmediateExecutor(),
+    )
+    secret = password()
+    item.beginCreate()
+    assert item.submitPassword(secret, secret)
+    assert item.finishBackup()
+
+    assert service.calls[-1][2] == ("ethereum", "base")
+    assert item.publicDataBanner == "LOCAL WALLET  ·  LIVE PUBLIC DATA"
+    assert item.ethereumData["ethValue"] == "1 ETH"
+    assert item.baseData["usdcValue"] == "2.5 USDC"
+    assert item.selectNetwork("base")
+    assert service.calls[-1][2] == ("base",)
+    assert item.selectedNetwork == "base"
+    assert not item.selectNetwork("arbitrum")
+
+    current = dict(item.baseData)
+    stale = public_snapshot("base", eth=99 * 10**18)
+    item._accept_public_data(
+        item._public_data_generation - 1,
+        type("Snapshot", (), {
+            "profile_id": item.activeProfileId,
+            "address": item.activeProfile["address"],
+            "networks": (stale,),
+        })(),
+    )
+    assert item.baseData == current
+
+
+def test_corrupt_history_degrades_only_history_screen(tmp_path) -> None:
+    item = controller(tmp_path)
+    secret = password()
+    item.beginCreate()
+    assert item.submitPassword(secret, secret)
+    assert item.finishBackup()
+    item._history_store.path.write_text("not-json", encoding="utf-8")
+
+    item.showHistory()
+
+    assert item.currentScreen == "history"
+    assert not item.historyAvailable
+    assert item.historyStateLabel == "History unavailable"
+    assert item.profiles
+
+
+def test_public_refresh_never_authenticates_or_decrypts_vault(tmp_path, monkeypatch) -> None:
+    repository = VaultRepository(WalletPaths(tmp_path))
+    service = StubPublicDataService()
+    item = WalletController(
+        repository, service, public_data_executor=ImmediateExecutor(),
+    )
+    secret = password()
+    item.beginCreate()
+    assert item.submitPassword(secret, secret)
+    assert item.finishBackup()
+
+    def forbidden_authentication(_password: str):
+        raise AssertionError("Public refresh touched vault authentication")
+
+    monkeypatch.setattr(repository, "authenticate", forbidden_authentication)
+    assert item.refreshPublicData()
+    assert service.calls[-1][0] == item.activeProfileId
 
     second = item._repository.new_record(import_private_key(raw_private_key()), "Account 2")
     profiles = item._repository.append(secret, second)

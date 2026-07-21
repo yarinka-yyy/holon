@@ -86,6 +86,12 @@ Item {
             visible: opacity > 0.01; opacity: enabled ? 1 : 0
             Behavior on opacity { NumberAnimation { duration: Design.normalMotion } }
         }
+        HistoryPage {
+            objectName: "historyPage"; anchors.fill: parent
+            enabled: walletController.currentScreen === "history"
+            visible: opacity > 0.01; opacity: enabled ? 1 : 0
+            Behavior on opacity { NumberAnimation { duration: Design.normalMotion } }
+        }
         UnavailablePage {
             objectName: "unavailablePage"; anchors.fill: parent
             enabled: walletController.currentScreen === "unavailable"

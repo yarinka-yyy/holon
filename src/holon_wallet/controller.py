@@ -2,11 +2,29 @@
 
 from __future__ import annotations
 
+from concurrent.futures import Executor, Future, ThreadPoolExecutor
+from datetime import datetime
+
 from PySide6.QtCore import Property, QObject, QTimer, Signal, Slot
 from PySide6.QtGui import QGuiApplication
 
 from .authority import ActionOutcome, CriticalActionCoordinator, PreparedMockAction
+from .history import (
+    HistoryStore,
+    HistoryUnavailableError,
+    WalletHistoryRecord,
+    history_record_to_map,
+)
 from .model import ProfileSummary, WalletShellState
+from .public_data import (
+    NETWORKS,
+    NETWORK_BY_ID,
+    NetworkSnapshot,
+    PortfolioSnapshot,
+    PublicDataService,
+    PublicDataStatus,
+    snapshot_to_map,
+)
 from .settings import SettingsStore
 from .storage import StorageError
 from .vault import (
@@ -63,11 +81,27 @@ class WalletController(QObject):
     backupWordsChanged = Signal()
     mockActionChanged = Signal()
     actionResultChanged = Signal()
+    publicDataChanged = Signal()
+    selectedNetworkChanged = Signal()
+    historyChanged = Signal()
+    _publicDataReady = Signal(int, object)
 
-    def __init__(self, repository: VaultRepository | None = None) -> None:
+    def __init__(
+        self,
+        repository: VaultRepository | None = None,
+        public_data_service: PublicDataService | None = None,
+        history_store: HistoryStore | None = None,
+        public_data_executor: Executor | None = None,
+    ) -> None:
         super().__init__()
         self._repository = repository or VaultRepository()
         self._settings = SettingsStore(self._repository.paths)
+        self._public_data_service = public_data_service or PublicDataService()
+        self._history_store = history_store or HistoryStore(self._repository.paths)
+        self._public_data_executor = public_data_executor or ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="holon-public-read",
+        )
+        self._owns_public_data_executor = public_data_executor is None
         self._state = WalletShellState()
         self._current_screen = "welcome"
         self._flow = "none"
@@ -80,11 +114,23 @@ class WalletController(QObject):
         self._action_result_title = ""
         self._action_result_message = ""
         self._action_result_success = False
+        self._selected_network = "all"
+        self._network_snapshots = {
+            spec.network_id: NetworkSnapshot.unavailable(spec, "NOT_REFRESHED")
+            for spec in NETWORKS
+        }
+        self._public_data_refreshing = False
+        self._public_data_generation = 0
+        self._public_data_updated_text = "Not refreshed"
+        self._history_records: tuple[WalletHistoryRecord, ...] = ()
+        self._history_available = True
+        self._closed = False
         self._copied_phrase: str | None = None
         self._clipboard_timer = QTimer(self)
         self._clipboard_timer.setSingleShot(True)
         self._clipboard_timer.setInterval(60_000)
         self._clipboard_timer.timeout.connect(self._clear_clipboard)
+        self._publicDataReady.connect(self._accept_public_data)
         self._initialize()
 
     @Property("QVariantList", notify=profilesChanged)
@@ -167,6 +213,73 @@ class WalletController(QObject):
     @Property(bool, notify=actionResultChanged)
     def actionResultSuccess(self) -> bool:
         return self._action_result_success
+
+    @Property(str, notify=selectedNetworkChanged)
+    def selectedNetwork(self) -> str:
+        return self._selected_network
+
+    @Property(bool, notify=publicDataChanged)
+    def publicDataRefreshing(self) -> bool:
+        return self._public_data_refreshing
+
+    @Property(str, notify=publicDataChanged)
+    def publicDataBanner(self) -> str:
+        if self._public_data_refreshing:
+            return "LOCAL WALLET  ·  REFRESHING PUBLIC DATA"
+        statuses = [
+            self._network_snapshots[network_id].status
+            for network_id in self._selected_network_ids()
+        ]
+        if statuses and all(status is PublicDataStatus.LIVE for status in statuses):
+            return "LOCAL WALLET  ·  LIVE PUBLIC DATA"
+        if statuses and all(status is PublicDataStatus.SIMULATED for status in statuses):
+            return "LOCAL WALLET  ·  SIMULATED PUBLIC DATA"
+        if any(status in {PublicDataStatus.LIVE, PublicDataStatus.SIMULATED} for status in statuses):
+            return "LOCAL WALLET  ·  PARTIAL PUBLIC DATA"
+        return "LOCAL WALLET  ·  NETWORK DATA UNAVAILABLE"
+
+    @Property(str, notify=publicDataChanged)
+    def publicDataUpdatedText(self) -> str:
+        return self._public_data_updated_text
+
+    @Property("QVariantMap", notify=publicDataChanged)
+    def ethereumData(self) -> dict[str, object]:
+        return snapshot_to_map(self._network_snapshots["ethereum"])
+
+    @Property("QVariantMap", notify=publicDataChanged)
+    def baseData(self) -> dict[str, object]:
+        return snapshot_to_map(self._network_snapshots["base"])
+
+    @Property("QVariantList", notify=historyChanged)
+    def historyRecords(self) -> list[dict[str, object]]:
+        mapped: list[dict[str, object]] = []
+        previous_date = ""
+        for record in sorted(
+            (
+                item for item in self._history_records
+                if item.profile_id == self._state.active_profile_id
+            ),
+            key=lambda item: item.created_at,
+            reverse=True,
+        ):
+            value = history_record_to_map(record)
+            current_date = str(value["dateLabel"])
+            value["showDateHeader"] = current_date != previous_date
+            previous_date = current_date
+            mapped.append(value)
+        return mapped
+
+    @Property(bool, notify=historyChanged)
+    def historyAvailable(self) -> bool:
+        return self._history_available
+
+    @Property(str, notify=historyChanged)
+    def historyStateLabel(self) -> str:
+        if not self._history_available:
+            return "History unavailable"
+        if not self.historyRecords:
+            return "No Wallet-initiated transactions yet"
+        return ""
 
     @Slot()
     def beginCreate(self) -> None:
@@ -269,6 +382,45 @@ class WalletController(QObject):
     def finishMockResult(self) -> None:
         self._clear_action_result()
         self._set_screen("main")
+
+    @Slot(str, result=bool)
+    def selectNetwork(self, network_id: str) -> bool:
+        if network_id not in {"all", *NETWORK_BY_ID}:
+            return False
+        if network_id != self._selected_network:
+            self._selected_network = network_id
+            self.selectedNetworkChanged.emit()
+        if self._current_screen == "main":
+            self.refreshPublicData()
+        return True
+
+    @Slot(result=bool)
+    def refreshPublicData(self) -> bool:
+        active = self._state.active_profile
+        if active is None or self._closed:
+            return False
+        network_ids = self._selected_network_ids()
+        self._public_data_generation += 1
+        generation = self._public_data_generation
+        self._public_data_refreshing = True
+        self._public_data_updated_text = "Refreshing…"
+        for network_id in network_ids:
+            self._network_snapshots[network_id] = NetworkSnapshot.unavailable(
+                NETWORK_BY_ID[network_id], "REFRESHING",
+            )
+        self.publicDataChanged.emit()
+        future = self._public_data_executor.submit(
+            self._public_data_service.refresh,
+            active.profile_id,
+            active.address,
+            network_ids,
+        )
+        future.add_done_callback(
+            lambda completed, current=generation: self._public_data_finished(
+                current, completed,
+            ),
+        )
+        return True
 
     @Slot(str, str, result=bool)
     def submitImport(self, import_type: str, value: str) -> bool:
@@ -392,9 +544,12 @@ class WalletController(QObject):
         if self._state.select_profile(profile_id):
             invalidated = self._authority.profile_changed(profile_id)
             self.activeProfileChanged.emit()
+            self.historyChanged.emit()
             if invalidated:
                 self._clear_mock_action()
                 self._set_screen("main")
+            elif self._current_screen in {"main", "history"}:
+                self.refreshPublicData()
             return True
         return False
 
@@ -409,10 +564,22 @@ class WalletController(QObject):
             self._set_screen("wallets")
 
     @Slot()
+    def showHistory(self) -> None:
+        if self._state.profiles:
+            self._load_history()
+            self._set_screen("history")
+
+    @Slot()
     def shutdown(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._public_data_generation += 1
         self._authority.close()
         self._clear_mock_action()
         self._clear_sensitive()
+        if self._owns_public_data_executor:
+            self._public_data_executor.shutdown(wait=False, cancel_futures=True)
 
     def _initialize(self) -> None:
         self._clear_sensitive()
@@ -447,6 +614,7 @@ class WalletController(QObject):
         self._state.replace_profiles(profiles, selected)
         self.profilesChanged.emit()
         self.activeProfileChanged.emit()
+        self._load_history()
 
     def _complete_profile_operation(
         self, profiles: tuple[ProfileSummary, ...], active_id: str, screen: str,
@@ -480,6 +648,73 @@ class WalletController(QObject):
         if self._backup_words:
             self._backup_words = ()
             self.backupWordsChanged.emit()
+
+    def _load_history(self) -> None:
+        try:
+            records = self._history_store.load()
+            available = True
+        except HistoryUnavailableError:
+            records = ()
+            available = False
+        if records != self._history_records or available != self._history_available:
+            self._history_records = records
+            self._history_available = available
+            self.historyChanged.emit()
+
+    def _selected_network_ids(self) -> tuple[str, ...]:
+        if self._selected_network == "all":
+            return tuple(spec.network_id for spec in NETWORKS)
+        return (self._selected_network,)
+
+    def _public_data_finished(
+        self, generation: int, future: Future[PortfolioSnapshot],
+    ) -> None:
+        if self._closed:
+            return
+        try:
+            snapshot: PortfolioSnapshot | None = future.result()
+        except Exception:
+            snapshot = None
+        self._publicDataReady.emit(generation, snapshot)
+
+    @Slot(int, object)
+    def _accept_public_data(
+        self, generation: int, snapshot: PortfolioSnapshot | None,
+    ) -> None:
+        if generation != self._public_data_generation or self._closed:
+            return
+        active = self._state.active_profile
+        requested = self._selected_network_ids()
+        if (
+            snapshot is None
+            or active is None
+            or snapshot.profile_id != active.profile_id
+            or snapshot.address != active.address
+        ):
+            for network_id in requested:
+                self._network_snapshots[network_id] = NetworkSnapshot.unavailable(
+                    NETWORK_BY_ID[network_id], "RPC_UNAVAILABLE",
+                )
+        else:
+            returned_ids = {item.network_id for item in snapshot.networks}
+            if returned_ids != set(requested):
+                for network_id in requested:
+                    self._network_snapshots[network_id] = NetworkSnapshot.unavailable(
+                        NETWORK_BY_ID[network_id], "DATA_INVALID",
+                    )
+            else:
+                for item in snapshot.networks:
+                    self._network_snapshots[item.network_id] = item
+        self._public_data_refreshing = False
+        timestamps = [
+            item.updated_at for item in self._network_snapshots.values()
+            if item.updated_at
+        ]
+        self._public_data_updated_text = (
+            f"Updated {_display_utc(max(timestamps))}" if timestamps
+            else "Refresh unavailable"
+        )
+        self.publicDataChanged.emit()
 
     @staticmethod
     def _consume_simulation(_action: PreparedMockAction) -> None:
@@ -547,6 +782,8 @@ class WalletController(QObject):
         if screen != self._current_screen:
             self._current_screen = screen
             self.currentScreenChanged.emit()
+            if screen == "main" and self._state.active_profile is not None:
+                self.refreshPublicData()
 
 
 def _mock_action_map(action: PreparedMockAction) -> dict[str, object]:
@@ -564,3 +801,8 @@ def _mock_action_map(action: PreparedMockAction) -> dict[str, object]:
         "feeStatus": action.fee_status,
         "expiresAt": action.expires_at.strftime("%H:%M:%S UTC"),
     }
+
+
+def _display_utc(timestamp: str) -> str:
+    parsed = datetime.fromisoformat(timestamp.removesuffix("Z") + "+00:00")
+    return parsed.strftime("%H:%M UTC")
