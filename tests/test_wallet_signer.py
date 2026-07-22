@@ -23,6 +23,7 @@ from holon_wallet.transfer import (
     TransferFlowError,
     TransferFlowState,
     TransferPreflightService,
+    transfer_route,
 )
 from holon_wallet.vault import VaultRepository
 from holon_wallet.wallet_crypto import generate_mnemonic, import_private_key
@@ -33,8 +34,11 @@ HASH_RE = re.compile(r"^0x[0-9a-f]{64}$")
 
 
 class SigningRpc:
+    def __init__(self, chain_id=8453):
+        self._chain_id = chain_id
+
     def chain_id(self):
-        return 8453
+        return self._chain_id
 
     def latest_block(self):
         return 123_456, 10
@@ -112,6 +116,39 @@ def test_signs_and_verifies_exact_type2_for_both_profile_types(
     assert password not in repr(result)
     assert repository.paths.vault.read_bytes() == vault_before
     assert not repository.paths.history.exists()
+
+
+@pytest.mark.parametrize(
+    ("network_id", "asset_id", "amount_atomic"),
+    [
+        ("ethereum", "eth", 10**15),
+        ("ethereum", "usdc", 1_500_000),
+        ("base", "eth", 10**15),
+        ("base", "usdc", 1_500_000),
+    ],
+)
+def test_signer_accepts_all_exact_allowlisted_routes(
+    tmp_path, network_id, asset_id, amount_atomic,
+) -> None:
+    password = new_password()
+    repository = VaultRepository(WalletPaths(tmp_path))
+    record = repository.new_record(generate_mnemonic(), "Main Account")
+    repository.create_new(password, record)
+    route = transfer_route(network_id, asset_id)
+    request = PendingTransferRequest(
+        "act-route", record.summary.profile_id, NOW, NOW + timedelta(minutes=5),
+        network_id, asset_id, amount_atomic,
+    )
+    rpc = SigningRpc(route.chain_id)
+    action = TransferPreflightService(
+        lambda _endpoint: rpc, environ={route.endpoint_env: "fixture://route"},
+    ).prepare(request, record.summary, RECIPIENT)
+
+    result = OfflineTransferSigner(
+        repository, OfflineSigningPolicy(10**18), lambda: NOW,
+    ).sign(action, action.digest, password, SigningPermit())
+    assert result.success
+    assert result.recovered_signer == action.sender
 
 
 def test_fee_policy_is_explicit_strict_and_fail_closed(tmp_path) -> None:

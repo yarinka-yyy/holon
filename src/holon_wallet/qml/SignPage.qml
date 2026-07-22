@@ -7,6 +7,8 @@ TransactionFlowShell {
     activeStep: 1; onBackRequested: walletController.cancelMainnetExecution()
     property bool explicitlyConfirmed: false
     property var action: walletController.transferAction
+    property url assetIcon: action.assetId === "eth"
+        ? "assets/ethereum.svg" : "assets/usdc.png"
     property bool readyToSign: passwordField.text.length >= 4
         && explicitlyConfirmed && walletController.mainnetExecutionAvailable
 
@@ -20,22 +22,26 @@ TransactionFlowShell {
     onEnabledChanged: if (!enabled) { passwordField.clear(); explicitlyConfirmed = false }
 
     SurfaceCard {
-        x: 0; y: 0; width: 458; height: 118
+        x: 0; y: 0; width: 458; height: 136
         Text {
-            x: 18; y: 16; text: "1 USDC on Base"; color: Design.text
+            x: 18; y: 14; width: 350
+            text: (root.action.amount || "Transfer") + " on " + (root.action.network || "")
+            color: Design.text
             font.family: Design.fontFamily; font.pixelSize: 20; font.weight: Font.DemiBold
         }
         Text {
-            x: 18; y: 50; text: "To " + (root.action.shortRecipient || "")
-            color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 13
+            x: 18; y: 48; width: 350
+            text: "To " + (root.action.recipient || "")
+            color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 11
+            wrapMode: Text.WrapAnywhere
         }
         Text {
-            x: 18; y: 78; text: "Maximum fee " + (root.action.maxFeeDisplay || "Unavailable")
+            x: 18; y: 106; text: "Maximum fee " + (root.action.maxFeeDisplay || "Unavailable")
             color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 12
         }
         Image {
             anchors.right: parent.right; anchors.rightMargin: 18; y: 20
-            width: 50; height: 50; source: "assets/usdc.png"; sourceSize: Qt.size(100, 100)
+            width: 50; height: 50; source: root.assetIcon; sourceSize: Qt.size(100, 100)
         }
     }
     Text {
@@ -70,7 +76,9 @@ TransactionFlowShell {
         }
         Text {
             x: 60; width: 378; anchors.verticalCenter: parent.verticalCenter
-            text: "I confirm this irreversible transfer of 1 real USDC on Base Mainnet."
+            text: "I confirm this irreversible transfer of "
+                + (root.action.amount || "the exact amount") + " on "
+                + (root.action.network || "the selected network") + "."
             wrapMode: Text.Wrap; color: Design.text
             font.family: Design.fontFamily; font.pixelSize: 13
         }
@@ -86,7 +94,8 @@ TransactionFlowShell {
     }
     FormButton {
         objectName: "mainnetSendButton"; x: 0; y: 468; width: 458; height: 56
-        label: "Sign and send 1 USDC"; controlEnabled: root.readyToSign
+        label: "Sign and send " + (root.action.token || "asset")
+        controlEnabled: root.readyToSign
         onTriggered: root.submit()
     }
     FormButton {

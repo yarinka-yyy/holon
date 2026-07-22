@@ -1,4 +1,4 @@
-"""Single-use offline signing for one exact prepared Base USDC transfer."""
+"""Single-use offline signing for one exact allowlisted transfer."""
 
 from __future__ import annotations
 
@@ -17,18 +17,14 @@ from eth_account.typed_transactions import TypedTransaction
 from hexbytes import HexBytes
 from web3 import Web3
 
-from .public_data import BASE_USDC
 from .transfer import (
     ACTION_LIFETIME,
-    BASE_CHAIN_ID,
     BASE_NETWORK_ID,
     TRANSFER_SCHEMA_VERSION,
-    USDC_AMOUNT_ATOMIC,
-    USDC_DECIMALS,
-    USDC_SYMBOL,
     PreparedTransferAction,
     SigningPermit,
     encode_usdc_transfer,
+    transfer_route,
 )
 from .vault import (
     AuthenticationFailedError,
@@ -38,6 +34,10 @@ from .vault import (
 from .wallet_crypto import InvalidSecretError, private_key_bytes, rederive
 
 FEE_LIMIT_ENV = "HOLON_BASE_MAX_TOTAL_FEE_WEI"
+FEE_LIMIT_ENVS = {
+    "base": FEE_LIMIT_ENV,
+    "ethereum": "HOLON_ETHEREUM_MAX_TOTAL_FEE_WEI",
+}
 DECIMAL_RE = re.compile(r"^[1-9][0-9]{0,77}$")
 
 
@@ -64,10 +64,12 @@ class OfflineSigningPolicy:
 
     @classmethod
     def from_environment(
-        cls, environ: Mapping[str, str] | None = None,
+        cls,
+        environ: Mapping[str, str] | None = None,
+        network_id: str = BASE_NETWORK_ID,
     ) -> OfflineSigningPolicy:
         source = os.environ if environ is None else environ
-        value = source.get(FEE_LIMIT_ENV, "").strip()
+        value = source.get(FEE_LIMIT_ENVS.get(network_id, ""), "").strip()
         if DECIMAL_RE.fullmatch(value) is None:
             return cls(None)
         return cls(int(value))
@@ -228,7 +230,17 @@ def validate_signing_action(
     if now >= action.expires_at:
         return OfflineSigningCode.ACTION_EXPIRED
     tx = action.transaction
-    expected_calldata = encode_usdc_transfer(action.recipient, USDC_AMOUNT_ATOMIC)
+    try:
+        route = transfer_route(action.network_id, action.asset_id)
+    except Exception:
+        return OfflineSigningCode.ACTION_INVALID
+    expected_target = action.recipient if route.token_contract is None else route.token_contract
+    expected_value = action.amount_atomic if route.token_contract is None else 0
+    expected_calldata = (
+        "0x"
+        if route.token_contract is None
+        else encode_usdc_transfer(action.recipient, action.amount_atomic)
+    )
     valid = (
         action.schema_version == TRANSFER_SCHEMA_VERSION
         and action.digest == expected_digest
@@ -236,16 +248,17 @@ def validate_signing_action(
         and action.profile_id != ""
         and Web3.is_checksum_address(action.sender)
         and Web3.is_checksum_address(action.recipient)
-        and action.network_id == BASE_NETWORK_ID
-        and action.chain_id == BASE_CHAIN_ID
-        and action.token == USDC_SYMBOL
-        and action.token_contract == BASE_USDC
-        and action.amount_atomic == USDC_AMOUNT_ATOMIC
-        and action.decimals == USDC_DECIMALS
+        and action.network_label == route.network_label
+        and action.chain_id == route.chain_id
+        and action.token == route.symbol
+        and action.token_contract == route.token_contract
+        and type(action.amount_atomic) is int
+        and 0 < action.amount_atomic < 2**256
+        and action.decimals == route.decimals
         and tx.transaction_type == 2
-        and tx.chain_id == BASE_CHAIN_ID
-        and tx.to == BASE_USDC
-        and tx.value == 0
+        and tx.chain_id == route.chain_id
+        and tx.to.lower() == expected_target.lower()
+        and tx.value == expected_value
         and tx.data == expected_calldata
         and tx.nonce >= 0
         and tx.gas > 0

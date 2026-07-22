@@ -1,4 +1,4 @@
-"""Single-use Base USDC signing, broadcast, and public receipt tracking."""
+"""Single-use allowlisted signing, broadcast, and public receipt tracking."""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ from .history import (
     HistoryValidationError,
     WalletHistoryRecord,
 )
-from .public_data import BASE_USDC, USDC_ABI
+from .public_data import USDC_ABI
 from .signer import (
     OfflineSigningCode,
     OfflineSigningPolicy,
@@ -41,11 +41,14 @@ from .signer import (
 )
 from .storage import StorageError
 from .transfer import (
-    BASE_CHAIN_ID,
-    USDC_AMOUNT_ATOMIC,
-    USDC_DECIMALS,
+    BASE_NETWORK_ID,
+    ETH_ASSET_ID,
+    TRANSFER_ROUTES,
     PreparedTransferAction,
     SigningPermit,
+    TransferRouteSpec,
+    encode_usdc_transfer,
+    transfer_route,
 )
 from .vault import AuthenticationFailedError, VaultRepository, VaultUnavailableError
 from .wallet_crypto import InvalidSecretError, private_key_bytes, rederive
@@ -53,6 +56,10 @@ from .wallet_crypto import InvalidSecretError, private_key_bytes, rederive
 BROADCAST_ENABLED_ENV = "HOLON_BASE_BROADCAST_ENABLED"
 BASE_RPC_ENV = "HOLON_BASE_RPC_URL"
 DEFAULT_BASE_RPC_URL = "https://base-rpc.publicnode.com"
+BROADCAST_ENABLED_ENVS = {
+    "base": BROADCAST_ENABLED_ENV,
+    "ethereum": "HOLON_ETHEREUM_BROADCAST_ENABLED",
+}
 TRANSFER_EVENT_TOPIC = Web3.to_hex(
     Web3.keccak(text="Transfer(address,address,uint256)"),
 )
@@ -66,6 +73,7 @@ class MainnetTransferCode(str, Enum):
     AUTHENTICATION_FAILED = "AUTHENTICATION_FAILED"
     POLICY_UNAVAILABLE = "POLICY_UNAVAILABLE"
     FEE_LIMIT_EXCEEDED = "FEE_LIMIT_EXCEEDED"
+    AMOUNT_LIMIT_EXCEEDED = "AMOUNT_LIMIT_EXCEEDED"
     ACTION_INVALID = "ACTION_INVALID"
     ACTION_EXPIRED = "ACTION_EXPIRED"
     REVALIDATION_FAILED = "REVALIDATION_FAILED"
@@ -78,34 +86,107 @@ class MainnetTransferCode(str, Enum):
 class MainnetBroadcastPolicy:
     enabled: bool
     fee_policy: OfflineSigningPolicy
+    network_enabled: Mapping[str, bool] | None = None
+    fee_policies: Mapping[str, OfflineSigningPolicy] | None = None
+    amount_limits: Mapping[tuple[str, str], int | None] | None = None
 
     @classmethod
     def from_environment(
         cls, environ: Mapping[str, str] | None = None,
     ) -> MainnetBroadcastPolicy:
         source = os.environ if environ is None else environ
+        enabled = {
+            network_id: source.get(env_name, "").strip() == "1"
+            for network_id, env_name in BROADCAST_ENABLED_ENVS.items()
+        }
+        fee_policies = {
+            network_id: OfflineSigningPolicy.from_environment(source, network_id)
+            for network_id in BROADCAST_ENABLED_ENVS
+        }
+        amount_limits = {
+            key: _positive_environment_value(source, route.amount_cap_env)
+            for key, route in TRANSFER_ROUTES.items()
+        }
         return cls(
-            source.get(BROADCAST_ENABLED_ENV, "").strip() == "1",
-            OfflineSigningPolicy.from_environment(source),
+            enabled[BASE_NETWORK_ID],
+            fee_policies[BASE_NETWORK_ID],
+            enabled,
+            fee_policies,
+            amount_limits,
         )
 
     @property
     def available(self) -> bool:
-        return self.enabled and self.fee_policy.available
+        return (
+            self._network_enabled(BASE_NETWORK_ID)
+            and self._fee_policy(BASE_NETWORK_ID).available
+            and self._amount_limit(BASE_NETWORK_ID, "usdc") is not None
+        )
 
     @property
     def display(self) -> str:
         return self.fee_policy.display
 
+    def display_for(self, action: PreparedTransferAction) -> str:
+        return self._fee_policy(action.network_id).display
+
+    def amount_display_for(self, action: PreparedTransferAction) -> str:
+        limit = self._amount_limit(action.network_id, action.asset_id)
+        if limit is None:
+            return "Not configured"
+        return str(limit)
+
+    def draft_amount_code(
+        self, network_id: str, asset_id: str, amount_atomic: int,
+    ) -> MainnetTransferCode | None:
+        limit = self._amount_limit(network_id, asset_id)
+        if limit is not None and amount_atomic > limit:
+            return MainnetTransferCode.AMOUNT_LIMIT_EXCEEDED
+        return None
+
+    def maximum_draft_amount(
+        self,
+        network_id: str,
+        asset_id: str,
+        available_atomic: int,
+    ) -> int | None:
+        if type(available_atomic) is not int or available_atomic <= 0:
+            return None
+        candidate = available_atomic
+        amount_limit = self._amount_limit(network_id, asset_id)
+        if amount_limit is not None:
+            candidate = min(candidate, amount_limit)
+        return candidate if candidate > 0 else None
+
     def evaluate(self, action: PreparedTransferAction) -> MainnetTransferCode | None:
-        if not self.available:
+        if not self._network_enabled(action.network_id):
             return MainnetTransferCode.POLICY_UNAVAILABLE
-        code = self.fee_policy.evaluate(action)
+        code = self._fee_policy(action.network_id).evaluate(action)
         if code is OfflineSigningCode.FEE_LIMIT_EXCEEDED:
             return MainnetTransferCode.FEE_LIMIT_EXCEEDED
         if code is not None:
             return MainnetTransferCode.POLICY_UNAVAILABLE
+        amount_limit = self._amount_limit(action.network_id, action.asset_id)
+        if amount_limit is None:
+            return MainnetTransferCode.POLICY_UNAVAILABLE
+        if action.amount_atomic > amount_limit:
+            return MainnetTransferCode.AMOUNT_LIMIT_EXCEEDED
         return None
+
+    def _network_enabled(self, network_id: str) -> bool:
+        if self.network_enabled is None:
+            return self.enabled
+        return self.network_enabled.get(network_id, False)
+
+    def _fee_policy(self, network_id: str) -> OfflineSigningPolicy:
+        if self.fee_policies is None:
+            return self.fee_policy
+        return self.fee_policies.get(network_id, OfflineSigningPolicy(None))
+
+    def _amount_limit(self, network_id: str, asset_id: str) -> int | None:
+        if self.amount_limits is None:
+            return 2**256 - 1
+        return self.amount_limits.get((network_id, asset_id))
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,7 +243,7 @@ class MainnetRpc(Protocol):
 
 
 class Web3MainnetRpc:
-    """Narrow Base RPC surface with no account or automatic retry APIs."""
+    """Narrow RPC surface with no account or automatic retry APIs."""
 
     def __init__(self, endpoint: str, timeout_seconds: float = 5.0) -> None:
         provider = Web3.HTTPProvider(
@@ -229,14 +310,14 @@ class Web3MainnetRpc:
         except (TransactionNotFound, ContractLogicError, BadFunctionCallOutput):
             raise
         except (*_TRANSPORT_ERRORS, Web3Exception) as error:
-            raise RuntimeError("Base RPC request failed") from error
+            raise RuntimeError("Mainnet RPC request failed") from error
 
 
 MainnetRpcFactory = Callable[[str], MainnetRpc]
 
 
 class MainnetTransferExecutor:
-    """Revalidates, authenticates, signs, and attempts one Base broadcast."""
+    """Revalidates, authenticates, signs, and attempts one broadcast."""
 
     def __init__(
         self,
@@ -273,7 +354,7 @@ class MainnetTransferExecutor:
         if permit.cancelled:
             return self._failure(action, MainnetTransferCode.CANCELLED)
 
-        endpoint = _endpoint(self._environ)
+        endpoint = _endpoint(self._environ, action.network_id)
         if endpoint is None:
             return self._failure(action, MainnetTransferCode.POLICY_UNAVAILABLE)
         try:
@@ -487,16 +568,23 @@ class BroadcastReceiptTracker:
             raise HistoryValidationError("History action cannot be checked")
         if record.status in {HistoryStatus.CONFIRMED, HistoryStatus.FAILED}:
             return self._result(record, record.status, True)
-        endpoint = _endpoint(self._environ)
+        endpoint = _endpoint(self._environ, record.network)
         if endpoint is None:
             return self._result(record, record.status, True)
         observed = record.status
         actual_fee_wei: str | None = None
         try:
             rpc = self._rpc_factory(endpoint)
+            if rpc.chain_id() != record.chain_id:
+                raise RuntimeError("Receipt RPC chain mismatch")
             receipt = rpc.transaction_receipt(record.transaction_hash)
             if receipt is not None:
-                observed = _receipt_status(receipt, record)
+                transaction = (
+                    rpc.transaction(record.transaction_hash)
+                    if record.token == "ETH"
+                    else None
+                )
+                observed = _receipt_status(receipt, record, transaction)
                 if observed in {HistoryStatus.CONFIRMED, HistoryStatus.FAILED}:
                     actual_fee_wei = _receipt_fee_wei(receipt)
             elif record.status is HistoryStatus.PENDING:
@@ -600,12 +688,17 @@ def result_from_tracking(
 
 def _final_revalidation(rpc: MainnetRpc, action: PreparedTransferAction) -> bool:
     tx = action.transaction
-    if rpc.chain_id() != BASE_CHAIN_ID:
+    route = transfer_route(action.network_id, action.asset_id)
+    if rpc.chain_id() != route.chain_id:
         return False
     block_number, base_fee = rpc.latest_block()
     native_balance = int(rpc.native_balance(action.sender))
-    decimals = int(rpc.token_decimals(BASE_USDC))
-    token_balance = int(rpc.token_balance(BASE_USDC, action.sender))
+    token_balance: int | None = None
+    if route.token_contract is not None:
+        decimals = int(rpc.token_decimals(route.token_contract))
+        if decimals != route.decimals:
+            return False
+        token_balance = int(rpc.token_balance(route.token_contract, action.sender))
     nonce = int(rpc.pending_nonce(action.sender))
     priority_fee = int(rpc.max_priority_fee_per_gas())
     estimate = int(
@@ -624,12 +717,14 @@ def _final_revalidation(rpc: MainnetRpc, action: PreparedTransferAction) -> bool
         )
     )
     current_required_fee = 2 * int(base_fee) + priority_fee
+    required_native = action.max_total_fee_wei + (
+        action.amount_atomic if route.token_contract is None else 0
+    )
     return (
-        decimals == USDC_DECIMALS
-        and block_number >= action.block_number
+        block_number >= action.block_number
         and base_fee > 0
-        and token_balance >= USDC_AMOUNT_ATOMIC
-        and native_balance >= action.max_total_fee_wei
+        and (token_balance is None or token_balance >= action.amount_atomic)
+        and native_balance >= required_native
         and nonce == tx.nonce
         and 0 < estimate <= tx.gas
         and 0 <= priority_fee <= tx.max_priority_fee_per_gas
@@ -638,17 +733,22 @@ def _final_revalidation(rpc: MainnetRpc, action: PreparedTransferAction) -> bool
 
 
 def _receipt_status(
-    receipt: Mapping[str, object], record: WalletHistoryRecord,
+    receipt: Mapping[str, object],
+    record: WalletHistoryRecord,
+    transaction: Mapping[str, object] | None = None,
 ) -> HistoryStatus:
     try:
         receipt_hash = _hex_value(receipt["transactionHash"])
         if receipt_hash.lower() != (record.transaction_hash or "").lower():
             return HistoryStatus.UNKNOWN
         sender = str(receipt.get("from", record.sender))
-        target = str(receipt.get("to", record.contract or ""))
+        if record.token == "USDC" and record.contract is None:
+            return HistoryStatus.UNKNOWN
+        expected_target = record.recipient if record.token == "ETH" else record.contract
+        target = str(receipt.get("to", expected_target))
         if sender.lower() != record.sender.lower():
             return HistoryStatus.UNKNOWN
-        if record.contract is None or target.lower() != record.contract.lower():
+        if target.lower() != expected_target.lower():
             return HistoryStatus.UNKNOWN
         if _receipt_fee_wei(receipt) is None:
             return HistoryStatus.UNKNOWN
@@ -657,14 +757,19 @@ def _receipt_status(
             return HistoryStatus.FAILED
         if status != 1:
             return HistoryStatus.UNKNOWN
+        if record.token == "ETH":
+            return (
+                HistoryStatus.CONFIRMED
+                if transaction is not None
+                and _public_transaction_matches(transaction, record)
+                else HistoryStatus.UNKNOWN
+            )
         logs = receipt["logs"]
         if not isinstance(logs, (list, tuple)):
             return HistoryStatus.UNKNOWN
-        return (
-            HistoryStatus.CONFIRMED
-            if any(_matching_transfer_log(item, record) for item in logs)
-            else HistoryStatus.UNKNOWN
-        )
+        return HistoryStatus.CONFIRMED if any(
+            _matching_transfer_log(item, record) for item in logs
+        ) else HistoryStatus.UNKNOWN
     except (KeyError, TypeError, ValueError):
         return HistoryStatus.UNKNOWN
 
@@ -710,19 +815,51 @@ def _public_transaction_matches(
         transaction_hash = _hex_value(value["hash"])
         sender = str(value["from"])
         target = str(value["to"])
+        if record.token == "USDC" and record.contract is None:
+            return False
+        expected_target = record.recipient if record.token == "ETH" else record.contract
+        transaction_value = int(value.get("value", 0))
+        data = _transaction_data(value)
+        expected_data = (
+            "0x"
+            if record.token == "ETH"
+            else encode_usdc_transfer(record.recipient, int(record.amount_atomic))
+        )
+        expected_value = int(record.amount_atomic) if record.token == "ETH" else 0
         return (
             transaction_hash.lower() == (record.transaction_hash or "").lower()
             and sender.lower() == record.sender.lower()
-            and record.contract is not None
-            and target.lower() == record.contract.lower()
+            and target.lower() == expected_target.lower()
+            and transaction_value == expected_value
+            and data.lower() == expected_data.lower()
+            and int(value["chainId"]) == record.chain_id
         )
     except (KeyError, TypeError, ValueError):
         return False
 
 
-def _endpoint(environ: Mapping[str, str]) -> str | None:
-    value = environ.get(BASE_RPC_ENV, DEFAULT_BASE_RPC_URL).strip()
+def _endpoint(environ: Mapping[str, str], network_id: str = BASE_NETWORK_ID) -> str | None:
+    try:
+        route: TransferRouteSpec = transfer_route(network_id, ETH_ASSET_ID)
+    except Exception:
+        return None
+    value = environ.get(route.endpoint_env, route.default_endpoint).strip()
     return value or None
+
+
+def _transaction_data(value: Mapping[str, object]) -> str:
+    candidate = value.get("input", value.get("data", "0x"))
+    return _hex_value(candidate)
+
+
+def _positive_environment_value(
+    environ: Mapping[str, str], name: str,
+) -> int | None:
+    value = environ.get(name, "").strip()
+    if not value or not value.isascii() or not value.isdecimal() or value.startswith("0"):
+        return None
+    parsed = int(value)
+    return parsed if 0 < parsed < 2**256 else None
 
 
 def _hex_value(value: object) -> str:
@@ -749,7 +886,7 @@ def _result_text(code: MainnetTransferCode) -> tuple[str, str]:
     return {
         MainnetTransferCode.CONFIRMED: (
             "Transfer confirmed",
-            "1 USDC was confirmed on Base Mainnet.",
+            "The exact reviewed transfer was confirmed on-chain.",
         ),
         MainnetTransferCode.PENDING: (
             "Transaction submitted",
@@ -761,7 +898,7 @@ def _result_text(code: MainnetTransferCode) -> tuple[str, str]:
         ),
         MainnetTransferCode.FAILED: (
             "Transaction reverted",
-            "A network fee may have been spent, but the USDC transfer reverted.",
+            "A network fee may have been spent, but the transfer reverted.",
         ),
         MainnetTransferCode.AUTHENTICATION_FAILED: (
             "Authentication failed",
@@ -769,11 +906,15 @@ def _result_text(code: MainnetTransferCode) -> tuple[str, str]:
         ),
         MainnetTransferCode.POLICY_UNAVAILABLE: (
             "Mainnet sending disabled",
-            "The local broadcast flag and maximum-fee limit are required.",
+            "The route requires local broadcast, amount, and fee limits.",
         ),
         MainnetTransferCode.FEE_LIMIT_EXCEEDED: (
             "Fee limit exceeded",
             "Nothing was sent. Prepare a new action when fees are lower.",
+        ),
+        MainnetTransferCode.AMOUNT_LIMIT_EXCEEDED: (
+            "Amount limit exceeded",
+            "Nothing was sent. The transfer exceeds the local route limit.",
         ),
         MainnetTransferCode.ACTION_INVALID: (
             "Transaction changed",

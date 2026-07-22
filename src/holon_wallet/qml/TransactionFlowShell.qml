@@ -4,7 +4,7 @@ import "."
 PageState {
     id: root
     property string title: "Confirm Transaction"
-    property string subtitle: "Base · 1 USDC"
+    property string subtitle: "Exact one-time transfer"
     property var steps: walletController.transactionFlowSteps
     property int activeStep: walletController.transactionFlowStage
     property bool backVisible: true

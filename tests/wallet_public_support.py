@@ -18,7 +18,7 @@ from holon_wallet.public_data import (
     PublicDataStatus,
 )
 from holon_wallet.prices import AssetPrice, PriceSnapshot, PriceStatus
-from holon_wallet.transfer import BASE_CHAIN_ID, TransferPreflightService
+from holon_wallet.transfer import BASE_CHAIN_ID, TransferPreflightService, transfer_route
 from holon_wallet.signer import OfflineSigningPolicy
 
 
@@ -107,10 +107,11 @@ class StubPriceService:
 
 class StubTransferRpc:
     def __init__(self) -> None:
+        self.observed_chain_id = BASE_CHAIN_ID
         self.estimated_transaction: dict[str, object] | None = None
 
     def chain_id(self) -> int:
-        return BASE_CHAIN_ID
+        return self.observed_chain_id
 
     def latest_block(self) -> tuple[int, int]:
         return 12_345_678, 10_000_000
@@ -187,7 +188,17 @@ class StubTransferPreflightService:
         self.calls.append((request, profile, recipient))
         if self.error is not None:
             raise self.error
+        self.rpc.observed_chain_id = transfer_route(
+            request.network_id, request.asset_id,
+        ).chain_id
         return self._service.prepare(request, profile, recipient)
+
+    def quote_maximum_native(self, profile, network_id, recipient):
+        self.calls.append(("maximum", profile, network_id, recipient))
+        if self.error is not None:
+            raise self.error
+        self.rpc.observed_chain_id = transfer_route(network_id, "eth").chain_id
+        return self._service.quote_maximum_native(profile, network_id, recipient)
 
 
 def public_snapshot(

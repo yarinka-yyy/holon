@@ -16,7 +16,12 @@ from holon_wallet.controller import WalletController, _display_local_time
 from holon_wallet.history import HistoryStatus, HistoryStore
 from holon_wallet.signer import OfflineSigningPolicy
 from holon_wallet.storage import StorageError, WalletPaths
-from holon_wallet.transfer import TransferFlowState, TransferPreflightCode, TransferPreflightError
+from holon_wallet.transfer import (
+    TransferFlowState,
+    TransferPreflightCode,
+    TransferPreflightError,
+    format_atomic_amount,
+)
 from holon_wallet.vault import VaultRepository
 from holon_wallet.wallet_crypto import generate_mnemonic, import_private_key
 from wallet_public_support import (
@@ -177,6 +182,84 @@ def test_unsigned_preflight_writes_public_history_without_authentication(
     item.finishTransfer()
     assert item.currentScreen == "main"
     assert item._transfer_flow.state is TransferFlowState.LOCKED
+
+
+def test_generalized_draft_binds_network_asset_recipient_and_exact_amount(tmp_path) -> None:
+    item = controller(tmp_path)
+    secret = password()
+    item.beginCreate()
+    assert item.submitPassword(secret, secret)
+    assert item.finishBackup()
+    recipient = "0x" + "44" * 20
+
+    item.showSend()
+    assert item.transferNetwork == ""
+    assert item.transferAsset == ""
+    assert item.prepareTransfer("ethereum", "eth", recipient, "0,001")
+    assert item.currentScreen == "transfer_review"
+    assert item.transferAction["networkId"] == "ethereum"
+    assert item.transferAction["assetId"] == "eth"
+    assert item.transferAction["amount"] == "0.001 ETH"
+    assert item.transferAction["recipient"].endswith("444444")
+
+    item.editTransfer()
+    assert item.transferNetwork == "ethereum"
+    assert item.transferAsset == "eth"
+    assert item.transferAmountInput == "0.001"
+    assert item.transferRecipient.endswith("444444")
+    assert item.transferAction == {}
+
+
+def test_configured_amount_cap_refuses_before_rpc(tmp_path) -> None:
+    item = controller(tmp_path)
+    secret = password()
+    item.beginCreate()
+    assert item.submitPassword(secret, secret)
+    assert item.finishBackup()
+    item._mainnet_executor.policy = MainnetBroadcastPolicy(
+        True,
+        OfflineSigningPolicy(10**18),
+        amount_limits={("base", "usdc"): 999_999},
+    )
+
+    item.showSend()
+    assert not item.prepareTransfer("base", "usdc", "0x" + "44" * 20, "1")
+    assert item.transferError == "Amount exceeds the local route limit"
+    assert item._transfer_preflight_service.calls == []
+
+
+def test_maximum_amount_uses_token_cap_and_live_native_fee_quote(tmp_path) -> None:
+    item = controller(tmp_path)
+    secret = password()
+    item.beginCreate()
+    assert item.submitPassword(secret, secret)
+    assert item.finishBackup()
+    recipient = "0x" + "44" * 20
+    ready = []
+    item.transferMaximumReady.connect(lambda *values: ready.append(values))
+    item._mainnet_executor.policy = MainnetBroadcastPolicy(
+        True,
+        OfflineSigningPolicy(10**18),
+        amount_limits={
+            ("base", "usdc"): 2_000_000,
+            ("base", "eth"): 2**256 - 1,
+        },
+    )
+
+    assert item.maximumTransferAmount("base", "usdc") == "2"
+    assert item.maximumTransferAmount("base", "eth") == ""
+    assert item.requestMaximumTransfer("base", "usdc", "")
+    assert ready[-1] == ("base", "usdc", "", "2")
+
+    assert item.requestMaximumTransfer("base", "eth", recipient)
+    max_fee_per_gas = 2 * 10_000_000 + 1_000_000
+    expected = 10**18 - 60_500 * max_fee_per_gas
+    assert ready[-1] == (
+        "base", "eth", recipient, format_atomic_amount(expected, 18),
+    )
+    assert not item.transferMaximumQuoting
+    assert not item.requestMaximumTransfer("base", "eth", "invalid")
+    assert item.transferError == "Enter a valid EVM recipient address"
 
 
 def test_mainnet_execution_submits_once_and_updates_public_history(tmp_path) -> None:
@@ -456,7 +539,7 @@ def test_transfer_failure_is_safe_and_writes_no_history(tmp_path) -> None:
 
     assert item.prepareTransfer("0x" + "44" * 20)
     assert item.currentScreen == "send"
-    assert item.transferError == "This Account does not have 1 USDC on Base"
+    assert item.transferError == "Insufficient USDC for this transfer"
     assert item.historyRecords == []
     assert not repository.paths.history.exists()
 

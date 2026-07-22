@@ -1,4 +1,4 @@
-"""Bounded unsigned Base USDC transfer preparation for M3.05."""
+"""Exact unsigned ETH/USDC preparation for allowlisted MVP1 routes."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import Enum
 from threading import Event
+from types import MappingProxyType
 from typing import Mapping, Protocol
 
 from requests import exceptions as request_errors
@@ -20,12 +21,24 @@ from web3 import Web3
 from web3.exceptions import BadFunctionCallOutput, ContractLogicError, Web3Exception
 
 from .model import ProfileSummary
-from .public_data import BASE_USDC, USDC_ABI
+from .public_data import (
+    BASE_USDC,
+    ETHEREUM_USDC,
+    NETWORK_BY_ID,
+    USDC_ABI,
+)
 
 TRANSFER_SCHEMA_VERSION = 1
 BASE_CHAIN_ID = 8453
 BASE_NETWORK_ID = "base"
 BASE_NETWORK_LABEL = "Base"
+ETHEREUM_CHAIN_ID = 1
+ETHEREUM_NETWORK_ID = "ethereum"
+ETHEREUM_NETWORK_LABEL = "Ethereum"
+ETH_ASSET_ID = "eth"
+ETH_SYMBOL = "ETH"
+ETH_DECIMALS = 18
+USDC_ASSET_ID = "usdc"
 USDC_SYMBOL = "USDC"
 USDC_DECIMALS = 6
 USDC_AMOUNT_ATOMIC = 1_000_000
@@ -33,6 +46,53 @@ ACTION_LIFETIME = timedelta(minutes=5)
 TRANSFER_SELECTOR = bytes.fromhex("a9059cbb")
 ZERO_ADDRESS = "0x" + "00" * 20
 ADDRESS_RE = re.compile(r"^0x[0-9A-Fa-f]{40}$")
+AMOUNT_RE = re.compile(r"^[0-9]+(?:[.,][0-9]+)?$")
+
+
+@dataclass(frozen=True, slots=True)
+class TransferRouteSpec:
+    network_id: str
+    network_label: str
+    chain_id: int
+    endpoint_env: str
+    default_endpoint: str
+    asset_id: str
+    symbol: str
+    decimals: int
+    token_contract: str | None
+    amount_cap_env: str
+
+
+def _route(network_id: str, asset_id: str) -> TransferRouteSpec:
+    network = NETWORK_BY_ID[network_id]
+    symbol = asset_id.upper()
+    return TransferRouteSpec(
+        network.network_id,
+        network.label,
+        network.chain_id,
+        network.endpoint_env,
+        network.default_endpoint,
+        asset_id,
+        symbol,
+        ETH_DECIMALS if asset_id == ETH_ASSET_ID else USDC_DECIMALS,
+        None if asset_id == ETH_ASSET_ID else network.usdc_contract,
+        (
+            f"HOLON_{network_id.upper()}_ETH_MAX_AMOUNT_WEI"
+            if asset_id == ETH_ASSET_ID
+            else f"HOLON_{network_id.upper()}_USDC_MAX_AMOUNT_ATOMIC"
+        ),
+    )
+
+
+TRANSFER_ROUTES = MappingProxyType({
+    (network_id, asset_id): _route(network_id, asset_id)
+    for network_id in (ETHEREUM_NETWORK_ID, BASE_NETWORK_ID)
+    for asset_id in (ETH_ASSET_ID, USDC_ASSET_ID)
+})
+ALLOWLISTED_TOKEN_CONTRACTS = frozenset(
+    contract.lower()
+    for contract in (ETHEREUM_USDC, BASE_USDC)
+)
 
 
 class TransferFlowState(str, Enum):
@@ -44,6 +104,9 @@ class TransferFlowState(str, Enum):
 
 
 class TransferPreflightCode(str, Enum):
+    INVALID_ROUTE = "INVALID_ROUTE"
+    INVALID_AMOUNT = "INVALID_AMOUNT"
+    AMOUNT_LIMIT_EXCEEDED = "AMOUNT_LIMIT_EXCEEDED"
     INVALID_RECIPIENT = "INVALID_RECIPIENT"
     RESERVED_RECIPIENT = "RESERVED_RECIPIENT"
     RPC_UNAVAILABLE = "RPC_UNAVAILABLE"
@@ -111,6 +174,9 @@ class PendingTransferRequest:
     profile_id: str
     created_at: datetime
     expires_at: datetime
+    network_id: str = BASE_NETWORK_ID
+    asset_id: str = USDC_ASSET_ID
+    amount_atomic: int = USDC_AMOUNT_ATOMIC
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,8 +228,9 @@ class PreparedTransferAction:
     network_id: str
     network_label: str
     chain_id: int
+    asset_id: str
     token: str
-    token_contract: str
+    token_contract: str | None
     amount_atomic: int
     decimals: int
     transaction: UnsignedTransaction
@@ -184,6 +251,7 @@ class PreparedTransferAction:
             "network_id": self.network_id,
             "network_label": self.network_label,
             "chain_id": self.chain_id,
+            "asset_id": self.asset_id,
             "token": self.token,
             "token_contract": self.token_contract,
             "amount_atomic": self.amount_atomic,
@@ -290,7 +358,7 @@ RpcFactory = Callable[[str], TransferRpc]
 
 
 class TransferPreflightService:
-    """Builds one exact unsigned Base native-USDC transfer."""
+    """Builds one exact unsigned transaction for an allowlisted route."""
 
     def __init__(
         self,
@@ -308,17 +376,25 @@ class TransferPreflightService:
     ) -> PreparedTransferAction:
         if request.profile_id != profile.profile_id:
             raise TransferPreflightError(TransferPreflightCode.DATA_INVALID)
+        try:
+            route = transfer_route(request.network_id, request.asset_id)
+        except TransferPreflightError:
+            raise
+        if (
+            type(request.amount_atomic) is not int
+            or request.amount_atomic <= 0
+            or request.amount_atomic >= 2**256
+        ):
+            raise TransferPreflightError(TransferPreflightCode.INVALID_AMOUNT)
         normalized = normalize_recipient(recipient, profile.address)
-        endpoint = self._environ.get(
-            "HOLON_BASE_RPC_URL", "https://base-rpc.publicnode.com",
-        ).strip()
+        endpoint = self._environ.get(route.endpoint_env, route.default_endpoint).strip()
         if not endpoint:
             raise TransferPreflightError(TransferPreflightCode.RPC_UNAVAILABLE)
         attempts = 0
         while True:
             try:
                 return self._prepare_once(
-                    self._rpc_factory(endpoint), request, profile, normalized,
+                    self._rpc_factory(endpoint), request, profile, normalized, route,
                 )
             except _RpcUnavailable as error:
                 if attempts >= 1:
@@ -357,23 +433,111 @@ class TransferPreflightService:
                     TransferPreflightCode.RPC_UNAVAILABLE,
                 ) from error
 
+    def quote_maximum_native(
+        self,
+        profile: ProfileSummary,
+        network_id: str,
+        recipient: str,
+    ) -> int:
+        route = transfer_route(network_id, ETH_ASSET_ID)
+        normalized = normalize_recipient(recipient, profile.address)
+        endpoint = self._environ.get(route.endpoint_env, route.default_endpoint).strip()
+        if not endpoint:
+            raise TransferPreflightError(TransferPreflightCode.RPC_UNAVAILABLE)
+        attempts = 0
+        while True:
+            try:
+                return self._quote_maximum_native_once(
+                    self._rpc_factory(endpoint), profile, normalized, route,
+                )
+            except (_RpcUnavailable, *_TRANSPORT_ERRORS) as error:
+                if attempts >= 1:
+                    raise TransferPreflightError(
+                        TransferPreflightCode.RPC_UNAVAILABLE,
+                    ) from error
+                attempts += 1
+            except _GasEstimateUnavailable as error:
+                raise TransferPreflightError(
+                    TransferPreflightCode.GAS_ESTIMATE_FAILED,
+                ) from error
+            except TransferPreflightError:
+                raise
+            except (ArithmeticError, KeyError, TypeError, ValueError) as error:
+                raise TransferPreflightError(TransferPreflightCode.DATA_INVALID) from error
+            except Exception as error:
+                raise TransferPreflightError(
+                    TransferPreflightCode.RPC_UNAVAILABLE,
+                ) from error
+
+    @staticmethod
+    def _quote_maximum_native_once(
+        rpc: TransferRpc,
+        profile: ProfileSummary,
+        recipient: str,
+        route: TransferRouteSpec,
+    ) -> int:
+        if rpc.chain_id() != route.chain_id:
+            raise TransferPreflightError(TransferPreflightCode.WRONG_CHAIN)
+        block_number, base_fee = rpc.latest_block()
+        _non_negative(block_number)
+        balance = _non_negative(rpc.native_balance(profile.address))
+        nonce = _non_negative(rpc.pending_nonce(profile.address))
+        priority_fee = _non_negative(rpc.max_priority_fee_per_gas())
+        base_fee = _non_negative(base_fee)
+        max_fee = 2 * base_fee + priority_fee
+        if max_fee <= 0:
+            raise TransferPreflightError(TransferPreflightCode.DATA_INVALID)
+        provisional_value = balance - 21_000 * max_fee
+        if provisional_value <= 0:
+            raise TransferPreflightError(TransferPreflightCode.INSUFFICIENT_ETH)
+        transaction = {
+            "from": profile.address,
+            "to": recipient,
+            "value": provisional_value,
+            "data": "0x",
+            "nonce": nonce,
+            "type": 2,
+            "chainId": route.chain_id,
+            "maxFeePerGas": max_fee,
+            "maxPriorityFeePerGas": priority_fee,
+        }
+        first_estimate = _positive(rpc.estimate_gas(transaction))
+        first_reserve_gas = first_estimate + max(1_000, (first_estimate + 9) // 10)
+        amount = balance - first_reserve_gas * max_fee
+        if amount <= 0:
+            raise TransferPreflightError(TransferPreflightCode.INSUFFICIENT_ETH)
+        transaction["value"] = amount
+        final_estimate = _positive(rpc.estimate_gas(transaction))
+        estimate = max(first_estimate, final_estimate)
+        reserve_gas = estimate + max(1_000, (estimate + 9) // 10)
+        amount = balance - reserve_gas * max_fee
+        if amount <= 0:
+            raise TransferPreflightError(TransferPreflightCode.INSUFFICIENT_ETH)
+        return amount
+
     def _prepare_once(
         self,
         rpc: TransferRpc,
         request: PendingTransferRequest,
         profile: ProfileSummary,
         recipient: str,
+        route: TransferRouteSpec,
     ) -> PreparedTransferAction:
-        if rpc.chain_id() != BASE_CHAIN_ID:
+        if rpc.chain_id() != route.chain_id:
             raise TransferPreflightError(TransferPreflightCode.WRONG_CHAIN)
         block_number, base_fee = rpc.latest_block()
         native_balance = _non_negative(rpc.native_balance(profile.address))
-        decimals = rpc.token_decimals(BASE_USDC)
-        if decimals != USDC_DECIMALS:
-            raise TransferPreflightError(TransferPreflightCode.TOKEN_METADATA_INVALID)
-        token_balance = _non_negative(rpc.token_balance(BASE_USDC, profile.address))
-        if token_balance < USDC_AMOUNT_ATOMIC:
-            raise TransferPreflightError(TransferPreflightCode.INSUFFICIENT_USDC)
+        token_balance = 0
+        decimals = route.decimals
+        if route.token_contract is not None:
+            decimals = rpc.token_decimals(route.token_contract)
+            if decimals != route.decimals:
+                raise TransferPreflightError(TransferPreflightCode.TOKEN_METADATA_INVALID)
+            token_balance = _non_negative(
+                rpc.token_balance(route.token_contract, profile.address)
+            )
+            if token_balance < request.amount_atomic:
+                raise TransferPreflightError(TransferPreflightCode.INSUFFICIENT_USDC)
         nonce = _non_negative(rpc.pending_nonce(profile.address))
         priority_fee = _non_negative(rpc.max_priority_fee_per_gas())
         block_number = _non_negative(block_number)
@@ -381,21 +545,28 @@ class TransferPreflightService:
         max_fee = 2 * base_fee + priority_fee
         if max_fee <= 0:
             raise TransferPreflightError(TransferPreflightCode.DATA_INVALID)
-        calldata = encode_usdc_transfer(recipient, USDC_AMOUNT_ATOMIC)
+        calldata = (
+            "0x"
+            if route.token_contract is None
+            else encode_usdc_transfer(recipient, request.amount_atomic)
+        )
         estimate_transaction = {
             "from": profile.address,
-            "to": BASE_USDC,
-            "value": 0,
+            "to": recipient if route.token_contract is None else route.token_contract,
+            "value": request.amount_atomic if route.token_contract is None else 0,
             "data": calldata,
             "nonce": nonce,
             "type": 2,
-            "chainId": BASE_CHAIN_ID,
+            "chainId": route.chain_id,
             "maxFeePerGas": max_fee,
             "maxPriorityFeePerGas": priority_fee,
         }
         gas = _positive(rpc.estimate_gas(estimate_transaction))
         max_total_fee = gas * max_fee
-        if native_balance < max_total_fee:
+        required_native = max_total_fee + (
+            request.amount_atomic if route.token_contract is None else 0
+        )
+        if native_balance < required_native:
             raise TransferPreflightError(TransferPreflightCode.INSUFFICIENT_ETH)
         snapshot = TransferPreflightSnapshot(
             block_number,
@@ -407,7 +578,9 @@ class TransferPreflightService:
             priority_fee,
             gas,
         )
-        return _action_from_snapshot(request, profile, recipient, calldata, snapshot)
+        return _action_from_snapshot(
+            request, profile, recipient, calldata, snapshot, route,
+        )
 
     @staticmethod
     def _default_rpc_factory(endpoint: str) -> TransferRpc:
@@ -447,9 +620,18 @@ class TransferFlowCoordinator:
     def accepted_digest(self) -> str:
         return self._accepted_digest
 
-    def begin(self, profile_id: str) -> PendingTransferRequest:
+    def begin(
+        self,
+        profile_id: str,
+        network_id: str = BASE_NETWORK_ID,
+        asset_id: str = USDC_ASSET_ID,
+        amount_atomic: int = USDC_AMOUNT_ATOMIC,
+    ) -> PendingTransferRequest:
         if self._state is not TransferFlowState.LOCKED:
             raise TransferFlowError("A transfer flow is already active")
+        transfer_route(network_id, asset_id)
+        if type(amount_atomic) is not int or amount_atomic <= 0 or amount_atomic >= 2**256:
+            raise TransferPreflightError(TransferPreflightCode.INVALID_AMOUNT)
         action_id = self._action_id_factory()
         if action_id in self._terminal_ids:
             raise TransferFlowError("Terminal action IDs cannot be reused")
@@ -459,6 +641,9 @@ class TransferFlowCoordinator:
             profile_id,
             created_at,
             created_at + ACTION_LIFETIME,
+            network_id,
+            asset_id,
+            amount_atomic,
         )
         self._pending = request
         self._state = TransferFlowState.PREPARING
@@ -472,6 +657,9 @@ class TransferFlowCoordinator:
             return False
         if (
             pending.profile_id != action.profile_id
+            or pending.network_id != action.network_id
+            or pending.asset_id != action.asset_id
+            or pending.amount_atomic != action.amount_atomic
             or pending.created_at != action.created_at
             or pending.expires_at != action.expires_at
             or self._clock().astimezone(UTC) >= action.expires_at
@@ -575,6 +763,34 @@ class TransferFlowCoordinator:
         self._state = TransferFlowState.LOCKED
 
 
+def transfer_route(network_id: str, asset_id: str) -> TransferRouteSpec:
+    try:
+        return TRANSFER_ROUTES[(network_id, asset_id)]
+    except (KeyError, TypeError) as error:
+        raise TransferPreflightError(TransferPreflightCode.INVALID_ROUTE) from error
+
+
+def parse_transfer_amount(value: str, decimals: int) -> tuple[int, str]:
+    candidate = value if isinstance(value, str) else ""
+    if (
+        type(decimals) is not int
+        or decimals < 0
+        or "." in candidate and "," in candidate
+        or AMOUNT_RE.fullmatch(candidate) is None
+    ):
+        raise TransferPreflightError(TransferPreflightCode.INVALID_AMOUNT)
+    normalized = candidate.replace(",", ".")
+    whole, separator, fraction = normalized.partition(".")
+    if len(fraction) > decimals:
+        raise TransferPreflightError(TransferPreflightCode.INVALID_AMOUNT)
+    atomic = int(whole) * 10**decimals
+    if separator:
+        atomic += int(fraction.ljust(decimals, "0"))
+    if atomic <= 0 or atomic >= 2**256:
+        raise TransferPreflightError(TransferPreflightCode.INVALID_AMOUNT)
+    return atomic, format_atomic_amount(atomic, decimals)
+
+
 def normalize_recipient(value: str, sender: str) -> str:
     candidate = value.strip() if isinstance(value, str) else ""
     if ADDRESS_RE.fullmatch(candidate) is None or not Web3.is_address(candidate):
@@ -583,7 +799,11 @@ def normalize_recipient(value: str, sender: str) -> str:
     if not (body.islower() or body.isupper()) and not Web3.is_checksum_address(candidate):
         raise TransferPreflightError(TransferPreflightCode.INVALID_RECIPIENT)
     normalized = Web3.to_checksum_address(candidate)
-    reserved = {ZERO_ADDRESS.lower(), sender.lower(), BASE_USDC.lower()}
+    reserved = {
+        ZERO_ADDRESS.lower(),
+        sender.lower(),
+        *ALLOWLISTED_TOKEN_CONTRACTS,
+    }
     if normalized.lower() in reserved:
         raise TransferPreflightError(TransferPreflightCode.RESERVED_RECIPIENT)
     return normalized
@@ -609,12 +829,20 @@ def transfer_action_to_map(action: PreparedTransferAction) -> dict[str, object]:
         "recipient": action.recipient,
         "shortRecipient": _short_address(action.recipient),
         "network": action.network_label,
+        "networkId": action.network_id,
         "chainId": str(action.chain_id),
+        "assetId": action.asset_id,
         "token": action.token,
-        "amount": "1 USDC",
+        "amount": f"{format_atomic_amount(action.amount_atomic, action.decimals)} {action.token}",
+        "amountValue": format_atomic_amount(action.amount_atomic, action.decimals),
         "amountAtomic": str(action.amount_atomic),
-        "contract": action.token_contract,
-        "shortContract": _short_address(action.token_contract),
+        "contract": action.token_contract or "",
+        "shortContract": (
+            _short_address(action.token_contract) if action.token_contract else "Native asset"
+        ),
+        "transactionTarget": tx.to,
+        "shortTransactionTarget": _short_address(tx.to),
+        "nativeValueWei": str(tx.value),
         "calldataHash": action.calldata_hash,
         "nonce": str(tx.nonce),
         "gas": str(tx.gas),
@@ -636,14 +864,15 @@ def _action_from_snapshot(
     recipient: str,
     calldata: str,
     snapshot: TransferPreflightSnapshot,
+    route: TransferRouteSpec,
 ) -> PreparedTransferAction:
     max_fee = 2 * snapshot.base_fee_per_gas + snapshot.max_priority_fee_per_gas
     transaction = UnsignedTransaction(
         2,
-        BASE_CHAIN_ID,
+        route.chain_id,
         snapshot.pending_nonce,
-        BASE_USDC,
-        0,
+        recipient if route.token_contract is None else route.token_contract,
+        request.amount_atomic if route.token_contract is None else 0,
         calldata,
         snapshot.gas_estimate,
         max_fee,
@@ -656,13 +885,14 @@ def _action_from_snapshot(
         profile.label,
         profile.address,
         recipient,
-        BASE_NETWORK_ID,
-        BASE_NETWORK_LABEL,
-        BASE_CHAIN_ID,
-        USDC_SYMBOL,
-        BASE_USDC,
-        USDC_AMOUNT_ATOMIC,
-        USDC_DECIMALS,
+        route.network_id,
+        route.network_label,
+        route.chain_id,
+        route.asset_id,
+        route.symbol,
+        route.token_contract,
+        request.amount_atomic,
+        route.decimals,
         transaction,
         snapshot.block_number,
         snapshot.gas_estimate * max_fee,
@@ -692,6 +922,13 @@ def _short_address(value: str) -> str:
 def _format_wei(value: int) -> str:
     rendered = format(Decimal(value).scaleb(-18), "f").rstrip("0").rstrip(".")
     return rendered or "0"
+
+
+def format_atomic_amount(value: int, decimals: int) -> str:
+    whole, fraction = divmod(int(value), 10**decimals)
+    if fraction == 0:
+        return str(whole)
+    return f"{whole}.{fraction:0{decimals}d}".rstrip("0")
 
 
 _TRANSPORT_ERRORS = (

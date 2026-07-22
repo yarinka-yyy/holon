@@ -56,6 +56,22 @@ def set_text(app: WalletApplication, name: str, value: str) -> None:
     assert child(app, name).setProperty("text", value)
 
 
+def fill_send(
+    app: WalletApplication,
+    recipient: str,
+    amount: str = "1",
+    network: str = "base",
+    asset: str = "usdc",
+) -> None:
+    invoke(
+        child(app, "sendEthereumNetwork" if network == "ethereum" else "sendBaseNetwork"),
+        "trigger",
+    )
+    invoke(child(app, "sendEthAsset" if asset == "eth" else "sendUsdcAsset"), "trigger")
+    set_text(app, "transferRecipientInput", recipient)
+    set_text(app, "transferAmountInput", amount)
+
+
 def fresh_password() -> str:
     return secrets.token_urlsafe(18)
 
@@ -228,9 +244,32 @@ def test_send_review_mainnet_confirmation_result_and_history(tmp_path, qt_app) -
 
         assert app.controller.currentScreen == "send"
         assert not child(app, "prepareTransferButton").property("enabled")
+        assert not child(app, "sendEthereumNetwork").property("selected")
+        assert not child(app, "sendBaseNetwork").property("selected")
+        assert not child(app, "sendEthAsset").property("selected")
+        assert not child(app, "sendUsdcAsset").property("selected")
+        invoke(child(app, "sendEthereumNetwork"), "trigger")
+        qt_app.processEvents()
+        assert child(app, "sendEthereumNetwork").property("selected")
+        assert child(app, "assetSelectorButton").property("enabled")
+        invoke(child(app, "assetSelectorButton"), "trigger")
+        qt_app.processEvents()
+        assert child(app, "assetSelectorButton").property("menuOpen")
+        invoke(child(app, "sendEthAsset"), "trigger")
+        assert not child(app, "assetSelectorButton").property("menuOpen")
+        set_text(app, "transferAmountInput", "0.1")
+        invoke(child(app, "sendBaseNetwork"), "trigger")
+        assert child(app, "transferAmountInput").property("text") == ""
+        assert not child(app, "sendEthAsset").property("selected")
         recipient = "0x" + "44" * 20
         QGuiApplication.clipboard().setText(recipient)
         invoke(child(app, "pasteRecipientButton"), "trigger")
+        invoke(child(app, "sendBaseNetwork"), "trigger")
+        invoke(child(app, "sendUsdcAsset"), "trigger")
+        assert child(app, "maxTransferButton").property("enabled")
+        invoke(child(app, "maxTransferButton"), "trigger")
+        assert child(app, "transferAmountInput").property("text") == "2.5"
+        set_text(app, "transferAmountInput", "1,0")
         qt_app.processEvents()
         assert child(app, "transferRecipientInput").property("text") == recipient
         assert child(app, "prepareTransferButton").property("enabled")
@@ -241,17 +280,19 @@ def test_send_review_mainnet_confirmation_result_and_history(tmp_path, qt_app) -
         assert child(app, "transferReviewPageProgress").property("activeStep") == 0
         assert child(app, "transferReviewNetwork").property("text") == "Base · 8453"
         assert child(app, "transferReviewAmount").property("text") == "1 USDC"
-        assert child(app, "transferReviewRecipient").property("text").endswith("444444")
+        assert child(app, "transferReviewRecipient").property("enabled")
+        assert app.controller.transferAction["recipient"].endswith("444444")
         assert child(app, "transferReviewFee").property("secondary").endswith("ETH")
         assert app.controller.transferAction["expiresAt"].endswith("UTC")
         assert app.controller.mainnetFeeLimit.endswith("ETH")
         invoke(child(app, "transferDetailsButton"), "trigger")
-        assert child(app, "transferReviewScroll").property("contentHeight") == 980
+        assert child(app, "transferReviewScroll").property("contentHeight") == 1090
 
         invoke(child(app, "editTransferButton"), "trigger")
         qt_app.processEvents()
         assert app.controller.currentScreen == "send"
         assert child(app, "transferRecipientInput").property("text") == recipient
+        assert child(app, "transferAmountInput").property("text") == "1"
         invoke(child(app, "prepareTransferButton"), "trigger")
         qt_app.processEvents()
         assert child(app, "continueMainnetButton").property("enabled")
@@ -311,7 +352,7 @@ def test_mainnet_runtime_gate_wrong_password_and_cancel(tmp_path, qt_app) -> Non
         set_text(app, "passwordTextInput", password)
         invoke(child(app, "passwordSubmitButton"), "trigger")
         invoke(child(app, "sendAction"), "trigger")
-        set_text(app, "transferRecipientInput", "0x" + "44" * 20)
+        fill_send(app, "0x" + "44" * 20)
         invoke(child(app, "prepareTransferButton"), "trigger")
         qt_app.processEvents()
         assert app.controller.currentScreen == "transfer_review"
@@ -325,14 +366,14 @@ def test_mainnet_runtime_gate_wrong_password_and_cancel(tmp_path, qt_app) -> Non
         set_text(active, "passwordTextInput", password)
         invoke(child(active, "passwordSubmitButton"), "trigger")
         invoke(child(active, "sendAction"), "trigger")
-        set_text(active, "transferRecipientInput", "0x" + "55" * 20)
+        fill_send(active, "0x" + "55" * 20)
         invoke(child(active, "prepareTransferButton"), "trigger")
         invoke(child(active, "continueMainnetButton"), "trigger")
         invoke(child(active, "mainnetCancelButton"), "trigger")
         assert active.controller.currentScreen == "main"
 
         invoke(child(active, "sendAction"), "trigger")
-        set_text(active, "transferRecipientInput", "0x" + "66" * 20)
+        fill_send(active, "0x" + "66" * 20)
         invoke(child(active, "prepareTransferButton"), "trigger")
         invoke(child(active, "continueMainnetButton"), "trigger")
         set_text(active, "mainnetPasswordInput", fresh_password())
@@ -364,7 +405,7 @@ def test_ordinary_window_close_is_blocked_only_during_submission(
         set_text(app, "passwordTextInput", password)
         invoke(child(app, "passwordSubmitButton"), "trigger")
         invoke(child(app, "sendAction"), "trigger")
-        set_text(app, "transferRecipientInput", "0x" + "44" * 20)
+        fill_send(app, "0x" + "44" * 20)
         invoke(child(app, "prepareTransferButton"), "trigger")
         deferred.run_next()
         invoke(child(app, "continueMainnetButton"), "trigger")
@@ -404,13 +445,13 @@ def test_send_failure_remains_on_form_and_writes_no_history(tmp_path, qt_app) ->
         set_text(app, "passwordTextInput", password)
         invoke(child(app, "passwordSubmitButton"), "trigger")
         invoke(child(app, "sendAction"), "trigger")
-        set_text(app, "transferRecipientInput", "0x" + "44" * 20)
+        fill_send(app, "0x" + "44" * 20)
         invoke(child(app, "prepareTransferButton"), "trigger")
         qt_app.processEvents()
 
         assert app.controller.currentScreen == "send"
         assert child(app, "transferErrorLabel").property("text") == (
-            "This Account does not have 1 USDC on Base"
+            "Insufficient USDC for this transfer"
         )
         assert app.controller.historyRecords == []
     finally:
@@ -429,7 +470,7 @@ def test_send_loading_back_ignores_late_result(tmp_path, qt_app) -> None:
         set_text(app, "passwordTextInput", password)
         invoke(child(app, "passwordSubmitButton"), "trigger")
         invoke(child(app, "sendAction"), "trigger")
-        set_text(app, "transferRecipientInput", "0x" + "44" * 20)
+        fill_send(app, "0x" + "44" * 20)
         invoke(child(app, "prepareTransferButton"), "trigger")
         qt_app.processEvents()
 
@@ -504,7 +545,7 @@ def test_v2_receive_settings_privacy_and_transaction_details(tmp_path, qt_app) -
         invoke(child(app, "settingsBackButton"), "trigger")
 
         invoke(child(app, "sendAction"), "trigger")
-        set_text(app, "transferRecipientInput", "0x" + "44" * 20)
+        fill_send(app, "0x" + "44" * 20)
         invoke(child(app, "prepareTransferButton"), "trigger")
         action_id = app.controller.transferAction["actionId"]
         app.controller.cancelTransfer()

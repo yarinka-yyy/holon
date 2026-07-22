@@ -14,7 +14,7 @@ PageState {
             return "Ethereum and Base balances are read through approved public RPC endpoints. ETH/USD and USDC/USD use fixed Chainlink feeds on Base. Network data can be unavailable and is never used to authorize a transaction."
         if (section === "security")
             return "Accounts are stored in an encrypted local vault. Every mainnet transfer requires a fresh password and explicit confirmation. Authorization is valid for one exact action only."
-        return "Holon Wallet is the standalone MVP1 Wallet for the Holon project. This build supports local Accounts, public portfolio data and a bounded Base USDC transfer flow."
+        return "Holon Wallet is the standalone MVP1 Wallet for the Holon project. This build supports local Accounts, public portfolio data and bounded ETH/USDC transfers on Ethereum and Base."
     }
     ScreenHeader {
         objectName: "settingsInfo"; x: 28; y: 54; width: 458

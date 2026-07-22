@@ -28,6 +28,7 @@ from holon_wallet.transfer import (
     PendingTransferRequest,
     SigningPermit,
     TransferPreflightService,
+    transfer_route,
 )
 from holon_wallet.vault import VaultRepository
 from holon_wallet.wallet_crypto import generate_mnemonic, import_private_key
@@ -51,7 +52,7 @@ class MainnetRpcStub:
             "remote_hash": None,
             "transaction": None,
             "receipt": None,
-        }
+    }
         self.values.update(overrides)
         self.chain_calls = 0
         self.send_calls = 0
@@ -110,21 +111,31 @@ def new_raw_key():
             continue
 
 
-def prepared_fixture(tmp_path, profile_type: str = "mnemonic"):
+def prepared_fixture(
+    tmp_path,
+    profile_type: str = "mnemonic",
+    network_id: str = "base",
+    asset_id: str = "usdc",
+    amount_atomic: int = 1_000_000,
+):
     password = new_password()
     repository = VaultRepository(WalletPaths(tmp_path))
     material = generate_mnemonic() if profile_type == "mnemonic" else new_raw_key()
     record = repository.new_record(material, "Main Account")
     repository.create_new(password, record)
-    rpc = MainnetRpcStub()
+    route = transfer_route(network_id, asset_id)
+    rpc = MainnetRpcStub(chain_id=route.chain_id, token_balance=10_000_000)
     request = PendingTransferRequest(
         "act-mainnet",
         record.summary.profile_id,
         NOW,
         NOW + timedelta(minutes=5),
+        network_id,
+        asset_id,
+        amount_atomic,
     )
     action = TransferPreflightService(
-        lambda _endpoint: rpc, environ={BASE_RPC_ENV: "fixture://base"},
+        lambda _endpoint: rpc, environ={route.endpoint_env: "fixture://route"},
     ).prepare(request, record.summary, RECIPIENT)
     history = HistoryStore(repository.paths)
     history.append(history_record(action))
@@ -162,7 +173,10 @@ def executor(repository, history, rpc, **changes):
             MainnetBroadcastPolicy(True, OfflineSigningPolicy(10**18)),
         ),
         lambda _endpoint: rpc,
-        {BASE_RPC_ENV: "fixture://base"},
+        {
+            BASE_RPC_ENV: "fixture://base",
+            "HOLON_ETHEREUM_RPC_URL": "fixture://ethereum",
+        },
         changes.pop("clock", lambda: NOW),
         **changes,
     )
@@ -191,24 +205,94 @@ def test_exact_transaction_is_signed_and_broadcast_once(tmp_path, profile_type) 
     assert secret_canary not in repr(result)
 
 
-def test_runtime_policy_requires_explicit_enable_and_fee_cap(tmp_path) -> None:
+def test_ethereum_native_uses_ethereum_endpoint_and_exact_receipt(tmp_path) -> None:
+    repository, history, action, password, _secret, rpc = prepared_fixture(
+        tmp_path, network_id="ethereum", asset_id="eth", amount_atomic=10**15,
+    )
+    endpoints: list[str] = []
+
+    def factory(endpoint: str):
+        endpoints.append(endpoint)
+        return rpc
+
+    environ = {
+        BASE_RPC_ENV: "fixture://base",
+        "HOLON_ETHEREUM_RPC_URL": "fixture://ethereum",
+        "HOLON_ETHEREUM_BROADCAST_ENABLED": "1",
+        "HOLON_ETHEREUM_MAX_TOTAL_FEE_WEI": str(action.max_total_fee_wei),
+        "HOLON_ETHEREUM_ETH_MAX_AMOUNT_WEI": str(action.amount_atomic),
+    }
+    sender = MainnetTransferExecutor(
+        repository,
+        history,
+        MainnetBroadcastPolicy.from_environment(environ),
+        factory,
+        environ,
+        lambda: NOW,
+    )
+    sent = sender.execute(action, action.digest, password, SigningPermit())
+    assert sent.code is MainnetTransferCode.PENDING
+    assert endpoints == ["fixture://ethereum"]
+    assert rpc.send_calls == 1
+
+    rpc.values["transaction"] = {
+        "hash": sent.transaction_hash,
+        "from": action.sender,
+        "to": action.recipient,
+        "value": action.amount_atomic,
+        "input": "0x",
+        "chainId": action.chain_id,
+    }
+    rpc.values["receipt"] = {
+        "transactionHash": sent.transaction_hash,
+        "from": action.sender,
+        "to": action.recipient,
+        "status": 1,
+        "gasUsed": 21_000,
+        "effectiveGasPrice": 12,
+        "logs": [],
+    }
+    confirmed = BroadcastReceiptTracker(
+        history, factory, environ, lambda: NOW, timeout_seconds=0,
+    ).check_once(action.action_id)
+    assert confirmed.status is HistoryStatus.CONFIRMED
+    assert endpoints[-1] == "fixture://ethereum"
+
+
+def test_runtime_policy_requires_explicit_enable_fee_and_amount_caps(tmp_path) -> None:
     _repository, _history, action, _password, _secret, _rpc = prepared_fixture(tmp_path)
     disabled = MainnetBroadcastPolicy.from_environment({})
     missing_fee = MainnetBroadcastPolicy.from_environment(
         {BROADCAST_ENABLED_ENV: "1"},
     )
-    available = MainnetBroadcastPolicy.from_environment(
+    missing_amount = MainnetBroadcastPolicy.from_environment(
         {
             BROADCAST_ENABLED_ENV: "1",
             FEE_LIMIT_ENV: str(action.max_total_fee_wei),
         },
     )
+    available = MainnetBroadcastPolicy.from_environment(
+        {
+            BROADCAST_ENABLED_ENV: "1",
+            FEE_LIMIT_ENV: str(action.max_total_fee_wei),
+            "HOLON_BASE_USDC_MAX_AMOUNT_ATOMIC": str(action.amount_atomic),
+        },
+    )
 
     assert not disabled.available and not missing_fee.available
+    assert not missing_amount.available
     assert available.available and available.evaluate(action) is None
     assert MainnetBroadcastPolicy(
         True, OfflineSigningPolicy(action.max_total_fee_wei - 1),
     ).evaluate(action) is MainnetTransferCode.FEE_LIMIT_EXCEEDED
+    limited = MainnetBroadcastPolicy.from_environment(
+        {
+            BROADCAST_ENABLED_ENV: "1",
+            FEE_LIMIT_ENV: str(action.max_total_fee_wei),
+            "HOLON_BASE_USDC_MAX_AMOUNT_ATOMIC": str(action.amount_atomic - 1),
+        },
+    )
+    assert limited.evaluate(action) is MainnetTransferCode.AMOUNT_LIMIT_EXCEEDED
 
 
 @pytest.mark.parametrize(
@@ -362,14 +446,17 @@ def test_receipt_tracker_rejects_wrong_event_and_recovers_unknown_pending(
         "hash": sent.transaction_hash,
         "from": action.sender,
         "to": action.token_contract,
+        "value": 0,
+        "input": action.transaction.data,
+        "chainId": action.chain_id,
     }
     chain_calls = rpc.chain_calls
     assert tracker.check_once(action.action_id).status is HistoryStatus.PENDING
-    assert rpc.chain_calls == chain_calls
+    assert rpc.chain_calls == chain_calls + 1
 
     rpc.values["receipt"] = receipt(action, sent.transaction_hash, amount=2_000_000)
     assert tracker.check_once(action.action_id).status is HistoryStatus.UNKNOWN
-    assert rpc.chain_calls == chain_calls
+    assert rpc.chain_calls == chain_calls + 2
 
     malformed_fee = receipt(action, sent.transaction_hash)
     malformed_fee.pop("effectiveGasPrice")

@@ -8,10 +8,12 @@ from requests import exceptions as request_errors
 from web3 import Web3
 
 from holon_wallet.model import ProfileSummary
-from holon_wallet.public_data import BASE_USDC
+from holon_wallet.public_data import BASE_USDC, ETHEREUM_USDC
 from holon_wallet.transfer import (
     BASE_CHAIN_ID,
+    ETH_ASSET_ID,
     PendingTransferRequest,
+    TRANSFER_ROUTES,
     TransferFlowCoordinator,
     TransferFlowError,
     TransferFlowState,
@@ -20,7 +22,10 @@ from holon_wallet.transfer import (
     TransferPreflightService,
     USDC_AMOUNT_ATOMIC,
     encode_usdc_transfer,
+    format_atomic_amount,
     normalize_recipient,
+    parse_transfer_amount,
+    transfer_route,
     transfer_action_to_map,
 )
 
@@ -50,7 +55,8 @@ def request() -> PendingTransferRequest:
 
 
 class StubTransferRpc:
-    def __init__(self, **overrides) -> None:
+    def __init__(self, expected_contract=BASE_USDC, **overrides) -> None:
+        self.expected_contract = expected_contract
         self.values = {
             "chain_id": BASE_CHAIN_ID,
             "block": (123456, 10),
@@ -74,11 +80,11 @@ class StubTransferRpc:
         return self._value("native")
 
     def token_decimals(self, contract: str) -> int:
-        assert contract == BASE_USDC
+        assert contract == self.expected_contract
         return self._value("decimals")
 
     def token_balance(self, contract: str, _address: str) -> int:
-        assert contract == BASE_USDC
+        assert contract == self.expected_contract
         return self._value("token")
 
     def pending_nonce(self, _address: str) -> int:
@@ -115,10 +121,109 @@ def test_recipient_normalization_and_guards() -> None:
         normalize_recipient(bad_checksum, SENDER)
     assert checksum.value.code is TransferPreflightCode.INVALID_RECIPIENT
 
-    for reserved in ("0x" + "00" * 20, SENDER, BASE_USDC):
+    for reserved in ("0x" + "00" * 20, SENDER, BASE_USDC, ETHEREUM_USDC):
         with pytest.raises(TransferPreflightError) as blocked:
             normalize_recipient(reserved, SENDER)
         assert blocked.value.code is TransferPreflightCode.RESERVED_RECIPIENT
+
+
+@pytest.mark.parametrize(
+    ("value", "decimals", "atomic", "canonical"),
+    [
+        ("1", 18, 10**18, "1"),
+        ("0,000001", 6, 1, "0.000001"),
+        ("001.2500", 6, 1_250_000, "1.25"),
+        ("0.000000000000000001", 18, 1, "0.000000000000000001"),
+    ],
+)
+def test_exact_amount_parser(value, decimals, atomic, canonical) -> None:
+    assert parse_transfer_amount(value, decimals) == (atomic, canonical)
+    assert format_atomic_amount(atomic, decimals) == canonical
+
+
+def test_transfer_route_registry_is_immutable() -> None:
+    with pytest.raises(TypeError):
+        TRANSFER_ROUTES[("base", "eth")] = transfer_route("base", "eth")
+
+
+@pytest.mark.parametrize(
+    ("value", "decimals"),
+    [
+        ("0", 18), ("-1", 18), ("+1", 18), ("1e2", 18),
+        ("1.", 18), (".1", 18), ("1,2.3", 18), ("0.0000001", 6),
+        (" 1", 18), ("1 ", 18),
+    ],
+)
+def test_amount_parser_rejects_noncanonical_or_inexact_input(value, decimals) -> None:
+    with pytest.raises(TransferPreflightError) as failure:
+        parse_transfer_amount(value, decimals)
+    assert failure.value.code is TransferPreflightCode.INVALID_AMOUNT
+
+
+@pytest.mark.parametrize(
+    ("network_id", "asset_id", "amount_atomic"),
+    [
+        ("ethereum", "eth", 10**16),
+        ("ethereum", "usdc", 2_500_001),
+        ("base", "eth", 10**15),
+        ("base", "usdc", 1_250_000),
+    ],
+)
+def test_all_allowlisted_routes_build_exact_type2_transactions(
+    network_id, asset_id, amount_atomic,
+) -> None:
+    route = transfer_route(network_id, asset_id)
+    rpc = StubTransferRpc(
+        expected_contract=route.token_contract,
+        chain_id=route.chain_id,
+        native=10**20,
+        token=10_000_000,
+    )
+    pending = replace(
+        request(), network_id=network_id, asset_id=asset_id,
+        amount_atomic=amount_atomic,
+    )
+    action = TransferPreflightService(
+        lambda _endpoint: rpc, environ={route.endpoint_env: "fixture://route"},
+    ).prepare(pending, profile(), RECIPIENT)
+
+    assert action.network_id == network_id
+    assert action.asset_id == asset_id
+    assert action.chain_id == route.chain_id
+    assert action.amount_atomic == amount_atomic
+    assert action.token_contract == route.token_contract
+    if asset_id == ETH_ASSET_ID:
+        assert action.transaction.to == RECIPIENT
+        assert action.transaction.value == amount_atomic
+        assert action.transaction.data == "0x"
+    else:
+        assert action.transaction.to == route.token_contract
+        assert action.transaction.value == 0
+        assert action.transaction.data == encode_usdc_transfer(
+            RECIPIENT, amount_atomic,
+        )
+
+
+def test_native_maximum_quote_reserves_live_fee_envelope_with_headroom() -> None:
+    route = transfer_route("ethereum", "eth")
+    rpc = StubTransferRpc(
+        expected_contract=None,
+        chain_id=route.chain_id,
+        native=10**18,
+        gas=21_000,
+    )
+    service = TransferPreflightService(
+        lambda _endpoint: rpc,
+        environ={route.endpoint_env: "fixture://ethereum"},
+    )
+
+    maximum = service.quote_maximum_native(profile(), "ethereum", RECIPIENT)
+
+    max_fee_per_gas = 2 * 10 + 2
+    assert maximum == 10**18 - 23_100 * max_fee_per_gas
+    assert rpc.estimated_transaction["to"] == RECIPIENT
+    assert rpc.estimated_transaction["value"] < 10**18
+    assert rpc.estimated_transaction["data"] == "0x"
 
 
 def test_exact_calldata_unsigned_fields_fee_and_safe_map() -> None:
@@ -180,6 +285,25 @@ def test_preflight_rejects_unsafe_or_invalid_public_data(overrides, expected) ->
     with pytest.raises(TransferPreflightError) as failure:
         prepare(StubTransferRpc(**overrides))
     assert failure.value.code is expected
+
+
+def test_native_preflight_requires_amount_plus_maximum_fee() -> None:
+    route = transfer_route("base", "eth")
+    amount = 10**15
+    pending = replace(
+        request(), network_id="base", asset_id="eth", amount_atomic=amount,
+    )
+    # gas=50_000 and maxFeePerGas=22 produce a 1_100_000 wei maximum fee.
+    rpc = StubTransferRpc(
+        expected_contract=None,
+        native=amount + 1_100_000 - 1,
+    )
+    service = TransferPreflightService(
+        lambda _endpoint: rpc, environ={route.endpoint_env: "fixture://base"},
+    )
+    with pytest.raises(TransferPreflightError) as failure:
+        service.prepare(pending, profile(), RECIPIENT)
+    assert failure.value.code is TransferPreflightCode.INSUFFICIENT_ETH
 
 
 def test_transport_retries_once_without_exposing_endpoint() -> None:

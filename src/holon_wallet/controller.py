@@ -53,8 +53,11 @@ from .transfer import (
     TransferPreflightCode,
     TransferPreflightError,
     TransferPreflightService,
+    format_atomic_amount,
     normalize_recipient,
+    parse_transfer_amount,
     transfer_action_to_map,
+    transfer_route,
 )
 from .vault import (
     MIN_PASSWORD_LENGTH,
@@ -109,6 +112,7 @@ class WalletController(QObject):
     errorMessageChanged = Signal()
     backupWordsChanged = Signal()
     transferChanged = Signal()
+    transferMaximumReady = Signal(str, str, str, str)
     publicDataChanged = Signal()
     selectedNetworkChanged = Signal()
     historyChanged = Signal()
@@ -118,6 +122,7 @@ class WalletController(QObject):
     settingsSectionChanged = Signal()
     _publicDataReady = Signal(int, object)
     _transferReady = Signal(int, object)
+    _maximumReady = Signal(int, object, str, str, str)
     _mainnetReady = Signal(int, object)
     _receiptReady = Signal(int, object)
 
@@ -171,9 +176,14 @@ class WalletController(QObject):
         self._backup_words: tuple[str, ...] = ()
         self._transfer_flow = TransferFlowCoordinator()
         self._transfer_generation = 0
+        self._maximum_generation = 0
+        self._maximum_quoting = False
         self._transfer_preparing = False
         self._transfer_error = ""
+        self._transfer_network = ""
+        self._transfer_asset = ""
         self._transfer_recipient = ""
+        self._transfer_amount_input = ""
         self._mainnet_in_progress = False
         self._mainnet_result: MainnetTransferResult | None = None
         self._receipt_checking = False
@@ -209,6 +219,7 @@ class WalletController(QObject):
         self._transfer_expiry_timer.timeout.connect(self._expire_transfer)
         self._publicDataReady.connect(self._accept_public_data)
         self._transferReady.connect(self._accept_transfer_preflight)
+        self._maximumReady.connect(self._accept_maximum_transfer)
         self._mainnetReady.connect(self._accept_mainnet_result)
         self._receiptReady.connect(self._accept_receipt_result)
         self._initialize()
@@ -284,6 +295,10 @@ class WalletController(QObject):
     def transferPreparing(self) -> bool:
         return self._transfer_preparing
 
+    @Property(bool, notify=transferChanged)
+    def transferMaximumQuoting(self) -> bool:
+        return self._maximum_quoting
+
     @Property(str, notify=transferChanged)
     def transferError(self) -> str:
         return self._transfer_error
@@ -291,6 +306,50 @@ class WalletController(QObject):
     @Property(str, notify=transferChanged)
     def transferRecipient(self) -> str:
         return self._transfer_recipient
+
+    @Property(str, notify=transferChanged)
+    def transferNetwork(self) -> str:
+        return self._transfer_network
+
+    @Property(str, notify=transferChanged)
+    def transferAsset(self) -> str:
+        return self._transfer_asset
+
+    @Property(str, notify=transferChanged)
+    def transferAmountInput(self) -> str:
+        return self._transfer_amount_input
+
+    @Property(str, notify=transferChanged)
+    def transferAvailableBalance(self) -> str:
+        if self._transfer_network not in NETWORK_BY_ID or self._transfer_asset not in {
+            "eth", "usdc",
+        }:
+            return "Select network and asset"
+        snapshot = snapshot_to_map(self._network_snapshots[self._transfer_network])
+        key = "ethValue" if self._transfer_asset == "eth" else "usdcValue"
+        return str(snapshot.get(key) or "Data unavailable")
+
+    @Slot(str, str, result=str)
+    def maximumTransferAmount(self, network_id: str, asset_id: str) -> str:
+        try:
+            route = transfer_route(network_id, asset_id)
+        except TransferPreflightError:
+            return ""
+        if asset_id == "eth":
+            return ""
+        snapshot = self._network_snapshots.get(network_id)
+        if snapshot is None or snapshot.status is PublicDataStatus.UNAVAILABLE:
+            return ""
+        balance = snapshot.eth if asset_id == "eth" else snapshot.usdc
+        if balance is None or balance.decimals != route.decimals:
+            return ""
+        maximum = self._mainnet_executor.policy.maximum_draft_amount(
+            network_id, asset_id, balance.atomic_units,
+        )
+        return (
+            format_atomic_amount(maximum, route.decimals)
+            if maximum is not None else ""
+        )
 
     @Property(bool, notify=transferChanged)
     def mainnetExecutionAvailable(self) -> bool:
@@ -304,7 +363,21 @@ class WalletController(QObject):
 
     @Property(str, notify=transferChanged)
     def mainnetFeeLimit(self) -> str:
-        return self._mainnet_executor.policy.display
+        action = self._transfer_flow.current
+        return (
+            self._mainnet_executor.policy.display_for(action)
+            if action is not None else "Not configured"
+        )
+
+    @Property(str, notify=transferChanged)
+    def mainnetAmountLimit(self) -> str:
+        action = self._transfer_flow.current
+        if action is None:
+            return "Not configured"
+        raw = self._mainnet_executor.policy.amount_display_for(action)
+        if raw == "Not configured":
+            return raw
+        return f"≤ {format_atomic_amount(int(raw), action.decimals)} {action.token}"
 
     @Property(str, notify=transferChanged)
     def mainnetGateMessage(self) -> str:
@@ -313,12 +386,16 @@ class WalletController(QObject):
             return ""
         code = self._mainnet_executor.policy.evaluate(action)
         if code is MainnetTransferCode.POLICY_UNAVAILABLE:
+            route = transfer_route(action.network_id, action.asset_id)
+            prefix = action.network_id.upper()
             return (
-                "Set HOLON_BASE_BROADCAST_ENABLED=1 and "
-                "HOLON_BASE_MAX_TOTAL_FEE_WEI to enable mainnet sending"
+                f"Configure HOLON_{prefix}_BROADCAST_ENABLED, "
+                f"HOLON_{prefix}_MAX_TOTAL_FEE_WEI and {route.amount_cap_env}"
             )
         if code is MainnetTransferCode.FEE_LIMIT_EXCEEDED:
             return "Maximum fee exceeds the local mainnet limit"
+        if code is MainnetTransferCode.AMOUNT_LIMIT_EXCEEDED:
+            return "Transfer amount exceeds the local route limit"
         return "Fresh password and explicit confirmation authorize one submission"
 
     @Property(bool, notify=transferChanged)
@@ -404,7 +481,7 @@ class WalletController(QObject):
         return estimate_asset_usd(
             action.amount_atomic,
             action.decimals,
-            "usdc",
+            action.asset_id,
             prices,
         )
 
@@ -508,21 +585,53 @@ class WalletController(QObject):
         self._set_screen("send")
 
     @Slot(str, result=bool)
-    def prepareTransfer(self, recipient: str) -> bool:
+    @Slot(str, str, str, str, result=bool)
+    def prepareTransfer(
+        self,
+        network_id: str,
+        asset_id: str | None = None,
+        recipient: str | None = None,
+        amount_input: str | None = None,
+    ) -> bool:
+        if asset_id is None and recipient is None and amount_input is None:
+            recipient = network_id
+            network_id = "base"
+            asset_id = "usdc"
+            amount_input = "1"
+        if recipient is None or amount_input is None:
+            return False
         active = self._state.active_profile
         if active is None or self._closed or self._transfer_preparing:
             return False
         self._set_transfer_error("")
         try:
+            route = transfer_route(network_id, asset_id)
+            amount_atomic, canonical_amount = parse_transfer_amount(
+                amount_input, route.decimals,
+            )
             normalized = normalize_recipient(recipient, active.address)
-            request = self._transfer_flow.begin(active.profile_id)
+            amount_code = self._mainnet_executor.policy.draft_amount_code(
+                network_id, asset_id, amount_atomic,
+            )
+            if amount_code is MainnetTransferCode.AMOUNT_LIMIT_EXCEEDED:
+                raise TransferPreflightError(
+                    TransferPreflightCode.AMOUNT_LIMIT_EXCEEDED,
+                )
+            request = self._transfer_flow.begin(
+                active.profile_id, network_id, asset_id, amount_atomic,
+            )
         except TransferPreflightError as error:
             self._set_transfer_error(_transfer_error_message(error.code))
             return False
         except RuntimeError:
             return False
+        self._transfer_network = network_id
+        self._transfer_asset = asset_id
         self._transfer_recipient = normalized
+        self._transfer_amount_input = canonical_amount
         self._transfer_preparing = True
+        self._maximum_generation += 1
+        self._maximum_quoting = False
         self._transfer_generation += 1
         generation = self._transfer_generation
         self.transferChanged.emit()
@@ -535,6 +644,56 @@ class WalletController(QObject):
         future.add_done_callback(
             lambda completed, current=generation: self._transfer_finished(
                 current, completed,
+            ),
+        )
+        return True
+
+    @Slot(str, str, str, result=bool)
+    def requestMaximumTransfer(
+        self, network_id: str, asset_id: str, recipient: str,
+    ) -> bool:
+        active = self._state.active_profile
+        if (
+            active is None
+            or self._closed
+            or self._transfer_preparing
+            or self._maximum_quoting
+        ):
+            return False
+        self._set_transfer_error("")
+        try:
+            route = transfer_route(network_id, asset_id)
+            if asset_id == "usdc":
+                amount = self.maximumTransferAmount(network_id, asset_id)
+                if not amount:
+                    raise TransferPreflightError(
+                        TransferPreflightCode.INSUFFICIENT_USDC,
+                    )
+                self.transferMaximumReady.emit(
+                    network_id, asset_id, recipient, amount,
+                )
+                return True
+            normalized = normalize_recipient(recipient, active.address)
+        except TransferPreflightError as error:
+            self._set_transfer_error(_transfer_error_message(error.code))
+            return False
+        self._maximum_generation += 1
+        generation = self._maximum_generation
+        self._maximum_quoting = True
+        self.transferChanged.emit()
+        future = self._transfer_executor.submit(
+            self._transfer_preflight_service.quote_maximum_native,
+            active,
+            route.network_id,
+            normalized,
+        )
+        future.add_done_callback(
+            lambda completed, current=generation: self._maximum_finished(
+                current,
+                completed,
+                network_id,
+                asset_id,
+                recipient,
             ),
         )
         return True
@@ -583,7 +742,12 @@ class WalletController(QObject):
             self._cancel_transfer_request(clear_recipient=False)
             self._set_screen("send")
             return
+        self._transfer_network = action.network_id
+        self._transfer_asset = action.asset_id
         self._transfer_recipient = action.recipient
+        self._transfer_amount_input = format_atomic_amount(
+            action.amount_atomic, action.decimals,
+        )
         self._cancel_transfer_request(clear_recipient=False)
         self._set_screen("send")
 
@@ -1063,6 +1227,26 @@ class WalletController(QObject):
             result = TransferPreflightError(TransferPreflightCode.RPC_UNAVAILABLE)
         self._transferReady.emit(generation, result)
 
+    def _maximum_finished(
+        self,
+        generation: int,
+        future: Future[int],
+        network_id: str,
+        asset_id: str,
+        recipient: str,
+    ) -> None:
+        if self._closed:
+            return
+        try:
+            result: object = future.result()
+        except TransferPreflightError as error:
+            result = error
+        except Exception:
+            result = TransferPreflightError(TransferPreflightCode.RPC_UNAVAILABLE)
+        self._maximumReady.emit(
+            generation, result, network_id, asset_id, recipient,
+        )
+
     def _mainnet_finished(
         self, generation: int, future: Future[MainnetTransferResult],
     ) -> None:
@@ -1185,24 +1369,78 @@ class WalletController(QObject):
         self.transferChanged.emit()
         self._set_screen("transfer_review")
 
+    @Slot(int, object, str, str, str)
+    def _accept_maximum_transfer(
+        self,
+        generation: int,
+        result: object,
+        network_id: str,
+        asset_id: str,
+        recipient: str,
+    ) -> None:
+        if generation != self._maximum_generation or self._closed:
+            return
+        self._maximum_quoting = False
+        if isinstance(result, TransferPreflightError):
+            self._set_transfer_error(_transfer_error_message(result.code))
+            self.transferChanged.emit()
+            return
+        if type(result) is not int or result <= 0:
+            self._set_transfer_error("Maximum amount is unavailable")
+            self.transferChanged.emit()
+            return
+        try:
+            route = transfer_route(network_id, asset_id)
+            maximum = self._mainnet_executor.policy.maximum_draft_amount(
+                network_id, asset_id, result,
+            )
+        except TransferPreflightError:
+            maximum = None
+        if maximum is None:
+            self._set_transfer_error("Maximum amount is unavailable")
+            self.transferChanged.emit()
+            return
+        self._set_transfer_error("")
+        self.transferChanged.emit()
+        self.transferMaximumReady.emit(
+            network_id,
+            asset_id,
+            recipient,
+            format_atomic_amount(maximum, route.decimals),
+        )
+
     def _cancel_transfer_request(self, clear_recipient: bool) -> None:
         changed = (
             self._transfer_preparing
+            or self._maximum_quoting
             or self._mainnet_in_progress
             or self._transfer_flow.pending is not None
             or self._transfer_flow.current is not None
             or bool(self._transfer_error)
-            or (clear_recipient and bool(self._transfer_recipient))
+            or (
+                clear_recipient
+                and any((
+                    self._transfer_network,
+                    self._transfer_asset,
+                    self._transfer_recipient,
+                    self._transfer_amount_input,
+                ))
+            )
         )
         self._transfer_generation += 1
+        self._maximum_generation += 1
         self._transfer_expiry_timer.stop()
         self._transfer_flow.close()
         self._flow_price_snapshot = None
         self._transfer_preparing = False
+        self._maximum_quoting = False
         self._mainnet_in_progress = False
         self._transfer_error = ""
         if clear_recipient:
+            self._transfer_network = ""
+            self._transfer_asset = ""
             self._transfer_recipient = ""
+            self._transfer_amount_input = ""
         if changed:
             self.transferChanged.emit()
 
@@ -1442,13 +1680,16 @@ def _utc_timestamp(value: datetime) -> str:
 
 def _transfer_error_message(code: TransferPreflightCode) -> str:
     return {
+        TransferPreflightCode.INVALID_ROUTE: "Select Ethereum or Base and ETH or USDC",
+        TransferPreflightCode.INVALID_AMOUNT: "Enter an exact positive transfer amount",
+        TransferPreflightCode.AMOUNT_LIMIT_EXCEEDED: "Amount exceeds the local route limit",
         TransferPreflightCode.INVALID_RECIPIENT: "Enter a valid EVM recipient address",
         TransferPreflightCode.RESERVED_RECIPIENT: "This recipient address is not allowed",
-        TransferPreflightCode.WRONG_CHAIN: "Base network verification failed",
+        TransferPreflightCode.WRONG_CHAIN: "Selected network verification failed",
         TransferPreflightCode.TOKEN_METADATA_INVALID: "USDC contract verification failed",
-        TransferPreflightCode.INSUFFICIENT_USDC: "This Account does not have 1 USDC on Base",
-        TransferPreflightCode.INSUFFICIENT_ETH: "Not enough ETH on Base for the maximum fee",
+        TransferPreflightCode.INSUFFICIENT_USDC: "Insufficient USDC for this transfer",
+        TransferPreflightCode.INSUFFICIENT_ETH: "Insufficient ETH for amount and maximum fee",
         TransferPreflightCode.GAS_ESTIMATE_FAILED: "Network fee estimation failed",
-        TransferPreflightCode.DATA_INVALID: "Base returned invalid transaction data",
-        TransferPreflightCode.RPC_UNAVAILABLE: "Base network data is unavailable",
+        TransferPreflightCode.DATA_INVALID: "Selected network returned invalid transaction data",
+        TransferPreflightCode.RPC_UNAVAILABLE: "Selected network data is unavailable",
     }[code]
