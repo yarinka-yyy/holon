@@ -6,48 +6,45 @@ Item {
     property string label: "Continue"
     property bool primary: true
     property bool controlEnabled: true
+    property url iconSource: ""
     signal triggered()
-    enabled: root.controlEnabled
+    enabled: controlEnabled
+    opacity: controlEnabled ? 1 : 0.44
 
-    function trigger() {
-        if (root.controlEnabled)
-            root.triggered()
-    }
+    function trigger() { if (controlEnabled) triggered() }
 
     Rectangle {
         anchors.fill: parent
-        radius: 12
-        opacity: root.controlEnabled ? 1 : 0.48
+        radius: Design.controlRadius
+        color: root.primary
+            ? (mouse.pressed ? Design.accentPressed
+                : mouse.containsMouse ? Design.accentHover : Design.accent)
+            : (mouse.containsMouse ? Design.surfaceHover : Design.surface)
         border.width: 1
-        border.color: root.primary ? "#AA9A63FF" : Design.border
-        color: root.primary ? Design.purple : (mouse.containsMouse ? Design.surfaceHover : Design.surface)
-        gradient: root.primary ? primaryGradient : null
-        Behavior on opacity { NumberAnimation { duration: Design.fastMotion } }
+        border.color: root.primary ? "#5FA99B" : Design.border
         Behavior on color { ColorAnimation { duration: Design.fastMotion } }
+        Behavior on border.color { ColorAnimation { duration: Design.fastMotion } }
     }
-    Gradient {
-        id: primaryGradient
-        orientation: Gradient.Horizontal
-        GradientStop { position: 0; color: mouse.containsMouse ? "#B98BFF" : "#A978FF" }
-        GradientStop { position: 0.55; color: "#8657F5" }
-        GradientStop { position: 1; color: mouse.containsMouse ? "#7045F2" : "#6035E4" }
-    }
-    Text {
+    Row {
         anchors.centerIn: parent
-        text: root.label
-        color: root.primary ? "#FFFFFF" : Design.purpleBright
-        font.family: Design.fontFamily
-        font.pixelSize: 16
-        font.weight: Font.Medium
+        spacing: 10
+        Image {
+            visible: root.iconSource.toString().length > 0
+            width: 22; height: 22; source: root.iconSource
+            sourceSize: Qt.size(44, 44)
+        }
+        Text {
+            anchors.verticalCenter: parent.verticalCenter
+            text: root.label
+            color: root.primary ? Design.textOnAccent : Design.text
+            font.family: Design.fontFamily; font.pixelSize: 16; font.weight: Font.Medium
+        }
     }
     MouseArea {
-        id: mouse
-        anchors.fill: parent
-        enabled: root.controlEnabled
-        hoverEnabled: true
-        cursorShape: Qt.PointingHandCursor
+        id: mouse; anchors.fill: parent; enabled: root.controlEnabled
+        hoverEnabled: true; cursorShape: Qt.PointingHandCursor
         onClicked: root.trigger()
     }
-    scale: mouse.pressed ? 0.985 : 1
-    Behavior on scale { NumberAnimation { duration: Design.fastMotion } }
+    scale: mouse.pressed ? 0.98 : 1
+    Behavior on scale { NumberAnimation { duration: 120 } }
 }

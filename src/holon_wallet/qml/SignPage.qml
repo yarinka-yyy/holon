@@ -1,118 +1,97 @@
 import QtQuick
 import "."
 
-// qmllint disable unqualified
-
-Item {
+TransactionFlowShell {
     id: root
+    title: "Confirm Transaction"; subtitle: "Authorize this exact transfer once"
+    activeStep: 1; onBackRequested: walletController.cancelMainnetExecution()
     property bool explicitlyConfirmed: false
+    property var action: walletController.transferAction
     property bool readyToSign: passwordField.text.length >= 4
-        && root.explicitlyConfirmed
-        && !walletController.mainnetExecutionInProgress
+        && explicitlyConfirmed && walletController.mainnetExecutionAvailable
 
     function submit() {
-        if (walletController.mainnetExecutionInProgress || !root.explicitlyConfirmed)
-            return
+        if (!readyToSign) return
         let oneTimePassword = passwordField.text
-        let oneTimeConfirmation = root.explicitlyConfirmed
-        passwordField.clear()
-        root.explicitlyConfirmed = false
-        walletController.submitMainnetExecution(oneTimePassword, oneTimeConfirmation)
+        passwordField.clear(); explicitlyConfirmed = false
+        walletController.submitMainnetExecution(oneTimePassword, true)
         oneTimePassword = ""
-        oneTimeConfirmation = false
     }
-    onEnabledChanged: if (!enabled) {
-        passwordField.clear()
-        root.explicitlyConfirmed = false
-    }
+    onEnabledChanged: if (!enabled) { passwordField.clear(); explicitlyConfirmed = false }
 
-    Text {
-        x: 24; y: 39; text: "Holon Wallet"; color: Design.text
-        font.family: Design.fontFamily; font.pixelSize: 25; font.weight: Font.Bold
-    }
-    Image {
-        x: 202; y: 108; width: 110; height: 110
-        source: "assets/sign-document.svg"; sourceSize: Qt.size(220, 220)
-    }
-    Text {
-        anchors.horizontalCenter: parent.horizontalCenter; y: 239
-        text: "Authorize mainnet transfer"; color: Design.text
-        font.family: Design.fontFamily; font.pixelSize: 25; font.weight: Font.DemiBold
-    }
-    Text {
-        anchors.horizontalCenter: parent.horizontalCenter; y: 282
-        text: "Fresh password authorizes one exact submission"
-        color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 12
-    }
-    Rectangle {
-        x: 105; y: 312; width: 304; height: 28; radius: 8
-        color: "#182849"; border.width: 1; border.color: "#38558E"
+    SurfaceCard {
+        x: 0; y: 0; width: 458; height: 118
         Text {
-            anchors.centerIn: parent; text: "BASE MAINNET  ·  REAL FUNDS  ·  IRREVERSIBLE"
-            color: "#FFB36D"; font.family: Design.fontFamily
-            font.pixelSize: 9; font.weight: Font.Bold; font.letterSpacing: 0.3
+            x: 18; y: 16; text: "1 USDC on Base"; color: Design.text
+            font.family: Design.fontFamily; font.pixelSize: 20; font.weight: Font.DemiBold
         }
+        Text {
+            x: 18; y: 50; text: "To " + (root.action.shortRecipient || "")
+            color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 13
+        }
+        Text {
+            x: 18; y: 78; text: "Maximum fee " + (root.action.maxFeeDisplay || "Unavailable")
+            color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 12
+        }
+        Image {
+            anchors.right: parent.right; anchors.rightMargin: 18; y: 20
+            width: 50; height: 50; source: "assets/usdc.svg"; sourceSize: Qt.size(100, 100)
+        }
+    }
+    Text {
+        x: 0; y: 148; text: "Wallet password"; color: Design.textMuted
+        font.family: Design.fontFamily; font.pixelSize: 13
     }
     PasswordInput {
         id: passwordField; objectName: "mainnetPasswordField"
         fieldObjectName: "mainnetPasswordInput"
-        x: 86; y: 365; width: 342; height: 61
-        placeholderText: "Enter your wallet password"
-        onAccepted: root.submit()
+        x: 0; y: 176; width: 458; height: 56
+        placeholderText: "Enter fresh password"; onAccepted: root.submit()
     }
     Text {
-        anchors.horizontalCenter: parent.horizontalCenter; y: 439
-        text: walletController.mainnetExecutionInProgress
-            ? "Revalidating, signing, and submitting once…"
-            : "The password is not stored and cannot be reused"
-        color: Design.textFaint; font.family: Design.fontFamily; font.pixelSize: 10
+        x: 0; y: 245; width: 458; horizontalAlignment: Text.AlignHCenter
+        text: "The password is used once and is not stored"
+        color: Design.textFaint; font.family: Design.fontFamily; font.pixelSize: 11
     }
     Item {
-        id: confirmationControl
         objectName: "mainnetConfirmationCheckbox"
-        x: 86; y: 458; width: 342; height: 42
-        enabled: !walletController.mainnetExecutionInProgress
-        function trigger() {
-            if (enabled)
-                root.explicitlyConfirmed = !root.explicitlyConfirmed
-        }
+        x: 0; y: 282; width: 458; height: 72
+        function trigger() { root.explicitlyConfirmed = !root.explicitlyConfirmed }
+        SurfaceCard { anchors.fill: parent; interactive: true; onTriggered: parent.trigger() }
         Rectangle {
-            x: 0; anchors.verticalCenter: parent.verticalCenter
-            width: 24; height: 24; radius: 6
-            color: root.explicitlyConfirmed ? Design.purple : Design.surface
-            border.width: 1
-            border.color: root.explicitlyConfirmed ? Design.purpleBright : Design.border
-            Text {
-                anchors.centerIn: parent; text: root.explicitlyConfirmed ? "✓" : ""
-                color: "white"; font.family: Design.fontFamily
-                font.pixelSize: 16; font.weight: Font.Bold
+            x: 16; anchors.verticalCenter: parent.verticalCenter
+            width: 28; height: 28; radius: 8
+            color: root.explicitlyConfirmed ? Design.accent : Design.surfaceSecondary
+            border.width: 1; border.color: root.explicitlyConfirmed ? Design.accent : Design.borderStrong
+            Image {
+                anchors.centerIn: parent; width: 20; height: 20
+                visible: root.explicitlyConfirmed; source: "assets/check.svg"; sourceSize: Qt.size(40, 40)
             }
         }
         Text {
-            x: 36; width: 306; anchors.verticalCenter: parent.verticalCenter
-            text: "I understand this sends 1 real USDC on Base Mainnet"
-            wrapMode: Text.WordWrap; color: Design.textMuted
-            font.family: Design.fontFamily; font.pixelSize: 10
+            x: 60; width: 378; anchors.verticalCenter: parent.verticalCenter
+            text: "I confirm this irreversible transfer of 1 real USDC on Base Mainnet."
+            wrapMode: Text.Wrap; color: Design.text
+            font.family: Design.fontFamily; font.pixelSize: 13
         }
-        MouseArea {
-            anchors.fill: parent; enabled: parent.enabled
-            cursorShape: Qt.PointingHandCursor; onClicked: parent.trigger()
+    }
+    Rectangle {
+        x: 0; y: 376; width: 458; height: 64; radius: Design.controlRadius
+        color: "#332C261B"; border.width: 1; border.color: "#66D5AA64"
+        Text {
+            anchors.centerIn: parent; width: 414; horizontalAlignment: Text.AlignHCenter
+            wrapMode: Text.Wrap; text: "Real funds · signing and submission cannot be undone once started"
+            color: Design.warning; font.family: Design.fontFamily; font.pixelSize: 12
         }
     }
     FormButton {
-        objectName: "mainnetSendButton"
-        x: 86; y: 514; width: 342; height: 58
-        label: walletController.mainnetExecutionInProgress
-            ? "Submitting once…" : "Sign and send 1 USDC"
-        primary: root.readyToSign
-        controlEnabled: root.readyToSign
+        objectName: "mainnetSendButton"; x: 0; y: 468; width: 458; height: 56
+        label: "Sign and send 1 USDC"; controlEnabled: root.readyToSign
         onTriggered: root.submit()
     }
     FormButton {
-        objectName: "mainnetCancelButton"
-        x: 86; y: 584; width: 342; height: 44
+        objectName: "mainnetCancelButton"; x: 0; y: 538; width: 458; height: 48
         label: "Cancel"; primary: false
-        controlEnabled: !walletController.mainnetExecutionInProgress
         onTriggered: walletController.cancelMainnetExecution()
     }
 }

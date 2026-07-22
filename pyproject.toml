@@ -9,6 +9,7 @@ dependencies = [
     "eth-account==0.13.7",
     "eth-keys==0.7.0",
     "pyside6-essentials==6.11.1",
+    "qrcode==8.2",
     "web3==7.16.0",
 ]
 

@@ -1,36 +1,36 @@
 import QtQuick
 import "."
 
-// qmllint disable unqualified
-
-Item {
+PageState {
     Text {
-        x: 24; y: 39; text: "Holon Wallet"; color: Design.text
-        font.family: Design.fontFamily; font.pixelSize: 25; font.weight: Font.Bold
+        x: 28; y: 54; text: "Holon Wallet"; color: Design.text
+        font.family: Design.fontFamily; font.pixelSize: 24; font.weight: Font.DemiBold
     }
-    Image {
-        x: 207; y: 160; width: 100; height: 100
-        source: "assets/warning.svg"; sourceSize: Qt.size(200, 200)
-    }
-    Text {
-        anchors.horizontalCenter: parent.horizontalCenter; y: 291
-        text: "Wallet unavailable"; color: Design.text
-        font.family: Design.fontFamily; font.pixelSize: 28; font.weight: Font.DemiBold
-    }
-    Text {
-        x: 72; y: 341; width: 370; horizontalAlignment: Text.AlignHCenter
-        wrapMode: Text.WordWrap
-        text: "The existing Wallet data is unreadable or uses an unsupported version. It was not changed."
-        color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 13
+    SurfaceCard {
+        x: 86; y: 190; width: 342; height: 280
+        Rectangle {
+            anchors.horizontalCenter: parent.horizontalCenter; y: 42
+            width: 88; height: 88; radius: 44
+            color: "#332C2020"; border.width: 1; border.color: Design.danger
+            Image {
+                anchors.centerIn: parent; width: 46; height: 46
+                source: "assets/warning.svg"; sourceSize: Qt.size(92, 92)
+            }
+        }
+        Text {
+            anchors.horizontalCenter: parent.horizontalCenter; y: 158
+            text: "Wallet unavailable"; color: Design.text
+            font.family: Design.fontFamily; font.pixelSize: 22; font.weight: Font.DemiBold
+        }
+        Text {
+            x: 28; y: 202; width: parent.width - 56
+            horizontalAlignment: Text.AlignHCenter; wrapMode: Text.Wrap
+            text: "The existing vault cannot be safely opened. No data was replaced."
+            color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 13
+        }
     }
     FormButton {
-        objectName: "retryWalletButton"
-        x: 86; y: 438; width: 342; height: 58; label: "Retry"
-        onTriggered: walletController.retryUnavailable()
-    }
-    FormButton {
-        objectName: "exitWalletButton"
-        x: 86; y: 512; width: 342; height: 58; label: "Close Wallet"; primary: false
-        onTriggered: walletWindow.close()
+        objectName: "retryUnavailableButton"; x: 86; y: 506; width: 342; height: 56
+        label: "Try again"; primary: false; onTriggered: walletController.retryUnavailable()
     }
 }

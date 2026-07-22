@@ -21,6 +21,7 @@ from wallet_public_support import (
     DeferredExecutor,
     ImmediateExecutor,
     StubPublicDataService,
+    StubPriceService,
     StubTransferPreflightService,
     mainnet_services,
     public_snapshot,
@@ -55,6 +56,7 @@ def controller(tmp_path) -> WalletController:
         mainnet_executor=mainnet,
         receipt_tracker=tracker,
         receipt_executor=ImmediateExecutor(),
+        price_service=StubPriceService(),
     )
     item._test_mainnet_rpc = rpc
     return item
@@ -218,6 +220,8 @@ def test_manual_receipt_check_confirms_exact_public_transfer(tmp_path) -> None:
         "from": action.sender,
         "to": action.token_contract,
         "status": 1,
+        "gasUsed": 45_000,
+        "effectiveGasPrice": 12,
         "logs": [
             {
                 "address": action.token_contract,
@@ -262,6 +266,7 @@ def test_wrong_password_cancel_and_late_execution_result_are_terminal(tmp_path) 
         mainnet_executor=mainnet,
         receipt_tracker=tracker,
         receipt_executor=ImmediateExecutor(),
+        price_service=StubPriceService(),
     )
     assert second.submitPassword(secret, "")
     second.showSend()
@@ -293,6 +298,7 @@ def test_missing_or_exceeded_local_fee_limit_disables_password_flow(tmp_path) ->
         mainnet_executor=mainnet,
         receipt_tracker=tracker,
         receipt_executor=ImmediateExecutor(),
+        price_service=StubPriceService(),
     )
     secret = password()
     item.beginCreate()
@@ -372,6 +378,7 @@ def test_mutation_expiry_profile_change_and_executor_failure_are_terminal(tmp_pa
         mainnet_executor=FailingExecutor(),
         receipt_tracker=failing_tracker,
         receipt_executor=ImmediateExecutor(),
+        price_service=StubPriceService(),
     )
     failure_password = password()
     failing.beginCreate()
@@ -426,6 +433,7 @@ def test_transfer_failure_is_safe_and_writes_no_history(tmp_path) -> None:
         public_data_executor=ImmediateExecutor(),
         transfer_preflight_service=service,
         transfer_executor=ImmediateExecutor(),
+        price_service=StubPriceService(),
     )
     secret = password()
     item.beginCreate()
@@ -449,6 +457,7 @@ def test_cancelled_preflight_ignores_late_response(tmp_path) -> None:
         public_data_executor=ImmediateExecutor(),
         transfer_preflight_service=StubTransferPreflightService(),
         transfer_executor=executor,
+        price_service=StubPriceService(),
     )
     secret = password()
     item.beginCreate()
@@ -525,6 +534,7 @@ def test_public_refresh_filter_and_stale_result_are_safe(tmp_path) -> None:
         public_data_executor=ImmediateExecutor(),
         transfer_preflight_service=StubTransferPreflightService(),
         transfer_executor=ImmediateExecutor(),
+        price_service=StubPriceService(),
     )
     secret = password()
     item.beginCreate()
@@ -578,6 +588,7 @@ def test_public_refresh_never_authenticates_or_decrypts_vault(tmp_path, monkeypa
         public_data_executor=ImmediateExecutor(),
         transfer_preflight_service=StubTransferPreflightService(),
         transfer_executor=ImmediateExecutor(),
+        price_service=StubPriceService(),
     )
     secret = password()
     item.beginCreate()
@@ -601,3 +612,47 @@ def test_public_refresh_never_authenticates_or_decrypts_vault(tmp_path, monkeypa
     assert item.selectProfile(second.summary.profile_id)
     assert item.currentScreen == "send"
     assert item._transfer_flow.state is TransferFlowState.LOCKED
+
+
+def test_v2_routes_visibility_and_public_details_are_memory_only(tmp_path) -> None:
+    item = controller(tmp_path)
+    secret = password()
+    item.beginCreate()
+    assert item.submitPassword(secret, secret)
+    assert item.finishBackup()
+
+    assert item.portfolioData["totalAvailable"] is True
+    assert item.portfolioData["totalUsd"] == "$5,005.00"
+    assert item.balancesVisible
+    item.toggleBalancesVisibility()
+    assert not item.balancesVisible
+
+    item.showReceive()
+    assert item.currentScreen == "receive"
+    assert item.receiveQrSource.endswith(item.activeProfile["address"])
+    assert item.selectReceiveNetwork("ethereum")
+    assert item.receiveNetwork == "ethereum"
+    assert not item.selectReceiveNetwork("arbitrum")
+
+    item.showSettings()
+    assert item.currentScreen == "settings"
+    assert item.showSettingsSection("security")
+    assert item.currentScreen == "settings_info"
+    assert item.settingsSection == "security"
+    item.closeSettingsInfo()
+    item.showWallets()
+    assert item.currentScreen == "wallets"
+    item.closeWallets()
+    assert item.currentScreen == "settings"
+
+    item.showSend()
+    assert item.prepareTransfer("0x" + "44" * 20)
+    action_id = item.transferAction["actionId"]
+    item.cancelTransfer()
+    item.showHistory()
+    assert item.showTransactionDetails(action_id)
+    assert item.currentScreen == "transaction_details"
+    assert item.selectedHistoryRecord["actionId"] == action_id
+    assert item.selectedHistoryRecord["maxTotalFeeWei"]
+    item.closeTransactionDetails()
+    assert item.currentScreen == "history"

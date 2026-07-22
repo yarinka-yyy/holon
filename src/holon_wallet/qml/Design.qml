@@ -2,20 +2,27 @@ pragma Singleton
 import QtQuick
 
 QtObject {
-    readonly property color background: "#040817"
-    readonly property color backgroundDeep: "#020511"
-    readonly property color surface: "#0B1225"
-    readonly property color surfaceRaised: "#111A31"
-    readonly property color surfaceHover: "#17213A"
-    readonly property color border: "#27324A"
-    readonly property color borderSoft: "#1B2540"
-    readonly property color purple: "#9A63FF"
-    readonly property color purpleBright: "#B67CFF"
-    readonly property color blue: "#496BFF"
-    readonly property color text: "#F7F5FC"
-    readonly property color textMuted: "#929BB5"
-    readonly property color textFaint: "#66718E"
-    readonly property string fontFamily: "Segoe UI"
-    readonly property int fastMotion: 160
-    readonly property int normalMotion: 220
+    readonly property color background: "#10181E"
+    readonly property color surface: "#131B21"
+    readonly property color surfaceCard: "#151E24"
+    readonly property color surfaceSecondary: "#182128"
+    readonly property color surfaceHover: "#1C272E"
+    readonly property color border: "#2A343B"
+    readonly property color borderStrong: "#3A454C"
+    readonly property color text: "#F2F3F1"
+    readonly property color textMuted: "#A5ABB2"
+    readonly property color textFaint: "#727C84"
+    readonly property color accent: "#84C7BA"
+    readonly property color accentHover: "#92D3C6"
+    readonly property color accentPressed: "#70B3A7"
+    readonly property color accentSoft: "#18332F"
+    readonly property color textOnAccent: "#0E1917"
+    readonly property color danger: "#E27D7D"
+    readonly property color warning: "#D5AA64"
+    readonly property string fontFamily: walletFontFamily
+    readonly property int fastMotion: 140
+    readonly property int normalMotion: 190
+    readonly property int pagePadding: 28
+    readonly property int cardRadius: 16
+    readonly property int controlRadius: 14
 }

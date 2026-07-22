@@ -7,7 +7,7 @@ from concurrent.futures import Executor
 from importlib.resources import as_file, files
 
 from PySide6.QtCore import QSize, Qt, QUrl
-from PySide6.QtGui import QColor, QCloseEvent, QGuiApplication, QIcon
+from PySide6.QtGui import QColor, QCloseEvent, QFont, QFontDatabase, QGuiApplication, QIcon
 from PySide6.QtQuick import QQuickView
 
 from .broadcast import (
@@ -17,6 +17,8 @@ from .broadcast import (
 from .controller import WalletController
 from .history import HistoryStore
 from .public_data import PublicDataService
+from .prices import PriceService
+from .qr_provider import AddressQrProvider, QR_PROVIDER_ID
 from .single_instance import ProcessInstance
 from .transfer import TransferPreflightService
 from .vault import VaultRepository
@@ -54,12 +56,21 @@ class WalletApplication:
         mainnet_executor: MainnetTransferExecutor | None = None,
         receipt_tracker: BroadcastReceiptTracker | None = None,
         receipt_executor: Executor | None = None,
+        price_service: PriceService | None = None,
     ) -> None:
         self.qt_app = qt_app or QGuiApplication.instance()
         if self.qt_app is None:
             self.qt_app = QGuiApplication(sys.argv)
         self.qt_app.setApplicationDisplayName(WINDOW_TITLE)
         self.qt_app.setApplicationName("HolonWallet")
+        font_package = files("holon_wallet.resources.fonts")
+        with as_file(font_package.joinpath("InterVariable.ttf")) as font_path:
+            font_id = QFontDatabase.addApplicationFont(str(font_path))
+        families = QFontDatabase.applicationFontFamilies(font_id)
+        if font_id < 0 or not families:
+            raise RuntimeError("Bundled Wallet font could not be loaded")
+        self.font_family = families[0]
+        self.qt_app.setFont(QFont(self.font_family))
         qml_package = files("holon_wallet.qml")
         with as_file(qml_package.joinpath("assets/holon.svg")) as icon_path:
             self.qt_app.setWindowIcon(QIcon(str(icon_path)))
@@ -74,19 +85,22 @@ class WalletApplication:
             mainnet_executor,
             receipt_tracker,
             receipt_executor,
+            price_service,
         )
         self.window = WalletQuickView(self.controller)
         self.engine = self.window.engine()
+        self.engine.addImageProvider(QR_PROVIDER_ID, AddressQrProvider())
         self.qml_warnings: list[str] = []
         self.engine.warnings.connect(self._record_warnings)
         context = self.engine.rootContext()
         context.setContextProperty("walletController", self.controller)
         context.setContextProperty("walletWindow", self.window)
+        context.setContextProperty("walletFontFamily", self.font_family)
         self.window.setTitle(WINDOW_TITLE)
         self.window.setColor(QColor("transparent"))
         self.window.setFlags(Qt.Window | Qt.FramelessWindowHint)
-        self.window.setMinimumSize(QSize(430, 575))
-        self.window.resize(514, 686)
+        self.window.setMinimumSize(QSize(430, 703))
+        self.window.resize(514, 840)
         self.window.setResizeMode(QQuickView.SizeRootObjectToView)
         with as_file(qml_package.joinpath("Main.qml")) as qml_path:
             self.window.setSource(QUrl.fromLocalFile(str(qml_path)))

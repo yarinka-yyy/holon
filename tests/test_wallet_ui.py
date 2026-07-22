@@ -21,6 +21,7 @@ from wallet_public_support import (
     DeferredExecutor,
     ImmediateExecutor,
     StubPublicDataService,
+    StubPriceService,
     StubTransferPreflightService,
     mainnet_services,
 )
@@ -83,6 +84,7 @@ def make_app(
         mainnet_executor=mainnet,
         receipt_tracker=tracker,
         receipt_executor=ImmediateExecutor(),
+        price_service=StubPriceService(),
     )
     app._test_mainnet_rpc = rpc
     return app
@@ -93,8 +95,8 @@ def test_window_geometry_chrome_and_qml_load_cleanly(wallet_app) -> None:
 
     assert app.controller.currentScreen == "welcome"
     assert app.window.title() == "Holon Wallet"
-    assert (app.window.width(), app.window.height()) == (514, 686)
-    assert (app.window.minimumWidth(), app.window.minimumHeight()) == (430, 575)
+    assert (app.window.width(), app.window.height()) == (514, 840)
+    assert (app.window.minimumWidth(), app.window.minimumHeight()) == (430, 703)
     assert app.window.flags() & Qt.FramelessWindowHint
     assert app.qml_warnings == []
     assert child(app, "windowDragArea")
@@ -152,8 +154,15 @@ def test_create_ui_persists_after_done_and_enables_wallet_controls(
 
     invoke(child(app, "settingsAction"), "trigger")
     qt_app.processEvents()
+    assert app.controller.currentScreen == "settings"
+    assert child(app, "settingsAccounts").property("enabled")
+    assert child(app, "settingsNetworkData").property("enabled")
+    assert child(app, "settingsSecurity").property("enabled")
+    assert child(app, "settingsAbout").property("enabled")
+    invoke(child(app, "settingsAccounts"), "trigger")
+    qt_app.processEvents()
     assert app.controller.currentScreen == "wallets"
-    assert not child(app, "searchCard").property("enabled")
+    assert app.window.findChild(QObject, "searchCard") is None
     assert child(app, "addAccount").property("enabled")
     invoke(child(app, "addAccount"), "trigger")
     qt_app.processEvents()
@@ -163,7 +172,9 @@ def test_create_ui_persists_after_done_and_enables_wallet_controls(
     invoke(child(app, "importBackButton"), "trigger")
     qt_app.processEvents()
     assert app.controller.currentScreen == "wallets"
-    invoke(child(app, "backButton"), "trigger")
+    invoke(child(app, "accountsBackButton"), "trigger")
+    assert app.controller.currentScreen == "settings"
+    invoke(child(app, "settingsBackButton"), "trigger")
     assert app.controller.currentScreen == "main"
 
 
@@ -226,14 +237,15 @@ def test_send_review_mainnet_confirmation_result_and_history(tmp_path, qt_app) -
         qt_app.processEvents()
 
         assert app.controller.currentScreen == "transfer_review"
-        assert child(app, "transferReviewNetwork").property("text") == "Base  ·  8453"
+        assert child(app, "transferReviewPageProgress").property("activeStep") == 0
+        assert child(app, "transferReviewNetwork").property("text") == "Base · 8453"
         assert child(app, "transferReviewAmount").property("text") == "1 USDC"
         assert child(app, "transferReviewRecipient").property("text").endswith("444444")
-        assert child(app, "transferReviewFee").property("text").endswith("ETH")
-        assert child(app, "transferReviewExpiry").property("text").endswith("UTC")
-        assert child(app, "mainnetFeeLimit").property("text").endswith("ETH")
+        assert child(app, "transferReviewFee").property("secondary").endswith("ETH")
+        assert app.controller.transferAction["expiresAt"].endswith("UTC")
+        assert app.controller.mainnetFeeLimit.endswith("ETH")
         invoke(child(app, "transferDetailsButton"), "trigger")
-        assert child(app, "transferReviewScroll").property("contentHeight") == 760
+        assert child(app, "transferReviewScroll").property("contentHeight") == 980
 
         invoke(child(app, "editTransferButton"), "trigger")
         qt_app.processEvents()
@@ -244,6 +256,7 @@ def test_send_review_mainnet_confirmation_result_and_history(tmp_path, qt_app) -
         assert child(app, "continueMainnetButton").property("enabled")
         invoke(child(app, "continueMainnetButton"), "trigger")
         assert app.controller.currentScreen == "sign_transfer"
+        assert child(app, "mainnetSignPageProgress").property("activeStep") == 1
         assert not child(app, "mainnetPasswordField").property("revealed")
         assert not child(app, "mainnetSendButton").property("enabled")
         set_text(app, "mainnetPasswordInput", password)
@@ -256,6 +269,7 @@ def test_send_review_mainnet_confirmation_result_and_history(tmp_path, qt_app) -
         qt_app.processEvents()
         assert child(app, "mainnetPasswordInput").property("text") == ""
         assert app.controller.currentScreen == "transfer_result"
+        assert child(app, "mainnetResultPageProgress").property("activeStep") == 3
         assert child(app, "mainnetResultTitle").property("text") == (
             "Transaction submitted"
         )
@@ -301,7 +315,7 @@ def test_mainnet_runtime_gate_wrong_password_and_cancel(tmp_path, qt_app) -> Non
         qt_app.processEvents()
         assert app.controller.currentScreen == "transfer_review"
         assert not child(app, "continueMainnetButton").property("enabled")
-        assert child(app, "mainnetFeeLimit").property("text") == "Not configured"
+        assert app.controller.mainnetFeeLimit == "Not configured"
     finally:
         app.close()
 
@@ -357,6 +371,8 @@ def test_ordinary_window_close_is_blocked_only_during_submission(
         invoke(child(app, "mainnetConfirmationCheckbox"), "trigger")
         invoke(child(app, "mainnetSendButton"), "trigger")
         assert app.controller.mainnetExecutionInProgress
+        assert app.controller.currentScreen == "submit_transfer"
+        assert child(app, "submitPageProgress").property("activeStep") == 2
 
         app.window.close()
         qt_app.processEvents()
@@ -418,7 +434,7 @@ def test_send_loading_back_ignores_late_result(tmp_path, qt_app) -> None:
 
         assert app.controller.currentScreen == "send"
         assert app.controller.transferPreparing
-        assert not child(app, "prepareTransferButton").property("visible")
+        assert not child(app, "prepareTransferButton").property("enabled")
         invoke(child(app, "sendBackButton"), "trigger")
         executor.run_next()
         qt_app.processEvents()
@@ -430,6 +446,66 @@ def test_send_loading_back_ignores_late_result(tmp_path, qt_app) -> None:
         app.close()
 
 
+def test_v2_receive_settings_privacy_and_transaction_details(tmp_path, qt_app) -> None:
+    repository = VaultRepository(WalletPaths(tmp_path))
+    password = fresh_password()
+    repository.create_new(
+        password, repository.new_record(generate_mnemonic(), "Main Account"),
+    )
+    app = make_app(qt_app, repository)
+    try:
+        assert "Inter" in app.font_family
+        set_text(app, "passwordTextInput", password)
+        invoke(child(app, "passwordSubmitButton"), "trigger")
+
+        assert app.controller.balancesVisible
+        invoke(child(app, "balanceEyeButton"), "trigger")
+        assert not app.controller.balancesVisible
+        invoke(child(app, "accountCopyButton"), "trigger")
+        assert QGuiApplication.clipboard().text() == app.controller.activeProfile["address"]
+        invoke(child(app, "accountReceiveZone"), "trigger")
+        qt_app.processEvents()
+        assert app.controller.currentScreen == "receive"
+        assert child(app, "receiveAddress").property("text") == (
+            app.controller.activeProfile["address"]
+        )
+        invoke(child(app, "receiveEthereum"), "trigger")
+        assert app.controller.receiveNetwork == "ethereum"
+        invoke(child(app, "receiveBackButton"), "trigger")
+        assert app.controller.currentScreen == "main"
+
+        invoke(child(app, "settingsAction"), "trigger")
+        invoke(child(app, "settingsNetworkData"), "trigger")
+        assert app.controller.currentScreen == "settings_info"
+        assert app.controller.settingsSection == "network"
+        invoke(child(app, "settingsInfoBackButton"), "trigger")
+        invoke(child(app, "settingsSecurity"), "trigger")
+        assert app.controller.settingsSection == "security"
+        invoke(child(app, "settingsInfoBackButton"), "trigger")
+        invoke(child(app, "settingsAbout"), "trigger")
+        assert app.controller.settingsSection == "about"
+        invoke(child(app, "settingsInfoBackButton"), "trigger")
+        invoke(child(app, "settingsBackButton"), "trigger")
+
+        invoke(child(app, "sendAction"), "trigger")
+        set_text(app, "transferRecipientInput", "0x" + "44" * 20)
+        invoke(child(app, "prepareTransferButton"), "trigger")
+        action_id = app.controller.transferAction["actionId"]
+        app.controller.cancelTransfer()
+        app.controller.showHistory()
+        assert app.controller.showTransactionDetails(action_id)
+        qt_app.processEvents()
+        assert app.controller.currentScreen == "transaction_details"
+        assert child(app, "transactionDetailsPage").property("enabled")
+        assert app.controller.selectedHistoryRecord["maxTotalFeeWei"]
+        invoke(child(app, "transactionDetailsBackButton"), "trigger")
+        assert app.controller.currentScreen == "history"
+        assert app.qml_warnings == []
+    finally:
+        QGuiApplication.clipboard().clear()
+        app.close()
+
+
 def test_malformed_existing_vault_is_not_replaced(tmp_path, qt_app) -> None:
     repository = VaultRepository(WalletPaths(tmp_path))
     atomic_write_json(repository.paths.vault, {"schema_version": 999})
@@ -437,7 +513,7 @@ def test_malformed_existing_vault_is_not_replaced(tmp_path, qt_app) -> None:
     app = make_app(qt_app, repository)
     try:
         assert app.controller.currentScreen == "unavailable"
-        assert child(app, "retryWalletButton").property("enabled")
+        assert child(app, "retryUnavailableButton").property("enabled")
         assert repository.paths.vault.read_bytes() == before
     finally:
         app.close()
@@ -445,10 +521,10 @@ def test_malformed_existing_vault_is_not_replaced(tmp_path, qt_app) -> None:
 
 def test_resize_close_and_idle_first_run_create_no_files(wallet_app, qt_app) -> None:
     app, repository = wallet_app
-    app.window.resize(430, 575)
+    app.window.resize(430, 703)
     qt_app.processEvents()
 
-    assert (app.window.width(), app.window.height()) == (430, 575)
+    assert (app.window.width(), app.window.height()) == (430, 703)
     assert list(repository.paths.data_dir.iterdir()) == []
 
 

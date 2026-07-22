@@ -36,6 +36,14 @@ from .public_data import (
     PublicDataStatus,
     snapshot_to_map,
 )
+from .prices import (
+    PriceService,
+    PriceSnapshot,
+    estimate_asset_usd,
+    estimate_wei_usd,
+    portfolio_to_map,
+    price_snapshot_to_map,
+)
 from .settings import SettingsStore
 from .storage import StorageError
 from .transfer import (
@@ -104,6 +112,10 @@ class WalletController(QObject):
     publicDataChanged = Signal()
     selectedNetworkChanged = Signal()
     historyChanged = Signal()
+    balancesVisibilityChanged = Signal()
+    receiveNetworkChanged = Signal()
+    historySelectionChanged = Signal()
+    settingsSectionChanged = Signal()
     _publicDataReady = Signal(int, object)
     _transferReady = Signal(int, object)
     _mainnetReady = Signal(int, object)
@@ -120,11 +132,13 @@ class WalletController(QObject):
         mainnet_executor: MainnetTransferExecutor | None = None,
         receipt_tracker: BroadcastReceiptTracker | None = None,
         receipt_executor: Executor | None = None,
+        price_service: PriceService | None = None,
     ) -> None:
         super().__init__()
         self._repository = repository or VaultRepository()
         self._settings = SettingsStore(self._repository.paths)
         self._public_data_service = public_data_service or PublicDataService()
+        self._price_service = price_service or PriceService()
         self._history_store = history_store or HistoryStore(self._repository.paths)
         self._public_data_executor = public_data_executor or ThreadPoolExecutor(
             max_workers=2, thread_name_prefix="holon-public-read",
@@ -173,8 +187,17 @@ class WalletController(QObject):
         self._public_data_refreshing = False
         self._public_data_generation = 0
         self._public_data_updated_text = "Not refreshed"
+        self._price_snapshot = PriceSnapshot.unavailable(
+            int(datetime.now(UTC).timestamp()), "NOT_REFRESHED",
+        )
+        self._flow_price_snapshot: PriceSnapshot | None = None
+        self._balances_visible = True
+        self._receive_network = "base"
         self._history_records: tuple[WalletHistoryRecord, ...] = ()
         self._history_available = True
+        self._selected_history_action_id = ""
+        self._settings_section = ""
+        self._wallets_return_screen = "settings"
         self._closed = False
         self._copied_phrase: str | None = None
         self._clipboard_timer = QTimer(self)
@@ -352,6 +375,52 @@ class WalletController(QObject):
     def baseData(self) -> dict[str, object]:
         return snapshot_to_map(self._network_snapshots["base"])
 
+    @Property("QVariantMap", notify=publicDataChanged)
+    def priceData(self) -> dict[str, object]:
+        return price_snapshot_to_map(self._price_snapshot)
+
+    @Property("QVariantMap", notify=publicDataChanged)
+    def portfolioData(self) -> dict[str, object]:
+        return portfolio_to_map(
+            self._network_snapshots,
+            self._price_snapshot,
+            self._selected_network,
+        )
+
+    @Property(str, notify=transferChanged)
+    def transferFeeUsd(self) -> str:
+        action = self._transfer_flow.current
+        prices = self._flow_price_snapshot or self._price_snapshot
+        if action is None:
+            return "Data unavailable"
+        return estimate_wei_usd(action.max_total_fee_wei, prices)
+
+    @Property(str, notify=transferChanged)
+    def transferAmountUsd(self) -> str:
+        action = self._transfer_flow.current
+        prices = self._flow_price_snapshot or self._price_snapshot
+        if action is None:
+            return "Data unavailable"
+        return estimate_asset_usd(
+            action.amount_atomic,
+            action.decimals,
+            "usdc",
+            prices,
+        )
+
+    @Property(bool, notify=balancesVisibilityChanged)
+    def balancesVisible(self) -> bool:
+        return self._balances_visible
+
+    @Property(str, notify=receiveNetworkChanged)
+    def receiveNetwork(self) -> str:
+        return self._receive_network
+
+    @Property(str, notify=activeProfileChanged)
+    def receiveQrSource(self) -> str:
+        active = self._state.active_profile
+        return f"image://walletQr/{active.address}" if active is not None else ""
+
     @Property("QVariantList", notify=historyChanged)
     def historyRecords(self) -> list[dict[str, object]]:
         mapped: list[dict[str, object]] = []
@@ -382,6 +451,35 @@ class WalletController(QObject):
         if not self.historyRecords:
             return "No Wallet-initiated transactions yet"
         return ""
+
+    @Property("QVariantMap", notify=historyChanged)
+    def selectedHistoryRecord(self) -> dict[str, object]:
+        record = next(
+            (
+                item for item in self._history_records
+                if item.action_id == self._selected_history_action_id
+                and item.profile_id == self._state.active_profile_id
+            ),
+            None,
+        )
+        return history_record_to_map(record) if record is not None else {}
+
+    @Property(str, notify=settingsSectionChanged)
+    def settingsSection(self) -> str:
+        return self._settings_section
+
+    @Property("QVariantList", notify=currentScreenChanged)
+    def transactionFlowSteps(self) -> list[str]:
+        return ["Review", "Confirm", "Submit", "Complete"]
+
+    @Property(int, notify=currentScreenChanged)
+    def transactionFlowStage(self) -> int:
+        return {
+            "transfer_review": 0,
+            "sign_transfer": 1,
+            "submit_transfer": 2,
+            "transfer_result": 3,
+        }.get(self._current_screen, 0)
 
     @Slot()
     def beginCreate(self) -> None:
@@ -444,6 +542,28 @@ class WalletController(QObject):
     @Slot(result=str)
     def pasteTransferRecipient(self) -> str:
         return QGuiApplication.clipboard().text()
+
+    @Slot(result=bool)
+    def copyActiveAddress(self) -> bool:
+        active = self._state.active_profile
+        if active is None:
+            return False
+        QGuiApplication.clipboard().setText(active.address)
+        return True
+
+    @Slot()
+    def toggleBalancesVisibility(self) -> None:
+        self._balances_visible = not self._balances_visible
+        self.balancesVisibilityChanged.emit()
+
+    @Slot(str, result=bool)
+    def selectReceiveNetwork(self, network_id: str) -> bool:
+        if network_id not in {"ethereum", "base"}:
+            return False
+        if network_id != self._receive_network:
+            self._receive_network = network_id
+            self.receiveNetworkChanged.emit()
+        return True
 
     @Slot()
     def cancelTransfer(self) -> None:
@@ -517,9 +637,11 @@ class WalletController(QObject):
             return False
         self._mainnet_in_progress = True
         self._mainnet_result = None
+        self._transfer_expiry_timer.stop()
         self._transfer_generation += 1
         generation = self._transfer_generation
         self.transferChanged.emit()
+        self._set_screen("submit_transfer")
         future = self._transfer_executor.submit(
             self._mainnet_executor.execute,
             action,
@@ -598,7 +720,7 @@ class WalletController(QObject):
             )
         self.publicDataChanged.emit()
         future = self._public_data_executor.submit(
-            self._public_data_service.refresh,
+            self._refresh_public_bundle,
             active.profile_id,
             active.address,
             network_ids,
@@ -755,8 +877,38 @@ class WalletController(QObject):
             self._set_screen("main")
 
     @Slot()
+    def showReceive(self) -> None:
+        if self._state.profiles and not self._mainnet_in_progress:
+            self._receive_network = (
+                self._selected_network
+                if self._selected_network in {"ethereum", "base"}
+                else "base"
+            )
+            self.receiveNetworkChanged.emit()
+            self._set_screen("receive")
+
+    @Slot()
+    def showSettings(self) -> None:
+        if self._state.profiles and not self._mainnet_in_progress:
+            self._settings_section = ""
+            self.settingsSectionChanged.emit()
+            self._set_screen("settings")
+
+    @Slot(str, result=bool)
+    def showSettingsSection(self, section: str) -> bool:
+        if section not in {"network", "security", "about"}:
+            return False
+        self._settings_section = section
+        self.settingsSectionChanged.emit()
+        self._set_screen("settings_info")
+        return True
+
+    @Slot()
     def showWallets(self) -> None:
         if self._state.profiles and not self._mainnet_in_progress:
+            self._wallets_return_screen = (
+                "settings" if self._current_screen == "settings" else "main"
+            )
             self._set_screen("wallets")
 
     @Slot()
@@ -764,6 +916,37 @@ class WalletController(QObject):
         if self._state.profiles and not self._mainnet_in_progress:
             self._load_history()
             self._set_screen("history")
+
+    @Slot(str, result=bool)
+    def showTransactionDetails(self, action_id: str) -> bool:
+        if not any(
+            item.action_id == action_id
+            and item.profile_id == self._state.active_profile_id
+            for item in self._history_records
+        ):
+            return False
+        self._selected_history_action_id = action_id
+        self.historySelectionChanged.emit()
+        self.historyChanged.emit()
+        self._set_screen("transaction_details")
+        return True
+
+    @Slot()
+    def closeTransactionDetails(self) -> None:
+        self._selected_history_action_id = ""
+        self.historySelectionChanged.emit()
+        self.historyChanged.emit()
+        self._set_screen("history")
+
+    @Slot()
+    def closeWallets(self) -> None:
+        self._set_screen(self._wallets_return_screen)
+
+    @Slot()
+    def closeSettingsInfo(self) -> None:
+        self._settings_section = ""
+        self.settingsSectionChanged.emit()
+        self._set_screen("settings")
 
     @Slot()
     def shutdown(self) -> None:
@@ -991,6 +1174,7 @@ class WalletController(QObject):
             return
         self._history_records = records
         self._history_available = True
+        self._flow_price_snapshot = self._price_snapshot
         self.historyChanged.emit()
         remaining_ms = max(
             1,
@@ -1013,6 +1197,7 @@ class WalletController(QObject):
         self._transfer_generation += 1
         self._transfer_expiry_timer.stop()
         self._transfer_flow.close()
+        self._flow_price_snapshot = None
         self._transfer_preparing = False
         self._mainnet_in_progress = False
         self._transfer_error = ""
@@ -1116,24 +1301,47 @@ class WalletController(QObject):
         return (self._selected_network,)
 
     def _public_data_finished(
-        self, generation: int, future: Future[PortfolioSnapshot],
+        self, generation: int, future: Future[object],
     ) -> None:
         if self._closed:
             return
         try:
-            snapshot: PortfolioSnapshot | None = future.result()
+            snapshot: object = future.result()
         except Exception:
             snapshot = None
         self._publicDataReady.emit(generation, snapshot)
 
+    def _refresh_public_bundle(
+        self,
+        profile_id: str,
+        address: str,
+        network_ids: tuple[str, ...],
+    ) -> tuple[PortfolioSnapshot, PriceSnapshot]:
+        portfolio = self._public_data_service.refresh(
+            profile_id, address, network_ids,
+        )
+        prices = self._price_service.refresh()
+        return portfolio, prices
+
     @Slot(int, object)
     def _accept_public_data(
-        self, generation: int, snapshot: PortfolioSnapshot | None,
+        self, generation: int, result: object,
     ) -> None:
         if generation != self._public_data_generation or self._closed:
             return
         active = self._state.active_profile
         requested = self._selected_network_ids()
+        snapshot: PortfolioSnapshot | None = None
+        prices: PriceSnapshot | None = None
+        if (
+            isinstance(result, tuple)
+            and len(result) == 2
+            and isinstance(result[0], PortfolioSnapshot)
+            and isinstance(result[1], PriceSnapshot)
+        ):
+            snapshot, prices = result
+        elif isinstance(result, PortfolioSnapshot):
+            snapshot = result
         if (
             snapshot is None
             or active is None
@@ -1144,6 +1352,9 @@ class WalletController(QObject):
                 self._network_snapshots[network_id] = NetworkSnapshot.unavailable(
                     NETWORK_BY_ID[network_id], "RPC_UNAVAILABLE",
                 )
+            self._price_snapshot = PriceSnapshot.unavailable(
+                int(datetime.now(UTC).timestamp()), "RPC_UNAVAILABLE",
+            )
         else:
             returned_ids = {item.network_id for item in snapshot.networks}
             if returned_ids != set(requested):
@@ -1151,9 +1362,18 @@ class WalletController(QObject):
                     self._network_snapshots[network_id] = NetworkSnapshot.unavailable(
                         NETWORK_BY_ID[network_id], "DATA_INVALID",
                     )
+                self._price_snapshot = PriceSnapshot.unavailable(
+                    int(datetime.now(UTC).timestamp()), "DATA_INVALID",
+                )
             else:
                 for item in snapshot.networks:
                     self._network_snapshots[item.network_id] = item
+                if prices is not None and prices.chain_id == 8453:
+                    self._price_snapshot = prices
+                else:
+                    self._price_snapshot = PriceSnapshot.unavailable(
+                        int(datetime.now(UTC).timestamp()), "DATA_INVALID",
+                    )
         self._public_data_refreshing = False
         timestamps = [
             item.updated_at for item in self._network_snapshots.values()
@@ -1209,6 +1429,7 @@ def _history_record(action: PreparedTransferAction) -> WalletHistoryRecord:
         created_at=created_at,
         updated_at=created_at,
         simulated=action.simulation,
+        max_total_fee_wei=str(action.max_total_fee_wei),
     )
 
 

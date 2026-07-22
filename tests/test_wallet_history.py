@@ -64,6 +64,41 @@ def test_append_update_and_restart_are_atomic_public_history(tmp_path) -> None:
     assert "private_key" not in raw.lower()
 
 
+def test_v1_loads_without_fee_fields_and_migrates_on_next_mutation(tmp_path) -> None:
+    store = HistoryStore(WalletPaths(tmp_path))
+    legacy = record().to_dict()
+    legacy.pop("max_total_fee_wei")
+    legacy.pop("actual_fee_wei")
+    atomic_write_json(store.path, {"schema_version": 1, "records": [legacy]})
+
+    loaded = store.load()
+    assert loaded[0].max_total_fee_wei is None
+    assert loaded[0].actual_fee_wei is None
+    assert '"schema_version": 1' in store.path.read_text(encoding="utf-8")
+
+    store.update_status(
+        "act-1", HistoryStatus.PENDING, "2026-07-20T12:01:00Z", HASH,
+    )
+    migrated = store.path.read_text(encoding="utf-8")
+    assert '"schema_version": 2' in migrated
+    assert '"max_total_fee_wei": null' in migrated
+
+
+def test_fee_fields_are_public_decimal_strings_and_mapped_as_eth(tmp_path) -> None:
+    item = record(
+        max_total_fee_wei="500000000000000",
+        actual_fee_wei="250000000000000",
+    )
+    store = HistoryStore(WalletPaths(tmp_path))
+    store.append(item)
+    mapped = history_record_to_map(store.load()[0])
+
+    assert mapped["maxTotalFeeWei"] == "500000000000000"
+    assert mapped["actualFeeWei"] == "250000000000000"
+    assert mapped["maxFeeDisplay"].endswith("0.0005 ETH")
+    assert mapped["actualFeeDisplay"] == "0.00025 ETH"
+
+
 def test_duplicate_unknown_and_invalid_transition_are_refused(tmp_path) -> None:
     store = HistoryStore(WalletPaths(tmp_path))
     store.append(record())
@@ -142,6 +177,8 @@ def test_simulated_record_is_explicit_in_qml_map(tmp_path) -> None:
         {"decimals": 18},
         {"transaction_hash": "0x1234"},
         {"created_at": "not-utc"},
+        {"max_total_fee_wei": "1.2"},
+        {"actual_fee_wei": "-1"},
     ],
 )
 def test_invalid_public_record_fields_are_refused(changes) -> None:

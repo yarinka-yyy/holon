@@ -10,7 +10,8 @@ from typing import Any, Mapping
 
 from .storage import StorageError, WalletPaths, atomic_write_json, read_json
 
-HISTORY_SCHEMA_VERSION = 1
+HISTORY_SCHEMA_VERSION = 2
+LEGACY_HISTORY_SCHEMA_VERSION = 1
 MAX_HISTORY_RECORDS = 500
 MONTH_LABELS = (
     "Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -79,6 +80,8 @@ class WalletHistoryRecord:
     created_at: str
     updated_at: str
     simulated: bool
+    max_total_fee_wei: str | None = None
+    actual_fee_wei: str | None = None
 
     def __post_init__(self) -> None:
         _validate_record(self)
@@ -101,15 +104,24 @@ class WalletHistoryRecord:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "simulated": self.simulated,
+            "max_total_fee_wei": self.max_total_fee_wei,
+            "actual_fee_wei": self.actual_fee_wei,
         }
 
     @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> WalletHistoryRecord:
-        expected = {
+    def from_dict(
+        cls, value: Mapping[str, Any], schema_version: int = HISTORY_SCHEMA_VERSION,
+    ) -> WalletHistoryRecord:
+        legacy_fields = {
             "action_id", "profile_id", "action_type", "network", "chain_id",
             "sender", "recipient", "contract", "token", "amount_atomic", "decimals",
             "transaction_hash", "status", "created_at", "updated_at", "simulated",
         }
+        expected = (
+            legacy_fields
+            if schema_version == LEGACY_HISTORY_SCHEMA_VERSION
+            else legacy_fields | {"max_total_fee_wei", "actual_fee_wei"}
+        )
         if set(value) != expected:
             raise HistoryValidationError("History record fields are invalid")
         try:
@@ -134,6 +146,8 @@ class WalletHistoryRecord:
                 created_at=value["created_at"],
                 updated_at=value["updated_at"],
                 simulated=value["simulated"],
+                max_total_fee_wei=value.get("max_total_fee_wei"),
+                actual_fee_wei=value.get("actual_fee_wei"),
             )
         except (TypeError, ValueError) as error:
             if isinstance(error, HistoryValidationError):
@@ -156,12 +170,17 @@ class HistoryStore:
             value = read_json(self._path)
             if not isinstance(value, dict) or set(value) != {"schema_version", "records"}:
                 raise HistoryValidationError("History envelope is invalid")
-            if value["schema_version"] != HISTORY_SCHEMA_VERSION:
+            schema_version = value["schema_version"]
+            if schema_version not in {
+                LEGACY_HISTORY_SCHEMA_VERSION, HISTORY_SCHEMA_VERSION,
+            }:
                 raise HistoryValidationError("History schema is unsupported")
             records = value["records"]
             if not isinstance(records, list) or len(records) > MAX_HISTORY_RECORDS:
                 raise HistoryValidationError("History records are invalid")
-            parsed = tuple(WalletHistoryRecord.from_dict(item) for item in records)
+            parsed = tuple(
+                WalletHistoryRecord.from_dict(item, schema_version) for item in records
+            )
             if len({record.action_id for record in parsed}) != len(parsed):
                 raise HistoryValidationError("History action IDs must be unique")
             return parsed
@@ -183,6 +202,7 @@ class HistoryStore:
         status: HistoryStatus,
         updated_at: str,
         transaction_hash: str | None = None,
+        actual_fee_wei: str | None = None,
     ) -> tuple[WalletHistoryRecord, ...]:
         records = list(self.load())
         for index, record in enumerate(records):
@@ -197,6 +217,10 @@ class HistoryStore:
                 transaction_hash=(
                     transaction_hash if transaction_hash is not None
                     else record.transaction_hash
+                ),
+                actual_fee_wei=(
+                    actual_fee_wei if actual_fee_wei is not None
+                    else record.actual_fee_wei
                 ),
             )
             self._save(records)
@@ -235,6 +259,11 @@ def history_record_to_map(record: WalletHistoryRecord) -> dict[str, object]:
         "updatedAt": record.updated_at,
         "dateLabel": _date_label(record.created_at),
         "simulated": record.simulated,
+        "shortSender": f"{record.sender[:8]}…{record.sender[-6:]}",
+        "maxTotalFeeWei": record.max_total_fee_wei or "",
+        "actualFeeWei": record.actual_fee_wei or "",
+        "maxFeeDisplay": _format_fee(record.max_total_fee_wei, maximum=True),
+        "actualFeeDisplay": _format_fee(record.actual_fee_wei, maximum=False),
     }
 
 
@@ -266,6 +295,11 @@ def _validate_record(record: WalletHistoryRecord) -> None:
         raise HistoryValidationError("History transaction hash is invalid")
     if type(record.simulated) is not bool:
         raise HistoryValidationError("History simulation marker is invalid")
+    for fee in (record.max_total_fee_wei, record.actual_fee_wei):
+        if fee is not None and (
+            not isinstance(fee, str) or DECIMAL_RE.fullmatch(fee) is None
+        ):
+            raise HistoryValidationError("History fee is invalid")
     _parse_timestamp(record.created_at)
     _parse_timestamp(record.updated_at)
 
@@ -296,3 +330,15 @@ def _format_amount(atomic: str, decimals: int, token: str) -> str:
 def _date_label(timestamp: str) -> str:
     parsed = _parse_timestamp(timestamp)
     return f"{MONTH_LABELS[parsed.month - 1]} {parsed.day}, {parsed.year}"
+
+
+def _format_fee(value: str | None, *, maximum: bool) -> str:
+    if value is None:
+        return "Unavailable"
+    atomic = int(value)
+    whole, fraction = divmod(atomic, 10**18)
+    rendered = str(whole)
+    if fraction:
+        rendered += "." + f"{fraction:018d}".rstrip("0")
+    prefix = "≤ " if maximum else ""
+    return f"{prefix}{rendered} ETH"

@@ -1,53 +1,44 @@
 import QtQuick
 import "."
 
-// qmllint disable unqualified
-
-Item {
-    id: root
-
-    BackButton {
-        objectName: "backupBackButton"; x: 22; y: 42
-        onTriggered: walletController.cancelFlow()
-    }
-    Text {
-        anchors.horizontalCenter: parent.horizontalCenter; y: 49
-        text: "Backup Seed Phrase"; color: Design.text
-        font.family: Design.fontFamily; font.pixelSize: 25; font.weight: Font.Bold
-    }
-    Text {
-        anchors.horizontalCenter: parent.horizontalCenter; y: 97
-        text: "Store these words securely and in the exact order"
-        color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 12
-    }
-    Text {
-        anchors.horizontalCenter: parent.horizontalCenter; y: 119
-        text: "Anyone with access can control this Account"
-        color: Design.textFaint; font.family: Design.fontFamily; font.pixelSize: 10
+PageState {
+    ScreenHeader {
+        objectName: "backup"; x: 28; y: 54; width: 458
+        title: "Backup Seed Phrase"; subtitle: "Write the words in their exact order"
+        onBackRequested: walletController.cancelFlow()
     }
     Rectangle {
-        x: 22; y: 158; width: 470; height: 306; radius: 14
-        color: "#7A0B1225"; border.width: 1.4; border.color: Design.purple
-        GlowWave { x: 185; y: 246; width: 285; height: 60; opacity: 0.38 }
+        x: 28; y: 142; width: 458; height: 62; radius: Design.controlRadius
+        color: "#332C261B"; border.width: 1; border.color: "#66D5AA64"
+        Image {
+            x: 16; anchors.verticalCenter: parent.verticalCenter
+            width: 24; height: 24; source: "assets/warning.svg"; sourceSize: Qt.size(48, 48)
+        }
+        Text {
+            x: 54; width: 382; anchors.verticalCenter: parent.verticalCenter
+            text: "Anyone with these words can control this Account."
+            color: Design.warning; font.family: Design.fontFamily; font.pixelSize: 13
+            wrapMode: Text.Wrap
+        }
+    }
+    SurfaceCard {
+        x: 28; y: 228; width: 458; height: 328
         Repeater {
             model: walletController.backupWords
-            delegate: Item {
+            delegate: Rectangle {
                 required property string modelData
                 required property int index
-                width: 145; height: 63
-                x: 12 + (index % 3) * 150
-                y: 18 + Math.floor(index / 3) * 69
-                Rectangle {
-                    anchors.fill: parent; radius: 9
-                    color: "#5A111A31"; border.width: 1; border.color: Design.borderSoft
-                }
+                width: 134; height: 56; radius: 12
+                x: 14 + (index % 3) * 146
+                y: 16 + Math.floor(index / 3) * 74
+                color: Design.surfaceSecondary; border.width: 1; border.color: Design.border
                 Text {
-                    x: 13; anchors.verticalCenter: parent.verticalCenter
+                    x: 12; anchors.verticalCenter: parent.verticalCenter
                     text: (index + 1) + "."; color: Design.textFaint
                     font.family: Design.fontFamily; font.pixelSize: 11
                 }
                 Text {
-                    x: 42; anchors.verticalCenter: parent.verticalCenter
+                    x: 38; anchors.verticalCenter: parent.verticalCenter
                     text: modelData; color: Design.text
                     font.family: Design.fontFamily; font.pixelSize: 13; font.weight: Font.Medium
                 }
@@ -55,25 +46,22 @@ Item {
         }
     }
     FormButton {
-        objectName: "copySeedButton"
-        x: 54; y: 482; width: 406; height: 58
+        objectName: "copySeedButton"; x: 72; y: 580; width: 370; height: 56
         label: "Copy Seed Phrase"; primary: false
         onTriggered: walletController.copyBackup()
     }
     Text {
-        anchors.horizontalCenter: parent.horizontalCenter; y: 551
-        text: walletController.errorMessage; color: "#FF7F9B"
-        font.family: Design.fontFamily; font.pixelSize: 11
+        x: 72; y: 648; width: 370; horizontalAlignment: Text.AlignHCenter
+        text: walletController.errorMessage; color: Design.danger
+        font.family: Design.fontFamily; font.pixelSize: 12
     }
     FormButton {
-        objectName: "finishBackupButton"
-        x: 54; y: 576; width: 406; height: 58
-        label: "Done · I saved the phrase"
-        onTriggered: walletController.finishBackup()
+        objectName: "finishBackupButton"; x: 72; y: 682; width: 370; height: 56
+        label: "Done · I saved the phrase"; onTriggered: walletController.finishBackup()
     }
     Text {
-        anchors.horizontalCenter: parent.horizontalCenter; y: 647
+        anchors.horizontalCenter: parent.horizontalCenter; y: 758
         text: "The Account is saved only after Done"
-        color: Design.textFaint; font.family: Design.fontFamily; font.pixelSize: 9
+        color: Design.textFaint; font.family: Design.fontFamily; font.pixelSize: 11
     }
 }

@@ -1,67 +1,69 @@
 import QtQuick
 import "."
 
-// qmllint disable unqualified
-
-Item {
+PageState {
     id: root
-
-    function submit() {
-        walletController.submitPassword(passwordField.text, confirmField.text)
-    }
+    function submit() { walletController.submitPassword(passwordField.text, confirmField.text) }
     onEnabledChanged: if (!enabled) { passwordField.clear(); confirmField.clear() }
 
-    BackButton {
-        objectName: "passwordBackButton"
-        x: 22; y: 42; visible: walletController.passwordTitle !== "Unlock Wallet"
-        onTriggered: walletController.cancelFlow()
+    ScreenHeader {
+        objectName: "password"; x: 28; y: 54; width: 458
+        title: walletController.passwordTitle
+        subtitle: walletController.passwordSubtitle
+        backVisible: walletController.passwordTitle !== "Unlock Wallet"
+        onBackRequested: walletController.cancelFlow()
+    }
+    SurfaceCard {
+        x: 86; y: 178; width: 342; height: 174
+        Rectangle {
+            anchors.centerIn: parent; width: 84; height: 84; radius: 42
+            color: Design.accentSoft; border.width: 1; border.color: Design.accent
+            Image {
+                anchors.centerIn: parent; width: 42; height: 42
+                source: "assets/lock.svg"; sourceSize: Qt.size(84, 84)
+            }
+        }
     }
     Text {
-        x: 24; y: 39; visible: walletController.passwordTitle === "Unlock Wallet"
-        text: "Holon Wallet"; color: Design.text
-        font.family: Design.fontFamily; font.pixelSize: 25; font.weight: Font.Bold
-    }
-    Image {
-        x: 207; y: 135; width: 100; height: 100
-        source: "assets/shield-lock.svg"; sourceSize: Qt.size(200, 200)
-    }
-    Text {
-        anchors.horizontalCenter: parent.horizontalCenter; y: 257
-        text: walletController.passwordTitle; color: Design.text
-        font.family: Design.fontFamily; font.pixelSize: 29; font.weight: Font.DemiBold
-    }
-    Text {
-        anchors.horizontalCenter: parent.horizontalCenter; y: 304
-        text: walletController.passwordSubtitle; color: Design.textMuted
-        font.family: Design.fontFamily; font.pixelSize: 13
+        x: 72; y: 389; width: 370; horizontalAlignment: Text.AlignHCenter
+        text: walletController.passwordTitle === "Unlock Wallet"
+            ? "Unlock access to your encrypted Accounts"
+            : "Use one Wallet password for protected actions"
+        color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 14
+        wrapMode: Text.Wrap
     }
     PasswordInput {
         id: passwordField; objectName: "passwordField"
         fieldObjectName: "passwordTextInput"
-        x: 86; y: 354; width: 342; height: 61
+        x: 72; y: 454; width: 370; height: 56
         placeholderText: "Enter password"; onAccepted: root.submit()
     }
     PasswordInput {
         id: confirmField; objectName: "confirmPasswordField"
         fieldObjectName: "confirmPasswordTextInput"
-        x: 86; y: 430; width: 342; height: 61
+        x: 72; y: 526; width: 370; height: 56
         visible: walletController.passwordConfirmRequired
         placeholderText: "Confirm password"; onAccepted: root.submit()
     }
     Text {
-        anchors.horizontalCenter: parent.horizontalCenter
-        y: walletController.passwordConfirmRequired ? 502 : 430
-        text: walletController.errorMessage; color: "#FF7F9B"
-        font.family: Design.fontFamily; font.pixelSize: 11
+        x: 72; y: walletController.passwordConfirmRequired ? 598 : 526
+        width: 370; horizontalAlignment: Text.AlignHCenter
+        text: walletController.errorMessage; color: Design.danger
+        font.family: Design.fontFamily; font.pixelSize: 12
     }
     FormButton {
-        objectName: "passwordSubmitButton"
-        x: 86; width: 342; height: 58
-        y: walletController.passwordConfirmRequired ? 529 : 470
+        objectName: "passwordSubmitButton"; x: 72; width: 370; height: 56
+        y: walletController.passwordConfirmRequired ? 632 : 568
         label: walletController.passwordActionLabel
         controlEnabled: passwordField.text.length >= 4
             && (!walletController.passwordConfirmRequired
                 || (confirmField.text.length >= 4 && passwordField.text === confirmField.text))
         onTriggered: root.submit()
+    }
+    Text {
+        visible: walletController.passwordConfirmRequired
+        x: 72; y: 708; width: 370; horizontalAlignment: Text.AlignHCenter
+        text: "Minimum 4 characters · a longer password is safer"
+        color: Design.warning; font.family: Design.fontFamily; font.pixelSize: 11
     }
 }

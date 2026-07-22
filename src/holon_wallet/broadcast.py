@@ -491,11 +491,14 @@ class BroadcastReceiptTracker:
         if endpoint is None:
             return self._result(record, record.status, True)
         observed = record.status
+        actual_fee_wei: str | None = None
         try:
             rpc = self._rpc_factory(endpoint)
             receipt = rpc.transaction_receipt(record.transaction_hash)
             if receipt is not None:
                 observed = _receipt_status(receipt, record)
+                if observed in {HistoryStatus.CONFIRMED, HistoryStatus.FAILED}:
+                    actual_fee_wei = _receipt_fee_wei(receipt)
             elif record.status is HistoryStatus.PENDING:
                 observed = HistoryStatus.PENDING
             else:
@@ -512,7 +515,9 @@ class BroadcastReceiptTracker:
                 if record.status is HistoryStatus.PENDING
                 else HistoryStatus.UNKNOWN
             )
-        if observed is record.status:
+        if observed is record.status and (
+            actual_fee_wei is None or record.actual_fee_wei is not None
+        ):
             return self._result(record, observed, True)
         try:
             updated = self.history_store.update_status(
@@ -520,6 +525,7 @@ class BroadcastReceiptTracker:
                 observed,
                 _timestamp(self._clock()),
                 record.transaction_hash,
+                actual_fee_wei,
             )
             current = next(item for item in updated if item.action_id == record.action_id)
             return self._result(current, observed, True)
@@ -644,6 +650,8 @@ def _receipt_status(
             return HistoryStatus.UNKNOWN
         if record.contract is None or target.lower() != record.contract.lower():
             return HistoryStatus.UNKNOWN
+        if _receipt_fee_wei(receipt) is None:
+            return HistoryStatus.UNKNOWN
         status = int(receipt["status"])
         if status == 0:
             return HistoryStatus.FAILED
@@ -682,6 +690,17 @@ def _matching_transfer_log(value: object, record: WalletHistoryRecord) -> bool:
         )
     except (KeyError, TypeError, ValueError):
         return False
+
+
+def _receipt_fee_wei(receipt: Mapping[str, object]) -> str | None:
+    try:
+        gas_used = int(receipt["gasUsed"])
+        effective_gas_price = int(receipt["effectiveGasPrice"])
+        if gas_used < 0 or effective_gas_price < 0:
+            return None
+        return str(gas_used * effective_gas_price)
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def _public_transaction_matches(

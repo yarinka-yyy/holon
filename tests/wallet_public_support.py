@@ -17,6 +17,7 @@ from holon_wallet.public_data import (
     PortfolioSnapshot,
     PublicDataStatus,
 )
+from holon_wallet.prices import AssetPrice, PriceSnapshot, PriceStatus
 from holon_wallet.transfer import BASE_CHAIN_ID, TransferPreflightService
 from holon_wallet.signer import OfflineSigningPolicy
 
@@ -78,6 +79,30 @@ class StubPublicDataService:
             for network_id in network_ids
         )
         return PortfolioSnapshot(profile_id, address, snapshots)
+
+
+class StubPriceService:
+    def __init__(self, status: PriceStatus = PriceStatus.LIVE) -> None:
+        self.status = status
+        self.calls = 0
+
+    def refresh(self) -> PriceSnapshot:
+        self.calls += 1
+        answer = 250_000_000_000 if self.status is PriceStatus.LIVE else None
+        usdc_answer = 100_000_000 if self.status is PriceStatus.LIVE else None
+        return PriceSnapshot(
+            8453,
+            self.status,
+            (
+                AssetPrice("eth", "ETH", self.status, answer, 8 if answer else None, 1),
+                AssetPrice(
+                    "usdc", "USDC", self.status,
+                    usdc_answer, 8 if usdc_answer else None, 1,
+                ),
+            ),
+            1,
+            None if self.status is PriceStatus.LIVE else "UNAVAILABLE",
+        )
 
 
 class StubTransferRpc:

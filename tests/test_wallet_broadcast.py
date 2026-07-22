@@ -290,6 +290,8 @@ def receipt(action, transaction_hash: str, status: int = 1, amount: int = 1_000_
         "from": action.sender,
         "to": action.token_contract,
         "status": status,
+        "gasUsed": 45_000,
+        "effectiveGasPrice": 12,
         "logs": [
             {
                 "address": action.token_contract,
@@ -317,6 +319,7 @@ def test_receipt_tracker_confirms_exact_usdc_event_and_marks_revert(tmp_path) ->
 
     assert confirmed.status is HistoryStatus.CONFIRMED
     assert history.load()[0].status is HistoryStatus.CONFIRMED
+    assert history.load()[0].actual_fee_wei == "540000"
 
     second_dir = tmp_path / "reverted"
     repository2, history2, action2, password2, _secret2, rpc2 = prepared_fixture(second_dir)
@@ -334,6 +337,7 @@ def test_receipt_tracker_confirms_exact_usdc_event_and_marks_revert(tmp_path) ->
 
     assert reverted.status is HistoryStatus.FAILED
     assert history2.load()[0].status is HistoryStatus.FAILED
+    assert history2.load()[0].actual_fee_wei == "540000"
 
 
 def test_receipt_tracker_rejects_wrong_event_and_recovers_unknown_pending(
@@ -366,6 +370,12 @@ def test_receipt_tracker_rejects_wrong_event_and_recovers_unknown_pending(
     rpc.values["receipt"] = receipt(action, sent.transaction_hash, amount=2_000_000)
     assert tracker.check_once(action.action_id).status is HistoryStatus.UNKNOWN
     assert rpc.chain_calls == chain_calls
+
+    malformed_fee = receipt(action, sent.transaction_hash)
+    malformed_fee.pop("effectiveGasPrice")
+    rpc.values["receipt"] = malformed_fee
+    assert tracker.check_once(action.action_id).status is HistoryStatus.UNKNOWN
+    assert history.load()[0].actual_fee_wei is None
 
 
 def test_tracking_timeout_is_read_only_and_keeps_accepted_submission_pending(

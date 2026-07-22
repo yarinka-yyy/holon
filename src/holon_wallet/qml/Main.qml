@@ -1,111 +1,39 @@
 import QtQuick
 import "."
 
-// qmllint disable unqualified
-
 Item {
     id: root
     objectName: "walletContent"
-    width: 514
-    height: 686
-    property real sceneScale: Math.min(width / 514, height / 686)
+    width: 514; height: 840
+    property real sceneScale: Math.min(width / 514, height / 840)
 
     Rectangle {
-        anchors.fill: parent
-        radius: Math.max(10, 13 * root.sceneScale)
-        color: Design.backgroundDeep
-        border.width: 1
-        border.color: "#30364B"
-        gradient: Gradient {
-            GradientStop { position: 0.0; color: "#071021" }
-            GradientStop { position: 0.48; color: "#050A19" }
-            GradientStop { position: 1.0; color: "#020511" }
-        }
+        anchors.fill: parent; radius: Math.max(16, 24 * root.sceneScale)
+        color: Design.background; border.width: 1; border.color: "#14FFFFFF"
     }
-
     Item {
-        id: stage
-        width: 514
-        height: 686
-        x: (root.width - width * scale) / 2
-        y: (root.height - height * scale) / 2
-        scale: root.sceneScale
-        transformOrigin: Item.TopLeft
+        id: stage; width: 514; height: 840
+        x: (root.width - width * scale) / 2; y: (root.height - height * scale) / 2
+        scale: root.sceneScale; transformOrigin: Item.TopLeft
 
-        WelcomePage {
-            objectName: "welcomePage"; anchors.fill: parent
-            enabled: walletController.currentScreen === "welcome"
-            visible: opacity > 0.01; opacity: enabled ? 1 : 0
-            Behavior on opacity { NumberAnimation { duration: Design.normalMotion } }
-        }
-        PasswordPage {
-            objectName: "passwordPage"; anchors.fill: parent
-            enabled: walletController.currentScreen === "password"
-            visible: opacity > 0.01; opacity: enabled ? 1 : 0
-            Behavior on opacity { NumberAnimation { duration: Design.normalMotion } }
-        }
-        ImportPage {
-            objectName: "importPage"; anchors.fill: parent
-            enabled: walletController.currentScreen === "import"
-            visible: opacity > 0.01; opacity: enabled ? 1 : 0
-            Behavior on opacity { NumberAnimation { duration: Design.normalMotion } }
-        }
-        BackupPage {
-            objectName: "backupPage"; anchors.fill: parent
-            enabled: walletController.currentScreen === "backup"
-            visible: opacity > 0.01; opacity: enabled ? 1 : 0
-            Behavior on opacity { NumberAnimation { duration: Design.normalMotion } }
-        }
-        SendPage {
-            objectName: "sendPage"; anchors.fill: parent
-            enabled: walletController.currentScreen === "send"
-            visible: opacity > 0.01; opacity: enabled ? 1 : 0
-            Behavior on opacity { NumberAnimation { duration: Design.normalMotion } }
-        }
-        TransferReviewPage {
-            objectName: "transferReviewPage"; anchors.fill: parent
-            enabled: walletController.currentScreen === "transfer_review"
-            visible: opacity > 0.01; opacity: enabled ? 1 : 0
-            Behavior on opacity { NumberAnimation { duration: Design.normalMotion } }
-        }
-        SignPage {
-            objectName: "mainnetSignPage"; anchors.fill: parent
-            enabled: walletController.currentScreen === "sign_transfer"
-            visible: opacity > 0.01; opacity: enabled ? 1 : 0
-            Behavior on opacity { NumberAnimation { duration: Design.normalMotion } }
-        }
-        MainnetResultPage {
-            objectName: "mainnetResultPage"; anchors.fill: parent
-            enabled: walletController.currentScreen === "transfer_result"
-            visible: opacity > 0.01; opacity: enabled ? 1 : 0
-            Behavior on opacity { NumberAnimation { duration: Design.normalMotion } }
-        }
-        MainPage {
-            objectName: "mainPage"; anchors.fill: parent
-            enabled: walletController.currentScreen === "main"
-            visible: opacity > 0.01; opacity: enabled ? 1 : 0
-            Behavior on opacity { NumberAnimation { duration: Design.normalMotion } }
-        }
-        WalletsPage {
-            objectName: "walletsPage"; anchors.fill: parent
-            enabled: walletController.currentScreen === "wallets"
-            visible: opacity > 0.01; opacity: enabled ? 1 : 0
-            Behavior on opacity { NumberAnimation { duration: Design.normalMotion } }
-        }
-        HistoryPage {
-            objectName: "historyPage"; anchors.fill: parent
-            enabled: walletController.currentScreen === "history"
-            visible: opacity > 0.01; opacity: enabled ? 1 : 0
-            Behavior on opacity { NumberAnimation { duration: Design.normalMotion } }
-        }
-        UnavailablePage {
-            objectName: "unavailablePage"; anchors.fill: parent
-            enabled: walletController.currentScreen === "unavailable"
-            visible: opacity > 0.01; opacity: enabled ? 1 : 0
-            Behavior on opacity { NumberAnimation { duration: Design.normalMotion } }
-        }
+        WelcomePage { objectName: "welcomePage"; anchors.fill: parent; active: walletController.currentScreen === "welcome" }
+        PasswordPage { objectName: "passwordPage"; anchors.fill: parent; active: walletController.currentScreen === "password" }
+        ImportPage { objectName: "importPage"; anchors.fill: parent; active: walletController.currentScreen === "import" }
+        BackupPage { objectName: "backupPage"; anchors.fill: parent; active: walletController.currentScreen === "backup" }
+        MainPage { objectName: "mainPage"; anchors.fill: parent; active: walletController.currentScreen === "main" }
+        ReceivePage { objectName: "receivePage"; anchors.fill: parent; active: walletController.currentScreen === "receive" }
+        SettingsPage { objectName: "settingsPage"; anchors.fill: parent; active: walletController.currentScreen === "settings" }
+        SettingsInfoPage { objectName: "settingsInfoPage"; anchors.fill: parent; active: walletController.currentScreen === "settings_info" }
+        WalletsPage { objectName: "walletsPage"; anchors.fill: parent; active: walletController.currentScreen === "wallets" }
+        HistoryPage { objectName: "historyPage"; anchors.fill: parent; active: walletController.currentScreen === "history" }
+        TransactionDetailsPage { objectName: "transactionDetailsPage"; anchors.fill: parent; active: walletController.currentScreen === "transaction_details" }
+        SendPage { objectName: "sendPage"; anchors.fill: parent; active: walletController.currentScreen === "send" }
+        TransferReviewPage { objectName: "transferReviewPage"; anchors.fill: parent; active: walletController.currentScreen === "transfer_review" }
+        SignPage { objectName: "mainnetSignPage"; anchors.fill: parent; active: walletController.currentScreen === "sign_transfer" }
+        SubmitPage { objectName: "submitPage"; anchors.fill: parent; active: walletController.currentScreen === "submit_transfer" }
+        MainnetResultPage { objectName: "mainnetResultPage"; anchors.fill: parent; active: walletController.currentScreen === "transfer_result" }
+        UnavailablePage { objectName: "unavailablePage"; anchors.fill: parent; active: walletController.currentScreen === "unavailable" }
         Chrome { anchors.fill: parent; window: walletWindow; z: 50 }
     }
-
     ResizeFrame { anchors.fill: parent; window: walletWindow; z: 100 }
 }

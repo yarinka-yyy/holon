@@ -16,6 +16,7 @@ $distRoot = Join-Path $projectRoot "dist"
 $sourceRoot = Join-Path $projectRoot "src"
 $entryPoint = Join-Path $sourceRoot "holon_wallet_app.py"
 $qmlRoot = Join-Path $sourceRoot "holon_wallet\qml"
+$resourceRoot = Join-Path $sourceRoot "holon_wallet\resources"
 New-Item -ItemType Directory -Force -Path $buildRoot | Out-Null
 $previousPythonPath = $env:PYTHONPATH
 
@@ -34,6 +35,7 @@ try {
         --name HolonWallet `
         --paths $sourceRoot `
         --add-data "$qmlRoot;holon_wallet/qml" `
+        --add-data "$resourceRoot;holon_wallet/resources" `
         --collect-data bip_utils `
         --collect-all coincurve `
         --collect-data web3 `

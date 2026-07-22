@@ -1,59 +1,52 @@
 import QtQuick
 import "."
 
-// qmllint disable unqualified
-
 Item {
     id: root
     objectName: "accountSelector"
     property bool open: false
     signal dismissRequested()
-    visible: opacity > 0.01; enabled: root.open; opacity: root.open ? 1 : 0
+    visible: opacity > 0.01; enabled: open; opacity: open ? 1 : 0
     Behavior on opacity { NumberAnimation { duration: Design.normalMotion } }
 
-    Rectangle { anchors.fill: parent; color: "#88020714" }
+    Rectangle { anchors.fill: parent; color: "#990A1014" }
     MouseArea { anchors.fill: parent; onClicked: root.dismissRequested() }
-    Rectangle {
-        x: 18; y: 202; width: 478
-        height: Math.min(264, walletController.profiles.length * 52 + 6)
-        radius: 13; color: "#F20A1122"; border.width: 1; border.color: Design.purple
+    SurfaceCard {
+        x: 28; y: 188; width: 458
+        height: Math.min(300, walletController.profiles.length * 66 + 20)
+        border.color: Design.borderStrong
         ListView {
-            id: profileList
-            anchors.fill: parent; anchors.margins: 3
-            clip: true; model: walletController.profiles
+            id: list; anchors.fill: parent; anchors.margins: 10
+            clip: true; model: walletController.profiles; spacing: 4
             delegate: Item {
                 required property var modelData
-                width: profileList.width; height: 52
                 objectName: "profileOption_" + modelData.id
+                width: list.width; height: 62
                 function trigger() {
                     walletController.selectProfile(modelData.id)
                     root.dismissRequested()
                 }
                 Rectangle {
-                    anchors.fill: parent; radius: 9
+                    anchors.fill: parent; radius: 12
                     color: optionMouse.containsMouse ? Design.surfaceHover : "transparent"
-                    Behavior on color { ColorAnimation { duration: Design.fastMotion } }
                 }
                 Avatar {
-                    x: 10; width: 34; height: 34; anchors.verticalCenter: parent.verticalCenter
+                    x: 8; anchors.verticalCenter: parent.verticalCenter; width: 42; height: 42
                     initials: modelData.initials
                     primary: modelData.id === walletController.activeProfileId
                 }
                 Text {
-                    x: 57; anchors.verticalCenter: parent.verticalCenter
-                    text: modelData.label; color: Design.text
-                    font.family: Design.fontFamily; font.pixelSize: 13; font.weight: Font.Medium
+                    x: 64; y: 11; text: modelData.label; color: Design.text
+                    font.family: Design.fontFamily; font.pixelSize: 15; font.weight: Font.Medium
                 }
                 Text {
-                    anchors.right: parent.right; anchors.rightMargin: 31
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: modelData.typeLabel; color: Design.textFaint
-                    font.family: Design.fontFamily; font.pixelSize: 9
+                    x: 64; y: 35; text: modelData.shortAddress; color: Design.textMuted
+                    font.family: Design.fontFamily; font.pixelSize: 12
                 }
                 Rectangle {
-                    anchors.right: parent.right; anchors.rightMargin: 12
+                    anchors.right: parent.right; anchors.rightMargin: 10
                     anchors.verticalCenter: parent.verticalCenter
-                    width: 8; height: 8; radius: 4; color: Design.purpleBright
+                    width: 9; height: 9; radius: 5; color: Design.accent
                     visible: modelData.id === walletController.activeProfileId
                 }
                 MouseArea {

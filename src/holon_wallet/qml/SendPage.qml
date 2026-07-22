@@ -1,203 +1,163 @@
 import QtQuick
 import "."
 
-// qmllint disable unqualified
-
-Item {
+PageState {
     id: root
-    property bool selectorOpen: false
-
-    onEnabledChanged: {
-        if (enabled)
-            recipientInput.text = walletController.transferRecipient
-    }
-
-    BackButton {
-        objectName: "sendBackButton"; x: 22; y: 42
-        onTriggered: walletController.cancelTransfer()
+    onEnabledChanged: if (enabled) recipientInput.text = walletController.transferRecipient
+    ScreenHeader {
+        objectName: "send"; x: 28; y: 54; width: 458
+        title: "Send"; subtitle: "Fixed MVP1 transfer · Base"
+        onBackRequested: walletController.cancelTransfer()
     }
     Text {
-        anchors.horizontalCenter: parent.horizontalCenter; y: 49
-        text: "Send"; color: Design.text
-        font.family: Design.fontFamily; font.pixelSize: 25; font.weight: Font.Bold
+        x: 28; y: 146; text: "From"; color: Design.textMuted
+        font.family: Design.fontFamily; font.pixelSize: 13
+    }
+    SurfaceCard {
+        objectName: "sendAccountCard"; x: 28; y: 174; width: 458; height: 78
+        Avatar {
+            x: 14; anchors.verticalCenter: parent.verticalCenter; width: 48; height: 48
+            initials: walletController.activeProfile.initials || "A"; primary: true
+        }
+        Text {
+            x: 78; y: 15; text: walletController.activeProfile.label || "Account"
+            color: Design.text; font.family: Design.fontFamily; font.pixelSize: 16
+            font.weight: Font.Medium
+        }
+        Text {
+            x: 78; y: 42; text: walletController.activeProfile.shortAddress || ""
+            color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 12
+        }
+        Rectangle {
+            anchors.right: parent.right; anchors.rightMargin: 14
+            anchors.verticalCenter: parent.verticalCenter
+            width: 66; height: 30; radius: 10; color: Design.accentSoft
+            Text {
+                anchors.centerIn: parent; text: "Active"; color: Design.accent
+                font.family: Design.fontFamily; font.pixelSize: 11; font.weight: Font.Medium
+            }
+        }
     }
     Text {
-        x: 24; y: 94; text: "FROM ACCOUNT"
-        color: Design.textFaint; font.family: Design.fontFamily
-        font.pixelSize: 9; font.letterSpacing: 0.5
-    }
-    AccountCard {
-        objectName: "sendAccountCard"
-        x: 18; y: 112; width: 478; height: 86
-        profile: walletController.activeProfile
-        interactive: !walletController.transferPreparing
-        onClicked: root.selectorOpen = !root.selectorOpen
-    }
-
-    Text {
-        x: 24; y: 216; text: "Recipient"
-        color: Design.text; font.family: Design.fontFamily
-        font.pixelSize: 14; font.weight: Font.DemiBold
+        x: 28; y: 278; text: "Recipient"; color: Design.textMuted
+        font.family: Design.fontFamily; font.pixelSize: 13
     }
     Rectangle {
-        x: 24; y: 242; width: 466; height: 60; radius: 12
-        color: recipientInput.activeFocus ? Design.surfaceHover : Design.surface
-        border.width: 1
-        border.color: recipientInput.activeFocus ? Design.purple : Design.border
-        Behavior on border.color { ColorAnimation { duration: Design.fastMotion } }
-
+        x: 28; y: 306; width: 458; height: 58; radius: Design.controlRadius
+        color: Design.surface; border.width: recipientInput.activeFocus ? 2 : 1
+        border.color: recipientInput.activeFocus ? Design.accent : Design.border
         TextInput {
-            id: recipientInput
-            objectName: "transferRecipientInput"
-            x: 16; y: 19; width: 362; height: 25
-            color: Design.text; selectionColor: Design.purple
-            selectedTextColor: "white"; clip: true
-            font.family: Design.fontFamily; font.pixelSize: 13
-            enabled: !walletController.transferPreparing
+            id: recipientInput; objectName: "transferRecipientInput"
+            x: 16; y: 18; width: 348; height: 24
+            enabled: !walletController.transferPreparing; clip: true
+            color: Design.text; selectionColor: Design.accent; selectedTextColor: Design.textOnAccent
+            font.family: Design.fontFamily; font.pixelSize: 14
             inputMethodHints: Qt.ImhNoPredictiveText | Qt.ImhNoAutoUppercase
         }
         Text {
             x: 16; anchors.verticalCenter: parent.verticalCenter
             visible: recipientInput.text.length === 0 && !recipientInput.activeFocus
-            text: "0x recipient address"
-            color: Design.textFaint; font.family: Design.fontFamily; font.pixelSize: 13
+            text: "0x recipient address"; color: Design.textFaint
+            font.family: Design.fontFamily; font.pixelSize: 14
         }
         Item {
             objectName: "pasteRecipientButton"
-            anchors.right: parent.right; anchors.rightMargin: 10
-            anchors.verticalCenter: parent.verticalCenter
-            width: 74; height: 40
+            anchors.right: parent.right; anchors.rightMargin: 8
+            anchors.verticalCenter: parent.verticalCenter; width: 76; height: 42
             enabled: !walletController.transferPreparing
-            function trigger() {
-                if (enabled)
-                    recipientInput.text = walletController.pasteTransferRecipient()
-            }
+            function trigger() { recipientInput.text = walletController.pasteTransferRecipient() }
             Rectangle {
-                anchors.fill: parent; radius: 9
-                color: pasteMouse.containsMouse ? Design.surfaceHover : Design.surfaceRaised
+                anchors.fill: parent; radius: 11
+                color: pasteMouse.containsMouse ? Design.surfaceHover : Design.surfaceSecondary
                 border.width: 1; border.color: Design.border
             }
-            Image {
-                x: 10; anchors.verticalCenter: parent.verticalCenter
-                width: 15; height: 15; source: "assets/copy.svg"
-                sourceSize: Qt.size(30, 30)
-            }
             Text {
-                x: 31; anchors.verticalCenter: parent.verticalCenter
-                text: "Paste"; color: Design.purpleBright
-                font.family: Design.fontFamily; font.pixelSize: 10
+                anchors.centerIn: parent; text: "Paste"; color: Design.accent
+                font.family: Design.fontFamily; font.pixelSize: 12; font.weight: Font.Medium
             }
             MouseArea {
-                id: pasteMouse; anchors.fill: parent; hoverEnabled: true
-                enabled: parent.enabled; cursorShape: Qt.PointingHandCursor
+                id: pasteMouse; anchors.fill: parent; enabled: parent.enabled
+                hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                 onClicked: parent.trigger()
             }
         }
     }
-
     Text {
-        x: 24; y: 323; text: "Transfer"
-        color: Design.text; font.family: Design.fontFamily
-        font.pixelSize: 14; font.weight: Font.DemiBold
+        x: 28; y: 390; text: "Transfer"; color: Design.textMuted
+        font.family: Design.fontFamily; font.pixelSize: 13
     }
-    Rectangle {
-        x: 24; y: 350; width: 466; height: 128; radius: 14
-        color: Design.surface; border.width: 1; border.color: Design.border
-        GlowWave { x: 200; y: 65; width: 266; height: 63; opacity: 0.25 }
-
-        Rectangle {
-            x: 14; y: 14; width: 132; height: 100; radius: 11
-            color: Design.surfaceRaised; border.width: 1; border.color: Design.purple
-            Image {
-                anchors.horizontalCenter: parent.horizontalCenter; y: 13
-                width: 32; height: 32; source: "assets/base.svg"
-                sourceSize: Qt.size(64, 64)
-            }
-            Text {
-                anchors.horizontalCenter: parent.horizontalCenter; y: 52
-                text: "Base"; color: Design.text
-                font.family: Design.fontFamily; font.pixelSize: 14; font.weight: Font.DemiBold
-            }
-            Text {
-                anchors.horizontalCenter: parent.horizontalCenter; y: 76
-                text: "Chain 8453"; color: Design.textMuted
-                font.family: Design.fontFamily; font.pixelSize: 9
-            }
-        }
+    SurfaceCard {
+        x: 28; y: 418; width: 458; height: 126
         Image {
-            x: 172; y: 21; width: 34; height: 34; source: "assets/usdc.svg"
-            sourceSize: Qt.size(68, 68)
+            x: 18; y: 20; width: 48; height: 48
+            source: "assets/usdc.svg"; sourceSize: Qt.size(96, 96)
         }
         Text {
-            x: 219; y: 18; text: "1 USDC"
-            color: Design.text; font.family: Design.fontFamily
-            font.pixelSize: 24; font.weight: Font.DemiBold
+            x: 82; y: 20; text: "1 USDC"; color: Design.text
+            font.family: Design.fontFamily; font.pixelSize: 24; font.weight: Font.DemiBold
         }
         Text {
-            x: 219; y: 52; text: "Fixed MVP1 transfer"
-            color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 10
+            x: 82; y: 57; text: "Fixed amount"; color: Design.textMuted
+            font.family: Design.fontFamily; font.pixelSize: 12
         }
-        Text {
-            x: 172; y: 86
-            text: "Available: " + (walletController.baseData.usdcValue || "Data unavailable")
-            color: Design.textFaint; font.family: Design.fontFamily; font.pixelSize: 10
-        }
-    }
-
-    Text {
-        objectName: "transferErrorLabel"
-        x: 32; y: 492; width: 450; height: 32
-        horizontalAlignment: Text.AlignHCenter; wrapMode: Text.WordWrap
-        text: walletController.transferError
-        color: "#FF9AA9"; font.family: Design.fontFamily; font.pixelSize: 10
-    }
-
-    Item {
-        visible: walletController.transferPreparing
-        x: 86; y: 526; width: 342; height: 60
         Rectangle {
-            anchors.fill: parent; radius: 12
-            color: Design.surfaceRaised; border.width: 1; border.color: Design.purple
-        }
-        Row {
-            anchors.centerIn: parent; spacing: 7
-            Repeater {
-                model: 3
-                Rectangle {
-                    required property int index
-                    width: 7; height: 7; radius: 3.5; color: Design.purpleBright
-                    SequentialAnimation on opacity {
-                        running: walletController.transferPreparing; loops: Animation.Infinite
-                        PauseAnimation { duration: index * 120 }
-                        NumberAnimation { to: 0.28; duration: 220 }
-                        NumberAnimation { to: 1; duration: 220 }
-                        PauseAnimation { duration: (2 - index) * 120 }
-                    }
+            anchors.right: parent.right; anchors.rightMargin: 18; y: 19
+            width: 104; height: 36; radius: 11; color: Design.surfaceSecondary
+            Row {
+                anchors.centerIn: parent; spacing: 7
+                Image { width: 20; height: 20; source: "assets/base.svg"; sourceSize: Qt.size(40, 40) }
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter; text: "Base"
+                    color: Design.text; font.family: Design.fontFamily; font.pixelSize: 13
                 }
             }
-            Text {
-                text: "Preparing live data…"; color: Design.text
-                font.family: Design.fontFamily; font.pixelSize: 13
-            }
+        }
+        Text {
+            x: 18; y: 94
+            text: "Available: " + (walletController.baseData.usdcValue || "Data unavailable")
+            color: Design.textFaint; font.family: Design.fontFamily; font.pixelSize: 12
         }
     }
-    FormButton {
-        objectName: "prepareTransferButton"
-        x: 86; y: 526; width: 342; height: 60
-        visible: !walletController.transferPreparing
-        label: "Prepare 1 USDC"
-        controlEnabled: recipientInput.text.trim().length > 0
-        onTriggered: walletController.prepareTransfer(recipientInput.text)
+    Rectangle {
+        x: 28; y: 568; width: 458; height: 72; radius: Design.controlRadius
+        color: Design.surface; border.width: 1; border.color: Design.border
+        Image {
+            x: 14; y: 14; width: 24; height: 24
+            source: "assets/info.svg"; sourceSize: Qt.size(48, 48)
+        }
+        Text {
+            x: 50; y: 12; width: 390; wrapMode: Text.Wrap
+            text: "PublicNode receives public sender and recipient for preparation and final revalidation. A signed broadcast happens only after confirmation."
+            color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 11; lineHeight: 1.25
+        }
     }
     Text {
-        x: 48; y: 600; width: 418; height: 42
-        horizontalAlignment: Text.AlignHCenter; wrapMode: Text.WordWrap
-        text: "PublicNode receives sender and recipient during preparation and final revalidation. One signed broadcast occurs only after local confirmation."
-        color: Design.textFaint; font.family: Design.fontFamily; font.pixelSize: 9
+        objectName: "transferErrorLabel"; x: 52; y: 654; width: 410
+        horizontalAlignment: Text.AlignHCenter; wrapMode: Text.Wrap
+        text: walletController.transferError; color: Design.danger
+        font.family: Design.fontFamily; font.pixelSize: 12
     }
-
-    AccountSelector {
-        anchors.fill: parent; z: 30; open: root.selectorOpen
-        onDismissRequested: root.selectorOpen = false
+    FormButton {
+        objectName: "prepareTransferButton"; x: 72; y: 696; width: 370; height: 56
+        label: walletController.transferPreparing ? "Preparing live data…" : "Prepare 1 USDC"
+        controlEnabled: recipientInput.text.trim().length > 0 && !walletController.transferPreparing
+        onTriggered: walletController.prepareTransfer(recipientInput.text)
+    }
+    Row {
+        visible: walletController.transferPreparing
+        anchors.horizontalCenter: parent.horizontalCenter; y: 770; spacing: 8
+        Repeater {
+            model: 3
+            Rectangle {
+                required property int index
+                width: 7; height: 7; radius: 4; color: Design.accent
+                SequentialAnimation on opacity {
+                    running: walletController.transferPreparing; loops: Animation.Infinite
+                    PauseAnimation { duration: index * 100 }
+                    NumberAnimation { to: 0.25; duration: 200 }
+                    NumberAnimation { to: 1; duration: 200 }
+                }
+            }
+        }
     }
 }
