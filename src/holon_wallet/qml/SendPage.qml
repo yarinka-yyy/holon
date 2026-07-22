@@ -90,7 +90,7 @@ PageState {
         x: 28; y: 418; width: 458; height: 126
         Image {
             x: 18; y: 20; width: 48; height: 48
-            source: "assets/usdc.svg"; sourceSize: Qt.size(96, 96)
+            source: "assets/usdc.png"; sourceSize: Qt.size(96, 96)
         }
         Text {
             x: 82; y: 20; text: "1 USDC"; color: Design.text
@@ -105,7 +105,7 @@ PageState {
             width: 104; height: 36; radius: 11; color: Design.surfaceSecondary
             Row {
                 anchors.centerIn: parent; spacing: 7
-                Image { width: 20; height: 20; source: "assets/base.svg"; sourceSize: Qt.size(40, 40) }
+                Image { width: 20; height: 20; source: "assets/base.png"; sourceSize: Qt.size(40, 40) }
                 Text {
                     anchors.verticalCenter: parent.verticalCenter; text: "Base"
                     color: Design.text; font.family: Design.fontFamily; font.pixelSize: 13

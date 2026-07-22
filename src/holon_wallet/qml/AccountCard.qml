@@ -8,6 +8,8 @@ SurfaceCard {
     signal copyRequested()
     signal selectorRequested()
 
+    function showCopyFeedback() { copiedFeedback.show() }
+
     Rectangle {
         x: 16; anchors.verticalCenter: parent.verticalCenter
         width: 62; height: 62; radius: 31
@@ -29,19 +31,24 @@ SurfaceCard {
         elide: Text.ElideRight
     }
     Text {
-        x: 96; y: 53; text: root.profile.shortAddress || ""; color: Design.textMuted
+        id: addressText; objectName: "accountAddressText"
+        x: 96; y: 53; width: Math.min(implicitWidth, 150)
+        text: root.profile.shortAddress || ""; color: Design.textMuted
         font.family: Design.fontFamily; font.pixelSize: 14
+        elide: Text.ElideRight
     }
     Item {
+        id: accountCopyButton
         objectName: "accountCopyButton"
-        x: 275; y: 43; width: 38; height: 38
+        x: addressText.x + addressText.width + 8; y: 47; width: 28; height: 28
+        z: 3
         function trigger() { root.copyRequested() }
         Rectangle {
-            anchors.fill: parent; radius: 10
+            anchors.fill: parent; radius: 8
             color: copyMouse.containsMouse ? Design.surfaceHover : "transparent"
         }
         Image {
-            anchors.centerIn: parent; width: 19; height: 19
+            anchors.centerIn: parent; width: 17; height: 17
             source: "assets/copy.svg"; sourceSize: Qt.size(38, 38)
         }
         MouseArea {
@@ -49,10 +56,15 @@ SurfaceCard {
             cursorShape: Qt.PointingHandCursor; onClicked: parent.trigger()
         }
     }
+    CopyFeedback {
+        id: copiedFeedback; objectName: "accountCopiedFeedback"
+        x: accountCopyButton.x + accountCopyButton.width + 6
+        y: accountCopyButton.y + 1; z: 3
+    }
     Item {
         objectName: "accountSelectorButton"
         anchors.right: parent.right; anchors.rightMargin: 14
-        anchors.verticalCenter: parent.verticalCenter; width: 46; height: 46
+        anchors.verticalCenter: parent.verticalCenter; width: 46; height: 46; z: 3
         function trigger() { root.selectorRequested() }
         Rectangle {
             anchors.fill: parent; radius: 12
@@ -69,7 +81,7 @@ SurfaceCard {
     }
     MouseArea {
         objectName: "accountReceiveZone"
-        x: 0; y: 0; width: 270; height: parent.height
+        x: 0; y: 0; width: accountCopyButton.x - 4; height: parent.height
         function trigger() { root.receiveRequested() }
         hoverEnabled: true; cursorShape: Qt.PointingHandCursor
         onClicked: trigger()

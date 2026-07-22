@@ -38,14 +38,14 @@ TransactionFlowShell {
                 objectName: "transferReviewAmount"; width: parent.width
                 label: "Amount"; value: root.action.amount || "1 USDC"
                 secondary: walletController.transferAmountUsd
-                iconSource: "assets/usdc.svg"
+                iconSource: "assets/usdc.png"
             }
             SummaryRow {
                 objectName: "transferReviewNetwork"; width: parent.width
                 label: "Network"; value: (root.action.network || "Base")
                     + " · " + (root.action.chainId || "8453")
                 secondary: ""
-                iconSource: "assets/network-data.svg"; badgeSource: "assets/base.svg"
+                iconSource: "assets/network-data.svg"; badgeSource: "assets/base.png"
             }
             SummaryRow {
                 objectName: "transferReviewFee"; width: parent.width

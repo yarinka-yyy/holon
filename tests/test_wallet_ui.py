@@ -10,6 +10,7 @@ os.environ.setdefault("QT_QUICK_BACKEND", "software")
 import pytest
 from PySide6.QtCore import QObject, QMetaObject, Qt
 from PySide6.QtGui import QGuiApplication
+from PySide6.QtTest import QTest
 
 from holon_wallet.application import WalletApplication
 from holon_wallet.history import HistoryStatus, HistoryStore, WalletHistoryRecord
@@ -95,7 +96,7 @@ def test_window_geometry_chrome_and_qml_load_cleanly(wallet_app) -> None:
 
     assert app.controller.currentScreen == "welcome"
     assert app.window.title() == "Holon Wallet"
-    assert (app.window.width(), app.window.height()) == (514, 840)
+    assert (app.window.width(), app.window.height()) == (430, 703)
     assert (app.window.minimumWidth(), app.window.minimumHeight()) == (430, 703)
     assert app.window.flags() & Qt.FramelessWindowHint
     assert app.qml_warnings == []
@@ -461,8 +462,19 @@ def test_v2_receive_settings_privacy_and_transaction_details(tmp_path, qt_app) -
         assert app.controller.balancesVisible
         invoke(child(app, "balanceEyeButton"), "trigger")
         assert not app.controller.balancesVisible
+        address_text = child(app, "accountAddressText")
+        copy_button = child(app, "accountCopyButton")
+        receive_zone = child(app, "accountReceiveZone")
+        assert copy_button.property("x") == pytest.approx(
+            address_text.property("x") + address_text.property("width") + 8,
+        )
+        assert receive_zone.property("width") <= copy_button.property("x")
         invoke(child(app, "accountCopyButton"), "trigger")
+        QTest.qWait(50)
         assert QGuiApplication.clipboard().text() == app.controller.activeProfile["address"]
+        assert child(app, "accountCopiedFeedback").property("visible")
+        QTest.qWait(2_050)
+        assert not child(app, "accountCopiedFeedback").property("visible")
         invoke(child(app, "accountReceiveZone"), "trigger")
         qt_app.processEvents()
         assert app.controller.currentScreen == "receive"
@@ -471,6 +483,10 @@ def test_v2_receive_settings_privacy_and_transaction_details(tmp_path, qt_app) -
         )
         invoke(child(app, "receiveEthereum"), "trigger")
         assert app.controller.receiveNetwork == "ethereum"
+        invoke(child(app, "copyReceiveAddress"), "trigger")
+        QTest.qWait(50)
+        assert QGuiApplication.clipboard().text() == app.controller.activeProfile["address"]
+        assert child(app, "receiveCopiedFeedback").property("visible")
         invoke(child(app, "receiveBackButton"), "trigger")
         assert app.controller.currentScreen == "main"
 

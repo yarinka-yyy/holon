@@ -23,7 +23,10 @@ PageState {
                 x: 28; y: 54; width: 458; height: 96
                 profile: walletController.activeProfile
                 onReceiveRequested: walletController.showReceive()
-                onCopyRequested: walletController.copyActiveAddress()
+                onCopyRequested: {
+                    if (walletController.copyActiveAddress())
+                        accountCard.showCopyFeedback()
+                }
                 onSelectorRequested: root.selectorOpen = !root.selectorOpen
             }
             Row {
@@ -92,7 +95,7 @@ PageState {
                 }
                 NetworkCard {
                     objectName: "baseNetworkCard"; width: 146; height: 40
-                    label: "Base"; iconSource: "assets/base.svg"
+                    label: "Base"; iconSource: "assets/base.png"
                     selected: walletController.selectedNetwork === "base"
                     onTriggered: walletController.selectNetwork("base")
                 }
@@ -135,7 +138,7 @@ PageState {
                     width: parent.width; y: 0
                     asset: walletController.portfolioData.assets.length > 0
                         ? walletController.portfolioData.assets[0] : ({})
-                    iconSource: "assets/ethereum-coin.svg"
+                    iconSource: "assets/ethereum.svg"
                     amountsVisible: walletController.balancesVisible
                 }
                 AssetRow {
@@ -143,7 +146,7 @@ PageState {
                     width: parent.width; y: ethRow.height; divider: false
                     asset: walletController.portfolioData.assets.length > 1
                         ? walletController.portfolioData.assets[1] : ({})
-                    iconSource: "assets/usdc.svg"
+                    iconSource: "assets/usdc.png"
                     amountsVisible: walletController.balancesVisible
                 }
             }

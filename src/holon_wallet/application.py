@@ -100,7 +100,7 @@ class WalletApplication:
         self.window.setColor(QColor("transparent"))
         self.window.setFlags(Qt.Window | Qt.FramelessWindowHint)
         self.window.setMinimumSize(QSize(430, 703))
-        self.window.resize(514, 840)
+        self.window.resize(430, 703)
         self.window.setResizeMode(QQuickView.SizeRootObjectToView)
         with as_file(qml_package.joinpath("Main.qml")) as qml_path:
             self.window.setSource(QUrl.fromLocalFile(str(qml_path)))

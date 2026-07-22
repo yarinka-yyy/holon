@@ -4,13 +4,15 @@ import secrets
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
+from PySide6.QtCore import QLocale, QTime
+
 from holon_wallet.broadcast import (
     TRANSFER_EVENT_TOPIC,
     MainnetBroadcastPolicy,
     MainnetTransferCode,
     MainnetTransferExecutor,
 )
-from holon_wallet.controller import WalletController
+from holon_wallet.controller import WalletController, _display_local_time
 from holon_wallet.history import HistoryStatus, HistoryStore
 from holon_wallet.signer import OfflineSigningPolicy
 from holon_wallet.storage import StorageError, WalletPaths
@@ -26,6 +28,17 @@ from wallet_public_support import (
     mainnet_services,
     public_snapshot,
 )
+
+
+def test_public_data_timestamp_uses_system_local_time_format() -> None:
+    timestamp = "2026-07-22T07:05:00Z"
+    local = datetime.fromisoformat("2026-07-22T07:05:00+00:00").astimezone()
+    expected = QLocale.system().toString(
+        QTime(local.hour, local.minute), QLocale.FormatType.ShortFormat,
+    )
+
+    assert _display_local_time(timestamp) == expected
+    assert "UTC" not in _display_local_time(timestamp)
 
 
 def password() -> str:

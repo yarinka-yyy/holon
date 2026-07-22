@@ -6,7 +6,7 @@ from concurrent.futures import Executor, Future, ThreadPoolExecutor
 from datetime import UTC, datetime
 from threading import Event
 
-from PySide6.QtCore import Property, QObject, QTimer, Signal, Slot
+from PySide6.QtCore import Property, QLocale, QObject, QTime, QTimer, Signal, Slot
 from PySide6.QtGui import QGuiApplication
 
 from .broadcast import (
@@ -1380,7 +1380,7 @@ class WalletController(QObject):
             if item.updated_at
         ]
         self._public_data_updated_text = (
-            f"Updated {_display_utc(max(timestamps))}" if timestamps
+            f"Updated {_display_local_time(max(timestamps))}" if timestamps
             else "Refresh unavailable"
         )
         self.publicDataChanged.emit()
@@ -1405,9 +1405,12 @@ class WalletController(QObject):
             if screen == "main" and self._state.active_profile is not None:
                 self.refreshPublicData()
 
-def _display_utc(timestamp: str) -> str:
+def _display_local_time(timestamp: str) -> str:
     parsed = datetime.fromisoformat(timestamp.removesuffix("Z") + "+00:00")
-    return parsed.strftime("%H:%M UTC")
+    local = parsed.astimezone()
+    return QLocale.system().toString(
+        QTime(local.hour, local.minute), QLocale.FormatType.ShortFormat,
+    )
 
 
 def _history_record(action: PreparedTransferAction) -> WalletHistoryRecord:

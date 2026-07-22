@@ -35,7 +35,7 @@ TransactionFlowShell {
         }
         Image {
             anchors.right: parent.right; anchors.rightMargin: 18; y: 20
-            width: 50; height: 50; source: "assets/usdc.svg"; sourceSize: Qt.size(100, 100)
+            width: 50; height: 50; source: "assets/usdc.png"; sourceSize: Qt.size(100, 100)
         }
     }
     Text {

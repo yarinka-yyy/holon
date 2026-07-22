@@ -2,6 +2,7 @@ import QtQuick
 import "."
 
 PageState {
+    id: root
     ScreenHeader {
         objectName: "receive"; x: 28; y: 54; width: 458
         title: "Receive"; subtitle: "Share your public Account address"
@@ -17,7 +18,7 @@ PageState {
         }
         NetworkCard {
             objectName: "receiveBase"; width: 153; height: 44
-            label: "Base"; iconSource: "assets/base.svg"
+            label: "Base"; iconSource: "assets/base.png"
             selected: walletController.receiveNetwork === "base"
             onTriggered: walletController.selectReceiveNetwork("base")
         }
@@ -47,8 +48,19 @@ PageState {
         color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 13
     }
     FormButton {
+        id: copyReceiveAddress
         objectName: "copyReceiveAddress"; x: 72; y: 684; width: 370; height: 56
-        label: "Copy Address"; onTriggered: walletController.copyActiveAddress()
+        label: "Copy Address"
+        onTriggered: {
+            if (walletController.copyActiveAddress())
+                receiveCopiedFeedback.show()
+        }
+    }
+    CopyFeedback {
+        id: receiveCopiedFeedback; objectName: "receiveCopiedFeedback"
+        x: copyReceiveAddress.x + copyReceiveAddress.width - width - 12
+        y: copyReceiveAddress.y + (copyReceiveAddress.height - height) / 2
+        z: 3
     }
     Text {
         x: 56; y: 760; width: 402; horizontalAlignment: Text.AlignHCenter

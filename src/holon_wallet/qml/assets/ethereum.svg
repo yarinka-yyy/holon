@@ -1,6 +1,8 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" fill="none">
-  <path d="m24 4-13 21 13 8 13-8L24 4Z" fill="#8E8FFF"/>
-  <path d="m24 4-13 21 13-6V4Z" fill="#C4C7FF"/>
-  <path d="m11 28 13 16V35l-13-7Z" fill="#777BFF"/>
-  <path d="m37 28-13 16v-9l13-7Z" fill="#4E59E8"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 800" fill="none">
+  <path d="M400 34 175 406l225-101V34Z" fill="#8892B5"/>
+  <path d="M400 34v271l225 101L400 34Z" fill="#616892"/>
+  <path d="m175 406 225 134V305L175 406Z" fill="#616892"/>
+  <path d="m400 305 225 101-225 134V305Z" fill="#444A78"/>
+  <path d="m176 450 224 316V582L176 450Z" fill="#8892B5"/>
+  <path d="m400 582v184l224-316-224 132Z" fill="#616892"/>
 </svg>
