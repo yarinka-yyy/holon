@@ -8,6 +8,7 @@ from importlib.resources import as_file, files
 
 from PySide6.QtCore import QSize, Qt, QUrl
 from PySide6.QtGui import QColor, QCloseEvent, QFont, QFontDatabase, QGuiApplication, QIcon
+from PySide6.QtQml import qmlRegisterType
 from PySide6.QtQuick import QQuickView
 
 from .broadcast import (
@@ -19,12 +20,14 @@ from .history import HistoryStore
 from .public_data import PublicDataService
 from .prices import PriceService
 from .qr_provider import AddressQrProvider, QR_PROVIDER_ID
+from .recovery_display import RecoverySecretDisplay
 from .single_instance import ProcessInstance
 from .transfer import TransferPreflightService
 from .vault import VaultRepository
 
 WINDOW_TITLE = "Holon Wallet"
 MUTEX_NAME = r"Local\HolonWallet.M3.01"
+_RECOVERY_TYPE_REGISTERED = False
 
 
 class WalletQuickView(QQuickView):
@@ -88,6 +91,16 @@ class WalletApplication:
             price_service,
         )
         self.window = WalletQuickView(self.controller)
+        global _RECOVERY_TYPE_REGISTERED
+        if not _RECOVERY_TYPE_REGISTERED:
+            qmlRegisterType(
+                RecoverySecretDisplay,
+                "Holon.Wallet",
+                1,
+                0,
+                "RecoverySecretDisplay",
+            )
+            _RECOVERY_TYPE_REGISTERED = True
         self.engine = self.window.engine()
         self.engine.addImageProvider(QR_PROVIDER_ID, AddressQrProvider())
         self.qml_warnings: list[str] = []
@@ -109,7 +122,20 @@ class WalletApplication:
                 [*self.qml_warnings, *(error.toString() for error in self.window.errors())]
             ) or "unknown QML error"
             raise RuntimeError(f"Wallet QML failed to load: {details}")
+        secret_display = self.window.rootObject().findChild(
+            RecoverySecretDisplay,
+            "recoverySecretDisplay",
+        )
+        if secret_display is None:
+            raise RuntimeError("Recovery secret display could not be attached")
+        secret_display.set_font_family(self.font_family)
+        self.controller.attach_recovery_display(secret_display)
         self.window.visibleChanged.connect(self._handle_visibility)
+        self.window.activeChanged.connect(
+            lambda: self.controller.handleWindowActiveChanged(
+                self.window.isActive(),
+            ),
+        )
         self.window.show()
 
     def _record_warnings(self, warnings: list[object]) -> None:

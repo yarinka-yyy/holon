@@ -80,6 +80,23 @@ def controller(tmp_path) -> WalletController:
     return item
 
 
+class RecoveryDisplayStub:
+    def __init__(self) -> None:
+        self.kind = None
+        self.value = None
+
+    def set_material(self, kind, value: str) -> None:
+        self.kind = kind
+        self.value = value
+
+    def clear_material(self) -> None:
+        self.kind = None
+        self.value = None
+
+    def copy_text(self) -> str | None:
+        return self.value
+
+
 def test_create_persists_only_after_backup_acknowledgement(tmp_path) -> None:
     item = controller(tmp_path)
     secret = password()
@@ -116,6 +133,66 @@ def test_locked_restart_rejects_wrong_password_without_session(tmp_path) -> None
     assert restarted.submitPassword(secret, "")
     assert restarted.currentScreen == "main"
     assert restarted.passwordTitle == "Enter Password"
+
+
+def test_recovery_requires_new_exact_action_after_wrong_password(tmp_path) -> None:
+    item = controller(tmp_path)
+    display = RecoveryDisplayStub()
+    item.attach_recovery_display(display)  # type: ignore[arg-type]
+    secret = password()
+    item.beginCreate()
+    assert item.submitPassword(secret, secret)
+    assert item.finishBackup()
+
+    item.showRecoveryReview()
+    assert item.currentScreen == "recovery_review"
+    assert item.recoverySelection == "seed_phrase"
+    assert item.recoverySeedAvailable
+    assert item.prepareRecovery()
+    first_id = item.recoveryAction["actionId"]
+    assert not item.submitRecovery(password(), True)
+    assert item.currentScreen == "recovery_review"
+    assert item.recoveryAction == {}
+    assert display.value is None
+
+    assert item.prepareRecovery()
+    assert item.recoveryAction["actionId"] != first_id
+    assert item.submitRecovery(secret, True)
+    assert item.currentScreen == "recovery_reveal"
+    assert item.recoveryAction == {}
+    assert item.recoveryRevealSeconds == 60
+    assert display.value is not None and len(display.value.split()) == 12
+
+    item._recovery_reveal_seconds = 1
+    item._tick_recovery_reveal()
+    assert item.currentScreen == "settings_info"
+    assert item.settingsSection == "security"
+    assert display.value is None
+    assert item.recoveryRevealSeconds == 0
+
+
+def test_raw_key_recovery_refuses_seed_phrase_and_reveals_only_key(tmp_path) -> None:
+    secret = password()
+    repository = VaultRepository(WalletPaths(tmp_path))
+    repository.create_new(
+        secret,
+        repository.new_record(import_private_key(raw_private_key()), "Main Account"),
+    )
+    item = controller(tmp_path)
+    display = RecoveryDisplayStub()
+    item.attach_recovery_display(display)  # type: ignore[arg-type]
+    assert item.submitPassword(secret, "")
+
+    item.showRecoveryReview()
+    assert item.recoverySelection == "private_key"
+    assert not item.recoverySeedAvailable
+    assert not item.selectRecoveryMaterial("seed_phrase")
+    assert item.prepareRecovery()
+    assert item.submitRecovery(secret, True)
+    assert display.value is not None
+    assert display.value.startswith("0x") and len(display.value) == 66
+    item.finishRecovery()
+    assert display.value is None
 
 
 def test_first_import_supports_seed_and_existing_vault_adds_only_raw_key(tmp_path) -> None:

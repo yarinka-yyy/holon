@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import secrets
 
@@ -225,6 +226,93 @@ def test_locked_restart_has_masked_password_and_generic_failure(tmp_path, qt_app
         set_text(app, "passwordTextInput", password)
         invoke(child(app, "passwordSubmitButton"), "trigger")
         assert app.controller.currentScreen == "main"
+    finally:
+        app.close()
+
+
+def test_protected_recovery_review_confirm_reveal_and_clipboard(tmp_path, qt_app) -> None:
+    repository = VaultRepository(WalletPaths(tmp_path))
+    password = fresh_password()
+    material = generate_mnemonic()
+    repository.create_new(
+        password, repository.new_record(material, "Main Account"),
+    )
+    vault_before = repository.paths.vault.read_bytes()
+    app = make_app(qt_app, repository)
+    try:
+        set_text(app, "passwordTextInput", password)
+        invoke(child(app, "passwordSubmitButton"), "trigger")
+        invoke(child(app, "settingsAction"), "trigger")
+        invoke(child(app, "settingsSecurity"), "trigger")
+        assert app.controller.currentScreen == "settings_info"
+        assert child(app, "settingsRecoveryMaterial").property("enabled")
+        invoke(child(app, "settingsRecoveryMaterial"), "trigger")
+        QTest.qWait(220)
+        qt_app.processEvents()
+        assert app.controller.currentScreen == "recovery_review"
+        assert app.controller.recoverySelection == "seed_phrase"
+        assert child(app, "recoverySeedChoice").property("visible")
+
+        invoke(child(app, "recoveryPrivateKeyChoice"), "trigger")
+        assert app.controller.recoverySelection == "private_key"
+        invoke(child(app, "recoverySeedChoice"), "trigger")
+        assert app.controller.recoverySelection == "seed_phrase"
+        invoke(child(app, "recoveryReviewContinue"), "trigger")
+        assert app.controller.currentScreen == "recovery_confirm"
+        assert not child(app, "recoveryPasswordField").property("revealed")
+        first_id = app.controller.recoveryAction["actionId"]
+
+        set_text(app, "recoveryPasswordInput", fresh_password())
+        invoke(child(app, "recoveryConfirmCheckbox"), "trigger")
+        invoke(child(app, "recoveryRevealButton"), "trigger")
+        assert app.controller.currentScreen == "recovery_review"
+        assert app.controller.recoveryAction == {}
+        assert "Authentication failed" in app.controller.errorMessage
+
+        invoke(child(app, "recoveryReviewContinue"), "trigger")
+        assert app.controller.recoveryAction["actionId"] != first_id
+        set_text(app, "recoveryPasswordInput", password)
+        invoke(child(app, "recoveryConfirmCheckbox"), "trigger")
+        invoke(child(app, "recoveryRevealButton"), "trigger")
+        assert app.controller.currentScreen == "recovery_reveal"
+        secret_display = child(app, "recoverySecretDisplay")
+        assert secret_display.property("text") is None
+        assert secret_display.dynamicPropertyNames() == []
+        assert app.controller.recoveryRevealSeconds == 60
+
+        invoke(child(app, "copyRecoveryButton"), "trigger")
+        copied = QGuiApplication.clipboard().text()
+        assert hashlib.sha256(copied.encode()).digest() == hashlib.sha256(
+            material.value.encode(),
+        ).digest()
+        del copied
+        assert app.controller.recoveryCopyUsed
+        assert app.controller.recoveryClipboardSeconds == 30
+        assert not app.controller.copyRecoveryMaterial()
+
+        app.controller.handleWindowActiveChanged(False)
+        assert app.controller.currentScreen == "settings_info"
+        assert app.controller.settingsSection == "security"
+        assert not secret_display.has_material()
+        assert repository.paths.vault.read_bytes() == vault_before
+        assert app.controller.historyRecords == []
+        clipboard_value = QGuiApplication.clipboard().text()
+        assert hashlib.sha256(clipboard_value.encode()).digest() == hashlib.sha256(
+            material.value.encode(),
+        ).digest()
+        del clipboard_value
+
+        QGuiApplication.clipboard().setText("replacement")
+        app.controller._clear_recovery_clipboard()
+        assert QGuiApplication.clipboard().text() == "replacement"
+        QGuiApplication.clipboard().setText("timer fixture")
+        app.controller._recovery_clipboard_digest = hashlib.sha256(
+            b"timer fixture",
+        ).digest()
+        app.controller._recovery_clipboard_seconds = 1
+        app.controller._tick_recovery_clipboard()
+        assert QGuiApplication.clipboard().text() == ""
+        QGuiApplication.clipboard().clear()
     finally:
         app.close()
 
@@ -511,7 +599,7 @@ def test_v2_receive_settings_privacy_and_transaction_details(tmp_path, qt_app) -
         )
         assert receive_zone.property("width") <= copy_button.property("x")
         invoke(child(app, "accountCopyButton"), "trigger")
-        QTest.qWait(50)
+        QTest.qWait(220)
         assert QGuiApplication.clipboard().text() == app.controller.activeProfile["address"]
         assert child(app, "accountCopiedFeedback").property("visible")
         QTest.qWait(2_050)

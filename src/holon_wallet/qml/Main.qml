@@ -24,6 +24,9 @@ Item {
         ReceivePage { objectName: "receivePage"; anchors.fill: parent; active: walletController.currentScreen === "receive" }
         SettingsPage { objectName: "settingsPage"; anchors.fill: parent; active: walletController.currentScreen === "settings" }
         SettingsInfoPage { objectName: "settingsInfoPage"; anchors.fill: parent; active: walletController.currentScreen === "settings_info" }
+        RecoveryReviewPage { objectName: "recoveryReviewPage"; anchors.fill: parent; active: walletController.currentScreen === "recovery_review" }
+        RecoveryConfirmPage { objectName: "recoveryConfirmPage"; anchors.fill: parent; active: walletController.currentScreen === "recovery_confirm" }
+        RecoveryRevealPage { objectName: "recoveryRevealPage"; anchors.fill: parent; active: walletController.currentScreen === "recovery_reveal" }
         WalletsPage { objectName: "walletsPage"; anchors.fill: parent; active: walletController.currentScreen === "wallets" }
         HistoryPage { objectName: "historyPage"; anchors.fill: parent; active: walletController.currentScreen === "history" }
         TransactionDetailsPage { objectName: "transactionDetailsPage"; anchors.fill: parent; active: walletController.currentScreen === "transaction_details" }

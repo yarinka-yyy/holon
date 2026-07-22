@@ -39,4 +39,19 @@ PageState {
             font.family: Design.fontFamily; font.pixelSize: 14; lineHeight: 1.45
         }
     }
+    SettingsRow {
+        objectName: "settingsRecoveryMaterial"
+        visible: root.section === "security"
+        x: 28; y: 438; width: 458; height: 86
+        title: "Recovery Material"
+        subtitle: "Reveal for " + (walletController.activeProfile.label || "active Account")
+        iconSource: "assets/lock.svg"
+        onTriggered: walletController.showRecoveryReview()
+    }
+    Text {
+        visible: root.section === "security" && walletController.errorMessage.length > 0
+        x: 48; y: 546; width: 418; horizontalAlignment: Text.AlignHCenter
+        text: walletController.errorMessage; color: Design.warning
+        font.family: Design.fontFamily; font.pixelSize: 12; wrapMode: Text.Wrap
+    }
 }

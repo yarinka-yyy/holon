@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from concurrent.futures import Executor, Future, ThreadPoolExecutor
 from datetime import UTC, datetime
 from threading import Event
@@ -44,6 +45,14 @@ from .prices import (
     portfolio_to_map,
     price_snapshot_to_map,
 )
+from .recovery import (
+    PreparedRecoveryAction,
+    RecoveryActionError,
+    RecoveryFlowCoordinator,
+    RecoveryMaterialKind,
+    recovery_action_to_map,
+)
+from .recovery_display import RecoverySecretDisplay
 from .settings import SettingsStore
 from .storage import StorageError
 from .transfer import (
@@ -75,6 +84,7 @@ from .wallet_crypto import (
     generate_mnemonic,
     import_mnemonic,
     import_private_key,
+    private_key_bytes,
 )
 
 
@@ -120,6 +130,7 @@ class WalletController(QObject):
     receiveNetworkChanged = Signal()
     historySelectionChanged = Signal()
     settingsSectionChanged = Signal()
+    recoveryChanged = Signal()
     _publicDataReady = Signal(int, object)
     _transferReady = Signal(int, object)
     _maximumReady = Signal(int, object, str, str, str)
@@ -208,12 +219,29 @@ class WalletController(QObject):
         self._selected_history_action_id = ""
         self._settings_section = ""
         self._wallets_return_screen = "settings"
+        self._recovery_flow = RecoveryFlowCoordinator()
+        self._recovery_selection = ""
+        self._recovery_display: RecoverySecretDisplay | None = None
+        self._recovery_copy_used = False
+        self._recovery_clipboard_digest: bytes | None = None
+        self._recovery_clipboard_seconds = 0
+        self._recovery_reveal_seconds = 0
+        self._recovery_reveal_kind = ""
+        self._recovery_reveal_derivation_path = ""
         self._closed = False
         self._copied_phrase: str | None = None
         self._clipboard_timer = QTimer(self)
         self._clipboard_timer.setSingleShot(True)
         self._clipboard_timer.setInterval(60_000)
         self._clipboard_timer.timeout.connect(self._clear_clipboard)
+        self._recovery_clipboard_timer = QTimer(self)
+        self._recovery_clipboard_timer.setInterval(1_000)
+        self._recovery_clipboard_timer.timeout.connect(
+            self._tick_recovery_clipboard,
+        )
+        self._recovery_reveal_timer = QTimer(self)
+        self._recovery_reveal_timer.setInterval(1_000)
+        self._recovery_reveal_timer.timeout.connect(self._tick_recovery_reveal)
         self._transfer_expiry_timer = QTimer(self)
         self._transfer_expiry_timer.setSingleShot(True)
         self._transfer_expiry_timer.timeout.connect(self._expire_transfer)
@@ -545,6 +573,40 @@ class WalletController(QObject):
     def settingsSection(self) -> str:
         return self._settings_section
 
+    @Property(str, notify=recoveryChanged)
+    def recoverySelection(self) -> str:
+        return self._recovery_selection
+
+    @Property(bool, notify=activeProfileChanged)
+    def recoverySeedAvailable(self) -> bool:
+        active = self._state.active_profile
+        return active is not None and active.profile_type == MNEMONIC_PROFILE
+
+    @Property("QVariantMap", notify=recoveryChanged)
+    def recoveryAction(self) -> dict[str, object]:
+        action = self._recovery_flow.current
+        return recovery_action_to_map(action) if action is not None else {}
+
+    @Property(bool, notify=recoveryChanged)
+    def recoveryCopyUsed(self) -> bool:
+        return self._recovery_copy_used
+
+    @Property(int, notify=recoveryChanged)
+    def recoveryClipboardSeconds(self) -> int:
+        return self._recovery_clipboard_seconds
+
+    @Property(int, notify=recoveryChanged)
+    def recoveryRevealSeconds(self) -> int:
+        return self._recovery_reveal_seconds
+
+    @Property(str, notify=recoveryChanged)
+    def recoveryRevealKind(self) -> str:
+        return self._recovery_reveal_kind
+
+    @Property(str, notify=recoveryChanged)
+    def recoveryRevealDerivationPath(self) -> str:
+        return self._recovery_reveal_derivation_path
+
     @Property("QVariantList", notify=currentScreenChanged)
     def transactionFlowSteps(self) -> list[str]:
         return ["Review", "Confirm", "Submit", "Complete"]
@@ -578,7 +640,12 @@ class WalletController(QObject):
 
     @Slot()
     def showSend(self) -> None:
-        if not self._state.profiles or self._mainnet_in_progress:
+        if (
+            not self._state.profiles
+            or self._mainnet_in_progress
+            or self._recovery_flow.current is not None
+            or self._current_screen == "recovery_reveal"
+        ):
             return
         self._clear_mainnet_result()
         self._cancel_transfer_request(clear_recipient=True)
@@ -1018,10 +1085,14 @@ class WalletController(QObject):
             self._set_error("Active Account could not be saved")
             return False
         if self._state.select_profile(profile_id):
+            recovery_open = self._current_screen.startswith("recovery_")
             invalidated = self._transfer_flow.profile_changed(profile_id)
+            recovery_invalidated = self._recovery_flow.profile_changed(profile_id)
+            if recovery_invalidated or recovery_open:
+                self._cancel_recovery_action(clear_clipboard=True)
             self.activeProfileChanged.emit()
             self.historyChanged.emit()
-            if invalidated:
+            if invalidated or recovery_invalidated or recovery_open:
                 self._transfer_generation += 1
                 self._transfer_preparing = False
                 self._mainnet_in_progress = False
@@ -1038,6 +1109,8 @@ class WalletController(QObject):
     @Slot()
     def showMain(self) -> None:
         if self._state.profiles and not self._mainnet_in_progress:
+            if self._current_screen.startswith("recovery_"):
+                self._cancel_recovery_action(clear_clipboard=False)
             self._set_screen("main")
 
     @Slot()
@@ -1111,6 +1184,183 @@ class WalletController(QObject):
         self._settings_section = ""
         self.settingsSectionChanged.emit()
         self._set_screen("settings")
+
+    @Slot()
+    def showRecoveryReview(self) -> None:
+        active = self._state.active_profile
+        if (
+            active is None
+            or self._closed
+            or self._mainnet_in_progress
+            or self._transfer_flow.current is not None
+        ):
+            return
+        self._cancel_recovery_action(clear_clipboard=False)
+        self._recovery_selection = (
+            RecoveryMaterialKind.SEED_PHRASE.value
+            if active.profile_type == MNEMONIC_PROFILE
+            else RecoveryMaterialKind.PRIVATE_KEY.value
+        )
+        self._set_error("")
+        self.recoveryChanged.emit()
+        self._set_screen("recovery_review")
+
+    @Slot(str, result=bool)
+    def selectRecoveryMaterial(self, material_kind: str) -> bool:
+        active = self._state.active_profile
+        if active is None or self._current_screen != "recovery_review":
+            return False
+        try:
+            selected = RecoveryMaterialKind(material_kind)
+        except ValueError:
+            return False
+        if (
+            selected is RecoveryMaterialKind.SEED_PHRASE
+            and active.profile_type != MNEMONIC_PROFILE
+        ):
+            return False
+        if material_kind != self._recovery_selection:
+            self._recovery_flow.cancel()
+            self._recovery_selection = material_kind
+            self._set_error("")
+            self.recoveryChanged.emit()
+        return True
+
+    @Slot(result=bool)
+    def prepareRecovery(self) -> bool:
+        active = self._state.active_profile
+        if active is None or self._current_screen != "recovery_review":
+            return False
+        try:
+            material_kind = RecoveryMaterialKind(self._recovery_selection)
+            self._recovery_flow.cancel()
+            self._recovery_flow.prepare(active, material_kind)
+        except (ValueError, RecoveryActionError):
+            self._set_error("Recovery material is unavailable for this Account")
+            return False
+        self._set_error("")
+        self.recoveryChanged.emit()
+        self._set_screen("recovery_confirm")
+        return True
+
+    @Slot()
+    def editRecovery(self) -> None:
+        if self._current_screen != "recovery_confirm":
+            return
+        self._recovery_flow.cancel()
+        self._set_error("")
+        self.recoveryChanged.emit()
+        self._set_screen("recovery_review")
+
+    @Slot(str, bool, result=bool)
+    def submitRecovery(self, password: str, explicitly_confirmed: bool) -> bool:
+        action = self._recovery_flow.current
+        active = self._state.active_profile
+        if (
+            len(password) < MIN_PASSWORD_LENGTH
+            or not explicitly_confirmed
+            or action is None
+            or active is None
+            or self._recovery_display is None
+            or self._closed
+            or self._current_screen != "recovery_confirm"
+        ):
+            return False
+        action_id = action.action_id
+        digest = action.digest
+        try:
+            self._recovery_flow.preflight(action_id, digest, active)
+            record = self._repository.authenticate_profile(password, active.profile_id)
+        except AuthenticationFailedError:
+            self._recovery_flow.authentication_failed()
+            self._set_error("Authentication failed · start a new recovery action")
+            self.recoveryChanged.emit()
+            self._set_screen("recovery_review")
+            return False
+        except RecoveryActionError as error:
+            self._set_error(str(error))
+            self.recoveryChanged.emit()
+            self._set_screen("recovery_review")
+            return False
+        except VaultUnavailableError:
+            self._cancel_recovery_action(clear_clipboard=True)
+            self._set_screen("unavailable")
+            return False
+        finally:
+            del password
+        try:
+            value = self._recovery_flow.authorize_and_consume(
+                action_id,
+                digest,
+                active,
+                lambda current: _recovery_value(record, current),
+            )
+            self._recovery_display.set_material(action.material_kind, value)
+        except (RecoveryActionError, InvalidSecretError, VaultValidationError):
+            self._cancel_recovery_action(clear_clipboard=True)
+            self._set_error("Recovery material could not be verified")
+            self._set_screen("recovery_review")
+            return False
+        finally:
+            if "value" in locals():
+                del value
+            del record
+        self._recovery_copy_used = False
+        self._recovery_reveal_seconds = 60
+        self._recovery_reveal_kind = action.material_kind.value
+        self._recovery_reveal_derivation_path = action.derivation_path or ""
+        self._recovery_reveal_timer.start()
+        self._set_error("")
+        self.recoveryChanged.emit()
+        self._set_screen("recovery_reveal")
+        return True
+
+    @Slot(result=bool)
+    def copyRecoveryMaterial(self) -> bool:
+        if (
+            self._current_screen != "recovery_reveal"
+            or self._recovery_copy_used
+            or self._recovery_display is None
+        ):
+            return False
+        value = self._recovery_display.copy_text()
+        if value is None:
+            return False
+        clipboard = QGuiApplication.clipboard()
+        clipboard.setText(value)
+        self._recovery_clipboard_digest = hashlib.sha256(
+            value.encode("utf-8"),
+        ).digest()
+        del value
+        self._recovery_copy_used = True
+        self._recovery_clipboard_seconds = 30
+        self._recovery_clipboard_timer.start()
+        self.recoveryChanged.emit()
+        return True
+
+    @Slot()
+    def finishRecovery(self) -> None:
+        if self._current_screen not in {
+            "recovery_review", "recovery_confirm", "recovery_reveal",
+        }:
+            return
+        self._cancel_recovery_action(clear_clipboard=False)
+        self._settings_section = "security"
+        self.settingsSectionChanged.emit()
+        self._set_screen("settings_info")
+
+    @Slot(bool)
+    def handleWindowActiveChanged(self, active: bool) -> None:
+        if active or self._current_screen != "recovery_reveal":
+            return
+        self._cancel_recovery_action(clear_clipboard=False)
+        self._settings_section = "security"
+        self.settingsSectionChanged.emit()
+        self._set_error("Recovery material was hidden when Wallet lost focus")
+        self._set_screen("settings_info")
+
+    def attach_recovery_display(self, display: RecoverySecretDisplay) -> None:
+        self._recovery_display = display
 
     @Slot()
     def shutdown(self) -> None:
@@ -1196,6 +1446,7 @@ class WalletController(QObject):
 
     def _clear_sensitive(self) -> None:
         self._clear_clipboard()
+        self._cancel_recovery_action(clear_clipboard=True)
         self._pending_record = None
         self._pending_vault = None
         if self._backup_words:
@@ -1631,6 +1882,50 @@ class WalletController(QObject):
                 clipboard.clear()
         self._copied_phrase = None
 
+    def _cancel_recovery_action(self, *, clear_clipboard: bool) -> None:
+        self._recovery_flow.cancel()
+        self._recovery_reveal_timer.stop()
+        self._recovery_reveal_seconds = 0
+        self._recovery_reveal_kind = ""
+        self._recovery_reveal_derivation_path = ""
+        if self._recovery_display is not None:
+            self._recovery_display.clear_material()
+        if clear_clipboard:
+            self._clear_recovery_clipboard()
+        self.recoveryChanged.emit()
+
+    def _tick_recovery_clipboard(self) -> None:
+        if self._recovery_clipboard_seconds <= 1:
+            self._clear_recovery_clipboard()
+            return
+        self._recovery_clipboard_seconds -= 1
+        self.recoveryChanged.emit()
+
+    def _clear_recovery_clipboard(self) -> None:
+        self._recovery_clipboard_timer.stop()
+        expected = self._recovery_clipboard_digest
+        self._recovery_clipboard_digest = None
+        self._recovery_clipboard_seconds = 0
+        if expected is not None:
+            clipboard = QGuiApplication.clipboard()
+            current = clipboard.text()
+            current_digest = hashlib.sha256(current.encode("utf-8")).digest()
+            del current
+            if current_digest == expected:
+                clipboard.clear()
+        self.recoveryChanged.emit()
+
+    def _tick_recovery_reveal(self) -> None:
+        if self._recovery_reveal_seconds <= 1:
+            self._cancel_recovery_action(clear_clipboard=False)
+            self._settings_section = "security"
+            self.settingsSectionChanged.emit()
+            self._set_error("Recovery material was hidden after 60 seconds")
+            self._set_screen("settings_info")
+            return
+        self._recovery_reveal_seconds -= 1
+        self.recoveryChanged.emit()
+
     def _set_error(self, message: str) -> None:
         if message != self._error_message:
             self._error_message = message
@@ -1642,6 +1937,31 @@ class WalletController(QObject):
             self.currentScreenChanged.emit()
             if screen == "main" and self._state.active_profile is not None:
                 self.refreshPublicData()
+
+
+def _recovery_value(
+    record: ProfileRecord,
+    action: PreparedRecoveryAction,
+) -> str:
+    summary = record.summary
+    if (
+        summary.profile_id != action.profile_id
+        or summary.label != action.account_label
+        or summary.address != action.address
+        or summary.profile_type != action.profile_type
+    ):
+        raise VaultValidationError("Recovery profile changed")
+    if action.material_kind is RecoveryMaterialKind.SEED_PHRASE:
+        if record.secret.profile_type != MNEMONIC_PROFILE:
+            raise VaultValidationError("Seed phrase is unavailable")
+        return record.secret.value
+    private_key = bytearray(private_key_bytes(record.secret))
+    try:
+        return "0x" + private_key.hex()
+    finally:
+        for index in range(len(private_key)):
+            private_key[index] = 0
+        del private_key
 
 def _display_local_time(timestamp: str) -> str:
     parsed = datetime.fromisoformat(timestamp.removesuffix("Z") + "+00:00")

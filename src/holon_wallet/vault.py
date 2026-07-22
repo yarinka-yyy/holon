@@ -105,7 +105,7 @@ class VaultRepository:
         self._decrypt_records(password, header, ciphertext, summaries)
         return summaries
 
-    def _authenticate_profile(self, password: str, profile_id: str) -> ProfileRecord:
+    def authenticate_profile(self, password: str, profile_id: str) -> ProfileRecord:
         """Return one authenticated record only to an in-process Wallet operation."""
         document = self._read_document()
         summaries, header, ciphertext = self._parse_envelope(document)
@@ -114,6 +114,10 @@ class VaultRepository:
             if record.summary.profile_id == profile_id:
                 return record
         raise AuthenticationFailedError("Authentication failed")
+
+    def _authenticate_profile(self, password: str, profile_id: str) -> ProfileRecord:
+        """Compatibility alias for the existing signer and broadcaster."""
+        return self.authenticate_profile(password, profile_id)
 
     def append(
         self, password: str, record: ProfileRecord,
