@@ -290,6 +290,8 @@ class TransferRpc(Protocol):
 
     def token_balance(self, contract: str, address: str) -> int: ...
 
+    def allowance(self, contract: str, owner: str, spender: str) -> int: ...
+
     def pending_nonce(self, address: str) -> int: ...
 
     def max_priority_fee_per_gas(self) -> int: ...
@@ -331,6 +333,10 @@ class Web3TransferRpc:
     def token_balance(self, contract: str, address: str) -> int:
         token = self._web3.eth.contract(address=contract, abi=USDC_ABI)
         return int(self._call(lambda: token.functions.balanceOf(address).call()))
+
+    def allowance(self, contract: str, owner: str, spender: str) -> int:
+        token = self._web3.eth.contract(address=contract, abi=USDC_ABI)
+        return int(self._call(lambda: token.functions.allowance(owner, spender).call()))
 
     def pending_nonce(self, address: str) -> int:
         return int(self._call(lambda: self._web3.eth.get_transaction_count(address, "pending")))

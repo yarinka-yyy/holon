@@ -4,6 +4,7 @@ from concurrent.futures import Executor, Future
 
 from web3 import Web3
 
+from holon_wallet.approval import APPROVAL_ROUTES, RevokePolicy
 from holon_wallet.broadcast import (
     BASE_RPC_ENV,
     BroadcastReceiptTracker,
@@ -109,6 +110,7 @@ class StubTransferRpc:
     def __init__(self) -> None:
         self.observed_chain_id = BASE_CHAIN_ID
         self.estimated_transaction: dict[str, object] | None = None
+        self.allowance_value = 2_500_000
 
     def chain_id(self) -> int:
         return self.observed_chain_id
@@ -124,6 +126,9 @@ class StubTransferRpc:
 
     def token_balance(self, _contract: str, _address: str) -> int:
         return 2_500_000
+
+    def allowance(self, _contract: str, _owner: str, _spender: str) -> int:
+        return self.allowance_value
 
     def pending_nonce(self, _address: str) -> int:
         return 4
@@ -154,23 +159,41 @@ class StubMainnetRpc(StubTransferRpc):
         return self.receipt
 
 
-def mainnet_services(repository, history_store: HistoryStore, enabled: bool = True):
+def mainnet_services(
+    repository,
+    history_store: HistoryStore,
+    enabled: bool = True,
+    revoke_enabled: bool = True,
+):
     rpc = StubMainnetRpc()
     policy = MainnetBroadcastPolicy(
         enabled,
         OfflineSigningPolicy(10**18 if enabled else None),
     )
+    spender = Web3.to_checksum_address(
+        "0x1234567890abcdef1234567890abcdef12345678",
+    )
     environ = {BASE_RPC_ENV: "fixture://base"}
+    for network_id, route in APPROVAL_ROUTES.items():
+        environ[route.endpoint_env] = f"fixture://{network_id}"
+        environ[route.spender_env] = spender
+        environ[route.enabled_env] = "1" if revoke_enabled else "0"
+        environ[route.fee_cap_env] = str(10**18)
+    revoke_policy = RevokePolicy.from_environment(environ)
+    def rpc_factory(endpoint: str):
+        rpc.observed_chain_id = 1 if endpoint.endswith("ethereum") else BASE_CHAIN_ID
+        return rpc
     executor = MainnetTransferExecutor(
         repository,
         history_store,
         policy,
-        lambda _endpoint: rpc,
+        rpc_factory,
         environ,
+        revoke_policy=revoke_policy,
     )
     tracker = BroadcastReceiptTracker(
         history_store,
-        lambda _endpoint: rpc,
+        rpc_factory,
         environ,
         timeout_seconds=0,
     )

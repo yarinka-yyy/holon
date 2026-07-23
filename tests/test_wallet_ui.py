@@ -14,6 +14,7 @@ from PySide6.QtGui import QGuiApplication
 from PySide6.QtTest import QTest
 
 from holon_wallet.application import WalletApplication
+from holon_wallet.approval import UINT256_MAX
 from holon_wallet.history import HistoryStatus, HistoryStore, WalletHistoryRecord
 from holon_wallet.storage import WalletPaths, atomic_write_json
 from holon_wallet.transfer import TransferPreflightCode, TransferPreflightError
@@ -84,10 +85,12 @@ def make_app(
     transfer_preflight_service: StubTransferPreflightService | None = None,
     transfer_executor=None,
     mainnet_enabled: bool = True,
+    revoke_enabled: bool = True,
 ) -> WalletApplication:
     history = HistoryStore(repository.paths)
     mainnet, tracker, rpc = mainnet_services(
         repository, history, enabled=mainnet_enabled,
+        revoke_enabled=revoke_enabled,
     )
     app = WalletApplication(
         qt_app=qt_app,
@@ -106,6 +109,76 @@ def make_app(
     )
     app._test_mainnet_rpc = rpc
     return app
+
+
+def test_token_approvals_v2_review_confirm_submit_and_policy_gate(tmp_path, qt_app) -> None:
+    repository = VaultRepository(WalletPaths(tmp_path / "enabled"))
+    app = make_app(qt_app, repository)
+    secret = fresh_password()
+    try:
+        invoke(child(app, "createAccountButton"), "trigger")
+        set_text(app, "passwordTextInput", secret)
+        set_text(app, "confirmPasswordTextInput", secret)
+        invoke(child(app, "passwordSubmitButton"), "trigger")
+        invoke(child(app, "finishBackupButton"), "trigger")
+        qt_app.processEvents()
+        invoke(child(app, "settingsAction"), "trigger")
+        QTest.qWait(220)
+        invoke(child(app, "settingsSecurity"), "trigger")
+        QTest.qWait(220)
+        assert child(app, "settingsTokenApprovals").property("visible")
+        invoke(child(app, "settingsTokenApprovals"), "trigger")
+        qt_app.processEvents()
+        assert app.controller.currentScreen == "approvals"
+        assert child(app, "approvalList").property("count") == 2
+        assert app.controller.approvalRecords[1]["revokeAvailable"]
+        app._test_mainnet_rpc.allowance_value = UINT256_MAX
+        assert app.controller.refreshApprovals()
+        assert app.controller.approvalRecords[1]["allowance"] == "Unlimited USDC"
+
+        assert app.controller.prepareRevoke("base")
+        qt_app.processEvents()
+        assert app.controller.currentScreen == "revoke_review"
+        assert app.controller.revokeAction["networkId"] == "base"
+        invoke(child(app, "continueRevokeButton"), "trigger")
+        qt_app.processEvents()
+        assert app.controller.currentScreen == "revoke_confirm"
+        assert not child(app, "revokePasswordField").property("revealed")
+        set_text(app, "revokePasswordInput", secret)
+        invoke(child(app, "revokeConfirmationCheckbox"), "trigger")
+        invoke(child(app, "revokeSubmitButton"), "trigger")
+        qt_app.processEvents()
+        assert app.controller.currentScreen == "revoke_result"
+        assert app.controller.mainnetResult["actionType"] == "revoke"
+        assert app._test_mainnet_rpc.send_calls == 1
+        assert child(app, "revokeResultTitle").property("text")
+    finally:
+        app.close()
+
+    disabled_repository = VaultRepository(WalletPaths(tmp_path / "disabled"))
+    disabled = make_app(
+        qt_app, disabled_repository, revoke_enabled=False,
+    )
+    try:
+        invoke(child(disabled, "createAccountButton"), "trigger")
+        set_text(disabled, "passwordTextInput", secret)
+        set_text(disabled, "confirmPasswordTextInput", secret)
+        invoke(child(disabled, "passwordSubmitButton"), "trigger")
+        invoke(child(disabled, "finishBackupButton"), "trigger")
+        qt_app.processEvents()
+        invoke(child(disabled, "settingsAction"), "trigger")
+        QTest.qWait(220)
+        invoke(child(disabled, "settingsSecurity"), "trigger")
+        QTest.qWait(220)
+        invoke(child(disabled, "settingsTokenApprovals"), "trigger")
+        qt_app.processEvents()
+        assert not disabled.controller.approvalRecords[1]["revokeAvailable"]
+        assert disabled.controller.approvalRecords[1]["status"] == "LIVE"
+        disabled._test_mainnet_rpc.allowance_value = 0
+        assert disabled.controller.refreshApprovals()
+        assert disabled.controller.approvalRecords[1]["status"] == "NO_ACTIVE_ALLOWANCE"
+    finally:
+        disabled.close()
 
 
 def test_window_geometry_chrome_and_qml_load_cleanly(wallet_app) -> None:

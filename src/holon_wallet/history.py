@@ -8,6 +8,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Mapping
 
+from .public_data import NETWORK_BY_ID
 from .storage import StorageError, WalletPaths, atomic_write_json, read_json
 
 HISTORY_SCHEMA_VERSION = 2
@@ -239,6 +240,7 @@ class HistoryStore:
 
 def history_record_to_map(record: WalletHistoryRecord) -> dict[str, object]:
     amount = _format_amount(record.amount_atomic, record.decimals, record.token)
+    is_revoke = record.action_type == "revoke"
     return {
         "actionId": record.action_id,
         "profileId": record.profile_id,
@@ -264,6 +266,10 @@ def history_record_to_map(record: WalletHistoryRecord) -> dict[str, object]:
         "actualFeeWei": record.actual_fee_wei or "",
         "maxFeeDisplay": _format_fee(record.max_total_fee_wei, maximum=True),
         "actualFeeDisplay": _format_fee(record.actual_fee_wei, maximum=False),
+        "isRevoke": is_revoke,
+        "summaryTitle": "Revoked USDC" if is_revoke else f"Sent {record.token}",
+        "counterpartyLabel": "Spender" if is_revoke else "To",
+        "amountLabel": "Allowance → 0" if is_revoke else f"−{amount}",
     }
 
 
@@ -272,7 +278,7 @@ def _validate_record(record: WalletHistoryRecord) -> None:
         raise HistoryValidationError("History action ID is invalid")
     if not isinstance(record.profile_id, str) or not 1 <= len(record.profile_id) <= 128:
         raise HistoryValidationError("History profile ID is invalid")
-    if record.action_type != "transfer":
+    if record.action_type not in {"transfer", "revoke"}:
         raise HistoryValidationError("History action type is invalid")
     expected_chain = {"ethereum": 1, "base": 8453}.get(record.network)
     if expected_chain is None or type(record.chain_id) is not int or record.chain_id != expected_chain:
@@ -288,6 +294,17 @@ def _validate_record(record: WalletHistoryRecord) -> None:
     expected_decimals = 18 if record.token == "ETH" else 6
     if type(record.decimals) is not int or record.decimals != expected_decimals:
         raise HistoryValidationError("History decimals are invalid")
+    if record.action_type == "revoke" and (
+        record.token != "USDC"
+        or record.amount_atomic != "0"
+        or record.contract != NETWORK_BY_ID[record.network].usdc_contract
+        or record.recipient.lower() in {
+            record.sender.lower(),
+            record.contract.lower(),
+            "0x" + "00" * 20,
+        }
+    ):
+        raise HistoryValidationError("History revoke is invalid")
     if record.transaction_hash is not None and (
         not isinstance(record.transaction_hash, str)
         or HASH_RE.fullmatch(record.transaction_hash) is None

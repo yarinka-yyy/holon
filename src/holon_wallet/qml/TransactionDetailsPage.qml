@@ -18,10 +18,10 @@ PageState {
             Repeater {
                 model: [
                     {label: "Status", value: root.record.statusLabel || "Unavailable"},
-                    {label: "Amount", value: root.record.amount || "Unavailable"},
+                    {label: root.record.isRevoke ? "New allowance" : "Amount", value: root.record.isRevoke ? "0 USDC" : (root.record.amount || "Unavailable")},
                     {label: "Network", value: (root.record.networkLabel || "") + " · " + (root.record.chainId || "")},
                     {label: "From", value: root.record.sender || "Unavailable"},
-                    {label: "To", value: root.record.recipient || "Unavailable"},
+                    {label: root.record.counterpartyLabel || "To", value: root.record.recipient || "Unavailable"},
                     {label: "Contract", value: root.record.contract || "Unavailable"},
                     {label: "Maximum fee", value: root.record.maxFeeDisplay || "Unavailable"},
                     {label: "Actual fee", value: root.record.actualFeeDisplay || "Unavailable"},

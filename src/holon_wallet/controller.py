@@ -10,6 +10,21 @@ from threading import Event
 from PySide6.QtCore import Property, QLocale, QObject, QTime, QTimer, Signal, Slot
 from PySide6.QtGui import QGuiApplication
 
+from .approval import (
+    AllowanceReadService,
+    AllowanceSnapshot,
+    PreparedRevokeAction,
+    RevokeFlowCoordinator,
+    RevokeFlowError,
+    RevokeFlowState,
+    RevokePolicyCode,
+    RevokePolicy,
+    RevokePreflightCode,
+    RevokePreflightError,
+    RevokePreflightService,
+    allowance_snapshot_to_map,
+    revoke_action_to_map,
+)
 from .broadcast import (
     BroadcastReceiptTracker,
     MainnetTransferCode,
@@ -131,11 +146,15 @@ class WalletController(QObject):
     historySelectionChanged = Signal()
     settingsSectionChanged = Signal()
     recoveryChanged = Signal()
+    approvalChanged = Signal()
     _publicDataReady = Signal(int, object)
     _transferReady = Signal(int, object)
     _maximumReady = Signal(int, object, str, str, str)
     _mainnetReady = Signal(int, object)
     _receiptReady = Signal(int, object)
+    _approvalReady = Signal(int, object)
+    _revokeReady = Signal(int, object)
+    _revokeExecutionReady = Signal(int, object)
 
     def __init__(
         self,
@@ -149,6 +168,8 @@ class WalletController(QObject):
         receipt_tracker: BroadcastReceiptTracker | None = None,
         receipt_executor: Executor | None = None,
         price_service: PriceService | None = None,
+        allowance_service: AllowanceReadService | None = None,
+        revoke_preflight_service: RevokePreflightService | None = None,
     ) -> None:
         super().__init__()
         self._repository = repository or VaultRepository()
@@ -170,6 +191,20 @@ class WalletController(QObject):
         self._mainnet_executor = mainnet_executor or MainnetTransferExecutor(
             self._repository,
             self._history_store,
+        )
+        revoke_policy = getattr(
+            self._mainnet_executor, "revoke_policy", RevokePolicy.from_environment(),
+        )
+        self._revoke_policy = revoke_policy
+        revoke_environ = getattr(self._mainnet_executor, "_environ", None)
+        revoke_rpc_factory = getattr(self._mainnet_executor, "_rpc_factory", None)
+        self._allowance_service = allowance_service or AllowanceReadService(
+            revoke_policy, revoke_rpc_factory, revoke_environ,
+        )
+        self._revoke_preflight_service = (
+            revoke_preflight_service or RevokePreflightService(
+                revoke_policy, revoke_rpc_factory, revoke_environ,
+            )
         )
         self._receipt_tracker = receipt_tracker or BroadcastReceiptTracker(
             self._history_store,
@@ -228,6 +263,12 @@ class WalletController(QObject):
         self._recovery_reveal_seconds = 0
         self._recovery_reveal_kind = ""
         self._recovery_reveal_derivation_path = ""
+        self._revoke_flow = RevokeFlowCoordinator()
+        self._allowance_snapshots: tuple[AllowanceSnapshot, ...] = ()
+        self._approval_refreshing = False
+        self._approval_preparing = False
+        self._approval_error = ""
+        self._approval_generation = 0
         self._closed = False
         self._copied_phrase: str | None = None
         self._clipboard_timer = QTimer(self)
@@ -245,11 +286,17 @@ class WalletController(QObject):
         self._transfer_expiry_timer = QTimer(self)
         self._transfer_expiry_timer.setSingleShot(True)
         self._transfer_expiry_timer.timeout.connect(self._expire_transfer)
+        self._revoke_expiry_timer = QTimer(self)
+        self._revoke_expiry_timer.setSingleShot(True)
+        self._revoke_expiry_timer.timeout.connect(self._expire_revoke)
         self._publicDataReady.connect(self._accept_public_data)
         self._transferReady.connect(self._accept_transfer_preflight)
         self._maximumReady.connect(self._accept_maximum_transfer)
         self._mainnetReady.connect(self._accept_mainnet_result)
         self._receiptReady.connect(self._accept_receipt_result)
+        self._approvalReady.connect(self._accept_allowances)
+        self._revokeReady.connect(self._accept_revoke_preflight)
+        self._revokeExecutionReady.connect(self._accept_revoke_result)
         self._initialize()
 
     @Property("QVariantList", notify=profilesChanged)
@@ -607,6 +654,63 @@ class WalletController(QObject):
     def recoveryRevealDerivationPath(self) -> str:
         return self._recovery_reveal_derivation_path
 
+    @Property("QVariantList", notify=approvalChanged)
+    def approvalRecords(self) -> list[dict[str, object]]:
+        policy = self._revoke_policy
+        return [allowance_snapshot_to_map(item, policy) for item in self._allowance_snapshots]
+
+    @Property(bool, notify=approvalChanged)
+    def approvalRefreshing(self) -> bool:
+        return self._approval_refreshing
+
+    @Property(bool, notify=approvalChanged)
+    def approvalPreparing(self) -> bool:
+        return self._approval_preparing
+
+    @Property(str, notify=approvalChanged)
+    def approvalError(self) -> str:
+        return self._approval_error
+
+    @Property("QVariantMap", notify=approvalChanged)
+    def revokeAction(self) -> dict[str, object]:
+        action = self._revoke_flow.current
+        return revoke_action_to_map(action) if action is not None else {}
+
+    @Property(bool, notify=approvalChanged)
+    def revokeExecutionAvailable(self) -> bool:
+        action = self._revoke_flow.current
+        return (
+            action is not None
+            and self._revoke_flow.state is RevokeFlowState.PREPARED
+            and not self._mainnet_in_progress
+            and self._revoke_policy.evaluate(action) is None
+        )
+
+    @Property(str, notify=approvalChanged)
+    def revokeFeeLimit(self) -> str:
+        action = self._revoke_flow.current
+        return (
+            self._revoke_policy.fee_display(action.network_id)
+            if action is not None else "Not configured"
+        )
+
+    @Property(str, notify=approvalChanged)
+    def revokeGateMessage(self) -> str:
+        action = self._revoke_flow.current
+        if action is None:
+            return ""
+        code = self._revoke_policy.evaluate(action)
+        if code is RevokePolicyCode.POLICY_UNAVAILABLE:
+            prefix = action.network_id.upper()
+            return (
+                f"Configure HOLON_{prefix}_USDC_REVOKE_ENABLED, "
+                f"HOLON_{prefix}_USDC_REVOKE_SPENDER and "
+                f"HOLON_{prefix}_USDC_REVOKE_MAX_TOTAL_FEE_WEI"
+            )
+        if code is RevokePolicyCode.FEE_LIMIT_EXCEEDED:
+            return "Maximum fee exceeds the local revoke limit"
+        return "Fresh password and explicit confirmation authorize one revoke"
+
     @Property("QVariantList", notify=currentScreenChanged)
     def transactionFlowSteps(self) -> list[str]:
         return ["Review", "Confirm", "Submit", "Complete"]
@@ -618,6 +722,10 @@ class WalletController(QObject):
             "sign_transfer": 1,
             "submit_transfer": 2,
             "transfer_result": 3,
+            "revoke_review": 0,
+            "revoke_confirm": 1,
+            "revoke_submit": 2,
+            "revoke_result": 3,
         }.get(self._current_screen, 0)
 
     @Slot()
@@ -645,6 +753,8 @@ class WalletController(QObject):
             or self._mainnet_in_progress
             or self._recovery_flow.current is not None
             or self._current_screen == "recovery_reveal"
+            or self._revoke_flow.current is not None
+            or self._revoke_flow.pending is not None
         ):
             return
         self._clear_mainnet_result()
@@ -1086,13 +1196,20 @@ class WalletController(QObject):
             return False
         if self._state.select_profile(profile_id):
             recovery_open = self._current_screen.startswith("recovery_")
+            approval_open = self._current_screen == "approvals" or self._current_screen.startswith("revoke_")
             invalidated = self._transfer_flow.profile_changed(profile_id)
             recovery_invalidated = self._recovery_flow.profile_changed(profile_id)
+            revoke_invalidated = self._revoke_flow.profile_changed(profile_id)
             if recovery_invalidated or recovery_open:
                 self._cancel_recovery_action(clear_clipboard=True)
+            if revoke_invalidated or approval_open:
+                self._cancel_revoke_action(clear_snapshots=True)
             self.activeProfileChanged.emit()
             self.historyChanged.emit()
-            if invalidated or recovery_invalidated or recovery_open:
+            if (
+                invalidated or recovery_invalidated or recovery_open
+                or revoke_invalidated or approval_open
+            ):
                 self._transfer_generation += 1
                 self._transfer_preparing = False
                 self._mainnet_in_progress = False
@@ -1111,6 +1228,8 @@ class WalletController(QObject):
         if self._state.profiles and not self._mainnet_in_progress:
             if self._current_screen.startswith("recovery_"):
                 self._cancel_recovery_action(clear_clipboard=False)
+            if self._current_screen == "approvals" or self._current_screen.startswith("revoke_"):
+                self._cancel_revoke_action(clear_snapshots=False)
             self._set_screen("main")
 
     @Slot()
@@ -1186,6 +1305,188 @@ class WalletController(QObject):
         self._set_screen("settings")
 
     @Slot()
+    def showApprovals(self) -> None:
+        if (
+            not self._state.profiles
+            or self._closed
+            or self._mainnet_in_progress
+            or self._transfer_flow.current is not None
+            or self._transfer_flow.pending is not None
+            or self._recovery_flow.current is not None
+            or self._current_screen == "recovery_reveal"
+        ):
+            return
+        self._clear_mainnet_result()
+        self._cancel_revoke_action(clear_snapshots=False)
+        self._set_screen("approvals")
+        self.refreshApprovals()
+
+    @Slot(result=bool)
+    def refreshApprovals(self) -> bool:
+        active = self._state.active_profile
+        if (
+            active is None
+            or self._closed
+            or self._approval_refreshing
+            or self._approval_preparing
+            or self._revoke_flow.current is not None
+        ):
+            return False
+        self._approval_generation += 1
+        generation = self._approval_generation
+        self._approval_refreshing = True
+        self._approval_error = ""
+        self.approvalChanged.emit()
+        future = self._public_data_executor.submit(
+            self._allowance_service.inspect_all, active,
+        )
+        future.add_done_callback(
+            lambda completed, current=generation: self._allowances_finished(
+                current, completed,
+            ),
+        )
+        return True
+
+    @Slot(str, result=bool)
+    def prepareRevoke(self, network_id: str) -> bool:
+        active = self._state.active_profile
+        snapshot = next(
+            (item for item in self._allowance_snapshots if item.network_id == network_id),
+            None,
+        )
+        if (
+            active is None
+            or snapshot is None
+            or self._closed
+            or self._approval_refreshing
+            or self._approval_preparing
+            or self._mainnet_in_progress
+            or self._current_screen != "approvals"
+        ):
+            return False
+        mapped = allowance_snapshot_to_map(
+            snapshot, self._revoke_policy,
+        )
+        if not mapped["revokeAvailable"]:
+            return False
+        try:
+            request = self._revoke_flow.begin(active.profile_id, network_id)
+        except (RevokeFlowError, RevokePreflightError):
+            return False
+        self._approval_preparing = True
+        self._approval_error = ""
+        self._approval_generation += 1
+        generation = self._approval_generation
+        self.approvalChanged.emit()
+        future = self._transfer_executor.submit(
+            self._revoke_preflight_service.prepare, request, active,
+        )
+        future.add_done_callback(
+            lambda completed, current=generation: self._revoke_finished(
+                current, completed,
+            ),
+        )
+        return True
+
+    @Slot()
+    def editRevoke(self) -> None:
+        if self._mainnet_in_progress:
+            return
+        self._clear_mainnet_result()
+        self._cancel_revoke_action(clear_snapshots=False)
+        self._set_screen("approvals")
+        self.refreshApprovals()
+
+    @Slot(result=bool)
+    def beginRevokeExecution(self) -> bool:
+        action = self._revoke_flow.current
+        if (
+            action is None
+            or self._closed
+            or self._revoke_flow.state is not RevokeFlowState.PREPARED
+            or self._revoke_policy.evaluate(action) is not None
+        ):
+            return False
+        if self._revoke_flow.is_expired():
+            self._show_revoke_failure(action, MainnetTransferCode.ACTION_EXPIRED)
+            return False
+        self._clear_mainnet_result()
+        self._set_screen("revoke_confirm")
+        return True
+
+    @Slot(str, bool, result=bool)
+    def submitRevoke(self, password: str, explicitly_confirmed: bool) -> bool:
+        action = self._revoke_flow.current
+        active = self._state.active_profile
+        if (
+            len(password) < MIN_PASSWORD_LENGTH
+            or not explicitly_confirmed
+            or action is None
+            or active is None
+            or self._closed
+            or self._current_screen != "revoke_confirm"
+            or self._mainnet_in_progress
+        ):
+            return False
+        digest = self._revoke_flow.accepted_digest
+        permit = self._revoke_flow.begin_execution(
+            action.action_id, digest, active.profile_id,
+        )
+        if permit is None:
+            self._show_revoke_failure(action, MainnetTransferCode.ACTION_INVALID)
+            return False
+        self._mainnet_in_progress = True
+        self._mainnet_result = None
+        self._revoke_expiry_timer.stop()
+        self._approval_generation += 1
+        generation = self._approval_generation
+        self.approvalChanged.emit()
+        self.transferChanged.emit()
+        self._set_screen("revoke_submit")
+        future = self._transfer_executor.submit(
+            self._mainnet_executor.execute,
+            action,
+            digest,
+            password,
+            permit,
+        )
+        del password
+        future.add_done_callback(
+            lambda completed, current=generation: self._revoke_execution_finished(
+                current, completed,
+            ),
+        )
+        return True
+
+    @Slot()
+    def cancelRevoke(self) -> None:
+        if self._mainnet_in_progress:
+            return
+        self._clear_mainnet_result()
+        self._cancel_revoke_action(clear_snapshots=False)
+        self._set_screen("approvals")
+        self.refreshApprovals()
+
+    @Slot()
+    def finishRevoke(self) -> None:
+        if self._mainnet_in_progress:
+            return
+        self._clear_mainnet_result()
+        self._cancel_revoke_action(clear_snapshots=False)
+        self._set_screen("approvals")
+        self.refreshApprovals()
+
+    @Slot()
+    def closeApprovals(self) -> None:
+        if self._mainnet_in_progress:
+            return
+        self._clear_mainnet_result()
+        self._cancel_revoke_action(clear_snapshots=False)
+        self._settings_section = "security"
+        self.settingsSectionChanged.emit()
+        self._set_screen("settings_info")
+
+    @Slot()
     def showRecoveryReview(self) -> None:
         active = self._state.active_profile
         if (
@@ -1193,6 +1494,8 @@ class WalletController(QObject):
             or self._closed
             or self._mainnet_in_progress
             or self._transfer_flow.current is not None
+            or self._revoke_flow.current is not None
+            or self._revoke_flow.pending is not None
         ):
             return
         self._cancel_recovery_action(clear_clipboard=False)
@@ -1368,10 +1671,12 @@ class WalletController(QObject):
             return
         self._closed = True
         self._public_data_generation += 1
+        self._approval_generation += 1
         self._receipt_generation += 1
         self._receipt_cancelled.set()
         self._clear_mainnet_result()
         self._cancel_transfer_request(clear_recipient=True)
+        self._cancel_revoke_action(clear_snapshots=True)
         self._clear_sensitive()
         if self._owns_public_data_executor:
             self._public_data_executor.shutdown(wait=False, cancel_futures=True)
@@ -1383,6 +1688,7 @@ class WalletController(QObject):
     def _initialize(self) -> None:
         self._clear_mainnet_result()
         self._cancel_transfer_request(clear_recipient=True)
+        self._cancel_revoke_action(clear_snapshots=True)
         self._clear_sensitive()
         self._set_error("")
         if not self._repository.exists:
@@ -1435,6 +1741,7 @@ class WalletController(QObject):
             return
         self._clear_mainnet_result()
         self._cancel_transfer_request(clear_recipient=True)
+        self._cancel_revoke_action(clear_snapshots=True)
         self._clear_sensitive()
         self._set_error("")
         self._flow = flow
@@ -1509,6 +1816,41 @@ class WalletController(QObject):
             result = None
         self._mainnetReady.emit(generation, result)
 
+    def _allowances_finished(
+        self, generation: int, future: Future[tuple[AllowanceSnapshot, ...]],
+    ) -> None:
+        if self._closed:
+            return
+        try:
+            result: object = future.result()
+        except Exception:
+            result = None
+        self._approvalReady.emit(generation, result)
+
+    def _revoke_finished(
+        self, generation: int, future: Future[PreparedRevokeAction],
+    ) -> None:
+        if self._closed:
+            return
+        try:
+            result: object = future.result()
+        except RevokePreflightError as error:
+            result = error
+        except Exception:
+            result = RevokePreflightError(RevokePreflightCode.RPC_UNAVAILABLE)
+        self._revokeReady.emit(generation, result)
+
+    def _revoke_execution_finished(
+        self, generation: int, future: Future[MainnetTransferResult],
+    ) -> None:
+        if self._closed:
+            return
+        try:
+            result: object = future.result()
+        except Exception:
+            result = None
+        self._revokeExecutionReady.emit(generation, result)
+
     @Slot(int, object)
     def _accept_mainnet_result(self, generation: int, result: object) -> None:
         if generation != self._transfer_generation or self._closed:
@@ -1565,6 +1907,101 @@ class WalletController(QObject):
                 )
             self._load_history()
         self.transferChanged.emit()
+        self.approvalChanged.emit()
+
+    @Slot(int, object)
+    def _accept_allowances(self, generation: int, result: object) -> None:
+        if generation != self._approval_generation or self._closed:
+            return
+        self._approval_refreshing = False
+        if (
+            not isinstance(result, tuple)
+            or len(result) != 2
+            or any(not isinstance(item, AllowanceSnapshot) for item in result)
+            or self._state.active_profile is None
+            or any(item.owner != self._state.active_profile.address for item in result)
+        ):
+            self._allowance_snapshots = ()
+            self._approval_error = "Approval data is unavailable"
+        else:
+            self._allowance_snapshots = result
+            self._approval_error = ""
+        self.approvalChanged.emit()
+
+    @Slot(int, object)
+    def _accept_revoke_preflight(self, generation: int, result: object) -> None:
+        if generation != self._approval_generation or self._closed:
+            return
+        self._approval_preparing = False
+        active = self._state.active_profile
+        if isinstance(result, RevokePreflightError):
+            self._revoke_flow.close()
+            self._approval_error = _revoke_error_message(result.code)
+            self.approvalChanged.emit()
+            return
+        if (
+            not isinstance(result, PreparedRevokeAction)
+            or active is None
+            or active.profile_id != result.profile_id
+            or active.address != result.sender
+            or not self._revoke_flow.still_pending(result.action_id, result.profile_id)
+            or not self._revoke_flow.accept(result)
+        ):
+            self._revoke_flow.close()
+            self._approval_error = "Revoke preparation expired"
+            self.approvalChanged.emit()
+            return
+        try:
+            records = self._history_store.append(_revoke_history_record(result))
+        except (HistoryUnavailableError, HistoryValidationError, StorageError):
+            self._revoke_flow.close()
+            self._history_available = False
+            self.historyChanged.emit()
+            self._approval_error = "History unavailable · revoke was not prepared"
+            self.approvalChanged.emit()
+            return
+        self._history_records = records
+        self._history_available = True
+        self._approval_error = ""
+        self.historyChanged.emit()
+        remaining_ms = max(
+            1,
+            int((result.expires_at - datetime.now(UTC)).total_seconds() * 1000) + 1,
+        )
+        self._revoke_expiry_timer.start(remaining_ms)
+        self.approvalChanged.emit()
+        self._set_screen("revoke_review")
+
+    @Slot(int, object)
+    def _accept_revoke_result(self, generation: int, result: object) -> None:
+        if generation != self._approval_generation or self._closed:
+            return
+        action = self._revoke_flow.current
+        self._mainnet_in_progress = False
+        if (
+            not isinstance(result, MainnetTransferResult)
+            or action is None
+            or result.action_id != action.action_id
+            or result.action_type != "revoke"
+            or not self._revoke_flow.complete_execution(action.action_id)
+        ):
+            if action is None:
+                return
+            result = self._safe_mainnet_result(
+                action, MainnetTransferCode.SIGNING_FAILED,
+            )
+            self._revoke_flow.close()
+        self._revoke_expiry_timer.stop()
+        self._mainnet_result = result
+        self._load_history()
+        self.approvalChanged.emit()
+        self.transferChanged.emit()
+        self._set_screen("revoke_result")
+        if (
+            result.transaction_hash
+            and result.history_status in {HistoryStatus.PENDING, HistoryStatus.UNKNOWN}
+        ):
+            self._start_receipt_check(result.action_id, track=True)
 
     @Slot(int, object)
     def _accept_transfer_preflight(self, generation: int, result: object) -> None:
@@ -1695,6 +2132,26 @@ class WalletController(QObject):
         if changed:
             self.transferChanged.emit()
 
+    def _cancel_revoke_action(self, clear_snapshots: bool) -> None:
+        changed = (
+            self._approval_refreshing
+            or self._approval_preparing
+            or self._revoke_flow.pending is not None
+            or self._revoke_flow.current is not None
+            or bool(self._approval_error)
+            or (clear_snapshots and bool(self._allowance_snapshots))
+        )
+        self._approval_generation += 1
+        self._revoke_expiry_timer.stop()
+        self._revoke_flow.close()
+        self._approval_refreshing = False
+        self._approval_preparing = False
+        self._approval_error = ""
+        if clear_snapshots:
+            self._allowance_snapshots = ()
+        if changed:
+            self.approvalChanged.emit()
+
     def _expire_transfer(self) -> None:
         self._transfer_expiry_timer.stop()
         action = self._transfer_flow.current
@@ -1729,9 +2186,45 @@ class WalletController(QObject):
         self.transferChanged.emit()
         self._set_screen("transfer_result")
 
+    def _expire_revoke(self) -> None:
+        self._revoke_expiry_timer.stop()
+        action = self._revoke_flow.current
+        if not self._revoke_flow.is_expired():
+            action = self._revoke_flow.current
+            if action is not None:
+                remaining_ms = max(
+                    1,
+                    int((action.expires_at - datetime.now(UTC)).total_seconds() * 1000) + 1,
+                )
+                self._revoke_expiry_timer.start(remaining_ms)
+            return
+        if action is not None and self._current_screen in {
+            "revoke_confirm", "revoke_result",
+        }:
+            self._show_revoke_failure(action, MainnetTransferCode.ACTION_EXPIRED)
+            return
+        self._approval_preparing = False
+        self._approval_error = "Revoke preparation expired"
+        self.approvalChanged.emit()
+        self._set_screen("approvals")
+
+    def _show_revoke_failure(
+        self, action: PreparedRevokeAction, code: MainnetTransferCode,
+    ) -> None:
+        self._approval_generation += 1
+        self._revoke_expiry_timer.stop()
+        self._revoke_flow.close()
+        self._approval_preparing = False
+        self._mainnet_in_progress = False
+        self._mainnet_result = self._safe_mainnet_result(action, code)
+        self.approvalChanged.emit()
+        self.transferChanged.emit()
+        self._set_screen("revoke_result")
+
     @staticmethod
     def _safe_mainnet_result(
-        action: PreparedTransferAction, code: MainnetTransferCode,
+        action: PreparedTransferAction | PreparedRevokeAction,
+        code: MainnetTransferCode,
     ) -> MainnetTransferResult:
         timestamp = (
             datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -1747,12 +2240,14 @@ class WalletController(QObject):
             False,
             True,
             action.simulation,
+            "revoke" if isinstance(action, PreparedRevokeAction) else "transfer",
         )
 
     def _clear_mainnet_result(self) -> None:
         if self._mainnet_result is not None:
             self._mainnet_result = None
             self.transferChanged.emit()
+            self.approvalChanged.emit()
 
     def _start_receipt_check(self, action_id: str, track: bool) -> bool:
         if self._closed or self._receipt_checking:
@@ -1763,6 +2258,7 @@ class WalletController(QObject):
         generation = self._receipt_generation
         self._receipt_checking = True
         self.transferChanged.emit()
+        self.approvalChanged.emit()
         operation = (
             self._receipt_tracker.track if track
             else self._receipt_tracker.check_once
@@ -1994,6 +2490,29 @@ def _history_record(action: PreparedTransferAction) -> WalletHistoryRecord:
     )
 
 
+def _revoke_history_record(action: PreparedRevokeAction) -> WalletHistoryRecord:
+    created_at = _utc_timestamp(action.created_at)
+    return WalletHistoryRecord(
+        action_id=action.action_id,
+        profile_id=action.profile_id,
+        action_type="revoke",
+        network=action.network_id,
+        chain_id=action.chain_id,
+        sender=action.sender,
+        recipient=action.spender,
+        contract=action.token_contract,
+        token="USDC",
+        amount_atomic="0",
+        decimals=action.decimals,
+        transaction_hash=None,
+        status=HistoryStatus.PREPARED,
+        created_at=created_at,
+        updated_at=created_at,
+        simulated=action.simulation,
+        max_total_fee_wei=str(action.max_total_fee_wei),
+    )
+
+
 def _utc_timestamp(value: datetime) -> str:
     return value.astimezone(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -2012,4 +2531,19 @@ def _transfer_error_message(code: TransferPreflightCode) -> str:
         TransferPreflightCode.GAS_ESTIMATE_FAILED: "Network fee estimation failed",
         TransferPreflightCode.DATA_INVALID: "Selected network returned invalid transaction data",
         TransferPreflightCode.RPC_UNAVAILABLE: "Selected network data is unavailable",
+    }[code]
+
+
+def _revoke_error_message(code: RevokePreflightCode) -> str:
+    return {
+        RevokePreflightCode.INVALID_ROUTE: "Select Ethereum or Base",
+        RevokePreflightCode.POLICY_UNAVAILABLE: "Local revoke policy is unavailable",
+        RevokePreflightCode.FEE_LIMIT_EXCEEDED: "Maximum fee exceeds the local revoke limit",
+        RevokePreflightCode.NO_ACTIVE_ALLOWANCE: "No active USDC allowance to revoke",
+        RevokePreflightCode.WRONG_CHAIN: "Selected network verification failed",
+        RevokePreflightCode.TOKEN_METADATA_INVALID: "USDC contract verification failed",
+        RevokePreflightCode.INSUFFICIENT_ETH: "Insufficient ETH for the maximum fee",
+        RevokePreflightCode.GAS_ESTIMATE_FAILED: "Network fee estimation failed",
+        RevokePreflightCode.DATA_INVALID: "Selected network returned invalid approval data",
+        RevokePreflightCode.RPC_UNAVAILABLE: "Selected network data is unavailable",
     }[code]

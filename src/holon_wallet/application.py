@@ -11,6 +11,7 @@ from PySide6.QtGui import QColor, QCloseEvent, QFont, QFontDatabase, QGuiApplica
 from PySide6.QtQml import qmlRegisterType
 from PySide6.QtQuick import QQuickView
 
+from .approval import AllowanceReadService, RevokePreflightService
 from .broadcast import (
     BroadcastReceiptTracker,
     MainnetTransferExecutor,
@@ -60,6 +61,8 @@ class WalletApplication:
         receipt_tracker: BroadcastReceiptTracker | None = None,
         receipt_executor: Executor | None = None,
         price_service: PriceService | None = None,
+        allowance_service: AllowanceReadService | None = None,
+        revoke_preflight_service: RevokePreflightService | None = None,
     ) -> None:
         self.qt_app = qt_app or QGuiApplication.instance()
         if self.qt_app is None:
@@ -89,6 +92,8 @@ class WalletApplication:
             receipt_tracker,
             receipt_executor,
             price_service,
+            allowance_service,
+            revoke_preflight_service,
         )
         self.window = WalletQuickView(self.controller)
         global _RECOVERY_TYPE_REGISTERED

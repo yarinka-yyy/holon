@@ -21,17 +21,19 @@ Item {
             sourceSize: Qt.size(88, 88)
         }
         Text {
-            x: 72; y: 15; text: "Sent " + (root.record.token || "")
+            x: 72; y: 15; text: root.record.summaryTitle || "Transaction"
             color: Design.text; font.family: Design.fontFamily
             font.pixelSize: 15; font.weight: Font.Medium
         }
         Text {
-            x: 72; y: 43; text: "To " + (root.record.shortRecipient || "")
+            x: 72; y: 43
+            text: (root.record.counterpartyLabel || "To") + " "
+                + (root.record.shortRecipient || "")
             color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 12
         }
         Text {
             anchors.right: parent.right; anchors.rightMargin: 18; y: 14
-            text: "−" + (root.record.amount || "")
+            text: root.record.amountLabel || ""
             color: Design.text; font.family: Design.fontFamily; font.pixelSize: 14
             font.weight: Font.Medium
         }

@@ -27,6 +27,11 @@ Item {
         RecoveryReviewPage { objectName: "recoveryReviewPage"; anchors.fill: parent; active: walletController.currentScreen === "recovery_review" }
         RecoveryConfirmPage { objectName: "recoveryConfirmPage"; anchors.fill: parent; active: walletController.currentScreen === "recovery_confirm" }
         RecoveryRevealPage { objectName: "recoveryRevealPage"; anchors.fill: parent; active: walletController.currentScreen === "recovery_reveal" }
+        ApprovalsPage { objectName: "approvalsPage"; anchors.fill: parent; active: walletController.currentScreen === "approvals" }
+        ApprovalReviewPage { objectName: "approvalReviewPage"; anchors.fill: parent; active: walletController.currentScreen === "revoke_review" }
+        ApprovalConfirmPage { objectName: "approvalConfirmPage"; anchors.fill: parent; active: walletController.currentScreen === "revoke_confirm" }
+        ApprovalSubmitPage { objectName: "approvalSubmitPage"; anchors.fill: parent; active: walletController.currentScreen === "revoke_submit" }
+        ApprovalResultPage { objectName: "approvalResultPage"; anchors.fill: parent; active: walletController.currentScreen === "revoke_result" }
         WalletsPage { objectName: "walletsPage"; anchors.fill: parent; active: walletController.currentScreen === "wallets" }
         HistoryPage { objectName: "historyPage"; anchors.fill: parent; active: walletController.currentScreen === "history" }
         TransactionDetailsPage { objectName: "transactionDetailsPage"; anchors.fill: parent; active: walletController.currentScreen === "transaction_details" }

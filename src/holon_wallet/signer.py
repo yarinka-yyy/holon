@@ -17,6 +17,14 @@ from eth_account.typed_transactions import TypedTransaction
 from hexbytes import HexBytes
 from web3 import Web3
 
+from .approval import (
+    REVOKE_ACTION_TYPE,
+    REVOKE_LIFETIME,
+    REVOKE_SCHEMA_VERSION,
+    PreparedRevokeAction,
+    approval_route,
+    encode_usdc_approve_zero,
+)
 from .transfer import (
     ACTION_LIFETIME,
     BASE_NETWORK_ID,
@@ -39,6 +47,7 @@ FEE_LIMIT_ENVS = {
     "ethereum": "HOLON_ETHEREUM_MAX_TOTAL_FEE_WEI",
 }
 DECIMAL_RE = re.compile(r"^[1-9][0-9]{0,77}$")
+PreparedTransactionAction = PreparedTransferAction | PreparedRevokeAction
 
 
 class OfflineSigningCode(str, Enum):
@@ -84,7 +93,7 @@ class OfflineSigningPolicy:
             return "Not configured"
         return f"≤ {_format_wei(self.max_total_fee_wei)} ETH"
 
-    def evaluate(self, action: PreparedTransferAction) -> OfflineSigningCode | None:
+    def evaluate(self, action: PreparedTransactionAction) -> OfflineSigningCode | None:
         if self.max_total_fee_wei is None:
             return OfflineSigningCode.POLICY_UNAVAILABLE
         if action.max_total_fee_wei > self.max_total_fee_wei:
@@ -119,7 +128,7 @@ class OfflineTransferSigner:
 
     def sign(
         self,
-        action: PreparedTransferAction,
+        action: PreparedTransactionAction,
         expected_digest: str,
         password: str,
         permit: SigningPermit,
@@ -198,7 +207,7 @@ class OfflineTransferSigner:
             del private_key, signed, decoded
 
     def _validate_action(
-        self, action: PreparedTransferAction, expected_digest: str,
+        self, action: PreparedTransactionAction, expected_digest: str,
     ) -> OfflineSigningCode | None:
         return validate_signing_action(
             action,
@@ -207,7 +216,7 @@ class OfflineTransferSigner:
         )
 
     def _failure(
-        self, action: PreparedTransferAction, code: OfflineSigningCode,
+        self, action: PreparedTransactionAction, code: OfflineSigningCode,
     ) -> OfflineSigningResult:
         return OfflineSigningResult(
             False,
@@ -222,13 +231,15 @@ class OfflineTransferSigner:
 
 
 def validate_signing_action(
-    action: PreparedTransferAction,
+    action: PreparedTransactionAction,
     expected_digest: str,
     now: datetime,
 ) -> OfflineSigningCode | None:
     now = now.astimezone(UTC)
     if now >= action.expires_at:
         return OfflineSigningCode.ACTION_EXPIRED
+    if isinstance(action, PreparedRevokeAction):
+        return _validate_revoke_action(action, expected_digest, now)
     tx = action.transaction
     try:
         route = transfer_route(action.network_id, action.asset_id)
@@ -292,7 +303,7 @@ def offline_signing_result_to_map(
     }
 
 
-def transaction_dict(action: PreparedTransferAction) -> dict[str, object]:
+def transaction_dict(action: PreparedTransactionAction) -> dict[str, object]:
     tx = action.transaction
     return {
         "type": 2,
@@ -309,7 +320,7 @@ def transaction_dict(action: PreparedTransferAction) -> dict[str, object]:
 
 
 def decoded_transaction_matches(
-    decoded: Mapping[str, object], action: PreparedTransferAction,
+    decoded: Mapping[str, object], action: PreparedTransactionAction,
 ) -> bool:
     tx = action.transaction
     try:
@@ -330,6 +341,50 @@ def decoded_transaction_matches(
         )
     except (KeyError, TypeError, ValueError):
         return False
+
+
+def _validate_revoke_action(
+    action: PreparedRevokeAction,
+    expected_digest: str,
+    now: datetime,
+) -> OfflineSigningCode | None:
+    try:
+        route = approval_route(action.network_id)
+        expected_data = encode_usdc_approve_zero(action.spender)
+    except Exception:
+        return OfflineSigningCode.ACTION_INVALID
+    tx = action.transaction
+    valid = (
+        action.schema_version == REVOKE_SCHEMA_VERSION
+        and action.action_type == REVOKE_ACTION_TYPE
+        and action.digest == expected_digest
+        and action.expires_at - action.created_at == REVOKE_LIFETIME
+        and now < action.expires_at
+        and action.profile_id != ""
+        and Web3.is_checksum_address(action.sender)
+        and Web3.is_checksum_address(action.spender)
+        and action.sender.lower() != action.spender.lower()
+        and action.network_label == route.network_label
+        and action.chain_id == route.chain_id
+        and action.token == "USDC"
+        and action.token_contract == route.token_contract
+        and type(action.allowance_before_atomic) is int
+        and 0 < action.allowance_before_atomic < 2**256
+        and action.new_allowance_atomic == 0
+        and action.decimals == 6
+        and tx.transaction_type == 2
+        and tx.chain_id == route.chain_id
+        and tx.to.lower() == route.token_contract.lower()
+        and tx.value == 0
+        and tx.data == expected_data
+        and tx.nonce >= 0
+        and tx.gas > 0
+        and 0 <= tx.max_priority_fee_per_gas <= tx.max_fee_per_gas
+        and tx.max_fee_per_gas > 0
+        and action.max_total_fee_wei == tx.gas * tx.max_fee_per_gas
+        and action.block_number >= 0
+    )
+    return None if valid else OfflineSigningCode.ACTION_INVALID
 
 
 def _timestamp(value: datetime) -> str:

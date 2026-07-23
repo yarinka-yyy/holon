@@ -24,6 +24,14 @@ from web3.exceptions import (
     Web3Exception,
 )
 
+from .approval import (
+    REVOKE_ACTION_TYPE,
+    PreparedRevokeAction,
+    RevokePolicy,
+    RevokePolicyCode,
+    approval_route,
+    encode_usdc_approve_zero,
+)
 from .history import (
     HistoryStatus,
     HistoryStore,
@@ -63,6 +71,10 @@ BROADCAST_ENABLED_ENVS = {
 TRANSFER_EVENT_TOPIC = Web3.to_hex(
     Web3.keccak(text="Transfer(address,address,uint256)"),
 )
+APPROVAL_EVENT_TOPIC = Web3.to_hex(
+    Web3.keccak(text="Approval(address,address,uint256)"),
+)
+PreparedTransactionAction = PreparedTransferAction | PreparedRevokeAction
 
 
 class MainnetTransferCode(str, Enum):
@@ -201,6 +213,7 @@ class MainnetTransferResult:
     broadcast_attempted: bool
     history_available: bool
     simulation: bool
+    action_type: str = "transfer"
 
     @property
     def successful_submission(self) -> bool:
@@ -226,6 +239,8 @@ class MainnetRpc(Protocol):
     def token_decimals(self, contract: str) -> int: ...
 
     def token_balance(self, contract: str, address: str) -> int: ...
+
+    def allowance(self, contract: str, owner: str, spender: str) -> int: ...
 
     def pending_nonce(self, address: str) -> int: ...
 
@@ -270,6 +285,10 @@ class Web3MainnetRpc:
     def token_balance(self, contract: str, address: str) -> int:
         token = self._web3.eth.contract(address=contract, abi=USDC_ABI)
         return int(self._call(lambda: token.functions.balanceOf(address).call()))
+
+    def allowance(self, contract: str, owner: str, spender: str) -> int:
+        token = self._web3.eth.contract(address=contract, abi=USDC_ABI)
+        return int(self._call(lambda: token.functions.allowance(owner, spender).call()))
 
     def pending_nonce(self, address: str) -> int:
         return int(
@@ -327,6 +346,7 @@ class MainnetTransferExecutor:
         rpc_factory: MainnetRpcFactory | None = None,
         environ: Mapping[str, str] | None = None,
         clock: Callable[[], datetime] | None = None,
+        revoke_policy: RevokePolicy | None = None,
     ) -> None:
         self.repository = repository
         self.history_store = history_store
@@ -334,10 +354,13 @@ class MainnetTransferExecutor:
         self._rpc_factory = rpc_factory or (lambda endpoint: Web3MainnetRpc(endpoint))
         self._environ = os.environ if environ is None else environ
         self._clock = clock or (lambda: datetime.now(UTC))
+        self.revoke_policy = revoke_policy or RevokePolicy.from_environment(
+            self._environ,
+        )
 
     def execute(
         self,
-        action: PreparedTransferAction,
+        action: PreparedTransactionAction,
         expected_digest: str,
         password: str,
         permit: SigningPermit,
@@ -348,7 +371,7 @@ class MainnetTransferExecutor:
             return self._failure(action, MainnetTransferCode.ACTION_EXPIRED)
         if validation is not None:
             return self._failure(action, MainnetTransferCode.ACTION_INVALID)
-        policy_code = self.policy.evaluate(action)
+        policy_code = _evaluate_policy(self.policy, self.revoke_policy, action)
         if policy_code is not None:
             return self._failure(action, policy_code)
         if permit.cancelled:
@@ -492,13 +515,13 @@ class MainnetTransferExecutor:
             del private_key, signed, decoded, password
 
     def _failure(
-        self, action: PreparedTransferAction, code: MainnetTransferCode,
+        self, action: PreparedTransactionAction, code: MainnetTransferCode,
     ) -> MainnetTransferResult:
         return self._result(action, code, "", "", None, False)
 
     def _result(
         self,
-        action: PreparedTransferAction,
+        action: PreparedTransactionAction,
         code: MainnetTransferCode,
         transaction_hash: str,
         recovered_signer: str,
@@ -517,6 +540,7 @@ class MainnetTransferExecutor:
             broadcast_attempted,
             history_available,
             action.simulation,
+            REVOKE_ACTION_TYPE if isinstance(action, PreparedRevokeAction) else "transfer",
         )
 
 
@@ -581,7 +605,7 @@ class BroadcastReceiptTracker:
             if receipt is not None:
                 transaction = (
                     rpc.transaction(record.transaction_hash)
-                    if record.token == "ETH"
+                    if record.token == "ETH" or record.action_type == REVOKE_ACTION_TYPE
                     else None
                 )
                 observed = _receipt_status(receipt, record, transaction)
@@ -636,7 +660,7 @@ class BroadcastReceiptTracker:
 
 
 def mainnet_result_to_map(result: MainnetTransferResult) -> dict[str, object]:
-    title, message = _result_text(result.code)
+    title, message = _result_text(result.code, result.action_type)
     status = result.history_status.value if result.history_status is not None else ""
     return {
         "code": result.code.value,
@@ -659,6 +683,7 @@ def mainnet_result_to_map(result: MainnetTransferResult) -> dict[str, object]:
         "confirmed": result.code is MainnetTransferCode.CONFIRMED,
         "submitted": result.successful_submission,
         "simulation": result.simulation,
+        "actionType": result.action_type,
     }
 
 
@@ -683,10 +708,28 @@ def result_from_tracking(
         previous.broadcast_attempted,
         previous.history_available and tracking.history_available,
         previous.simulation,
+        previous.action_type,
     )
 
 
-def _final_revalidation(rpc: MainnetRpc, action: PreparedTransferAction) -> bool:
+def _evaluate_policy(
+    transfer_policy: MainnetBroadcastPolicy,
+    revoke_policy: RevokePolicy,
+    action: PreparedTransactionAction,
+) -> MainnetTransferCode | None:
+    if not isinstance(action, PreparedRevokeAction):
+        return transfer_policy.evaluate(action)
+    code = revoke_policy.evaluate(action)
+    if code is RevokePolicyCode.FEE_LIMIT_EXCEEDED:
+        return MainnetTransferCode.FEE_LIMIT_EXCEEDED
+    if code is not None:
+        return MainnetTransferCode.POLICY_UNAVAILABLE
+    return None
+
+
+def _final_revalidation(rpc: MainnetRpc, action: PreparedTransactionAction) -> bool:
+    if isinstance(action, PreparedRevokeAction):
+        return _final_revoke_revalidation(rpc, action)
     tx = action.transaction
     route = transfer_route(action.network_id, action.asset_id)
     if rpc.chain_id() != route.chain_id:
@@ -732,6 +775,53 @@ def _final_revalidation(rpc: MainnetRpc, action: PreparedTransferAction) -> bool
     )
 
 
+def _final_revoke_revalidation(
+    rpc: MainnetRpc, action: PreparedRevokeAction,
+) -> bool:
+    tx = action.transaction
+    try:
+        route = approval_route(action.network_id)
+        if rpc.chain_id() != route.chain_id:
+            return False
+        block_number, base_fee = rpc.latest_block()
+        decimals = int(rpc.token_decimals(route.token_contract))
+        allowance = int(
+            rpc.allowance(route.token_contract, action.sender, action.spender),
+        )
+        native_balance = int(rpc.native_balance(action.sender))
+        nonce = int(rpc.pending_nonce(action.sender))
+        priority_fee = int(rpc.max_priority_fee_per_gas())
+        estimate = int(rpc.estimate_gas({
+            "from": action.sender,
+            "to": tx.to,
+            "value": tx.value,
+            "data": tx.data,
+            "nonce": tx.nonce,
+            "type": tx.transaction_type,
+            "chainId": tx.chain_id,
+            "maxFeePerGas": tx.max_fee_per_gas,
+            "maxPriorityFeePerGas": tx.max_priority_fee_per_gas,
+        }))
+    except Exception:
+        return False
+    current_required_fee = 2 * int(base_fee) + priority_fee
+    return (
+        block_number >= action.block_number
+        and int(base_fee) > 0
+        and decimals == action.decimals == 6
+        and allowance == action.allowance_before_atomic
+        and allowance > 0
+        and native_balance >= action.max_total_fee_wei
+        and nonce == tx.nonce
+        and 0 < estimate <= tx.gas
+        and 0 <= priority_fee <= tx.max_priority_fee_per_gas
+        and 0 < current_required_fee <= tx.max_fee_per_gas
+        and tx.to.lower() == route.token_contract.lower()
+        and tx.value == 0
+        and tx.data == encode_usdc_approve_zero(action.spender)
+    )
+
+
 def _receipt_status(
     receipt: Mapping[str, object],
     record: WalletHistoryRecord,
@@ -757,19 +847,28 @@ def _receipt_status(
             return HistoryStatus.FAILED
         if status != 1:
             return HistoryStatus.UNKNOWN
+        if record.token == "ETH" or record.action_type == REVOKE_ACTION_TYPE:
+            if transaction is None or not _public_transaction_matches(transaction, record):
+                return HistoryStatus.UNKNOWN
         if record.token == "ETH":
             return (
                 HistoryStatus.CONFIRMED
                 if transaction is not None
-                and _public_transaction_matches(transaction, record)
                 else HistoryStatus.UNKNOWN
             )
         logs = receipt["logs"]
         if not isinstance(logs, (list, tuple)):
             return HistoryStatus.UNKNOWN
-        return HistoryStatus.CONFIRMED if any(
-            _matching_transfer_log(item, record) for item in logs
-        ) else HistoryStatus.UNKNOWN
+        matcher = (
+            _matching_approval_log
+            if record.action_type == REVOKE_ACTION_TYPE
+            else _matching_transfer_log
+        )
+        return (
+            HistoryStatus.CONFIRMED
+            if any(matcher(item, record) for item in logs)
+            else HistoryStatus.UNKNOWN
+        )
     except (KeyError, TypeError, ValueError):
         return HistoryStatus.UNKNOWN
 
@@ -792,6 +891,32 @@ def _matching_transfer_log(value: object, record: WalletHistoryRecord) -> bool:
             and rendered[1] == sender_topic
             and rendered[2] == recipient_topic
             and amount == int(record.amount_atomic)
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def _matching_approval_log(value: object, record: WalletHistoryRecord) -> bool:
+    if not isinstance(value, Mapping) or record.contract is None:
+        return False
+    try:
+        if str(value["address"]).lower() != record.contract.lower():
+            return False
+        topics = value["topics"]
+        if not isinstance(topics, (list, tuple)) or len(topics) != 3:
+            return False
+        rendered = [_hex_value(topic).lower() for topic in topics[:3]]
+        owner_topic = "0x" + record.sender[2:].lower().rjust(64, "0")
+        spender_topic = "0x" + record.recipient[2:].lower().rjust(64, "0")
+        encoded_amount = HexBytes(value["data"])
+        if len(encoded_amount) != 32:
+            return False
+        amount = int.from_bytes(encoded_amount, "big")
+        return (
+            rendered[0] == APPROVAL_EVENT_TOPIC.lower()
+            and rendered[1] == owner_topic
+            and rendered[2] == spender_topic
+            and amount == 0
         )
     except (KeyError, TypeError, ValueError):
         return False
@@ -820,12 +945,17 @@ def _public_transaction_matches(
         expected_target = record.recipient if record.token == "ETH" else record.contract
         transaction_value = int(value.get("value", 0))
         data = _transaction_data(value)
-        expected_data = (
-            "0x"
-            if record.token == "ETH"
-            else encode_usdc_transfer(record.recipient, int(record.amount_atomic))
-        )
-        expected_value = int(record.amount_atomic) if record.token == "ETH" else 0
+        if record.action_type == REVOKE_ACTION_TYPE:
+            expected_data = encode_usdc_approve_zero(record.recipient)
+            expected_value = 0
+        elif record.token == "ETH":
+            expected_data = "0x"
+            expected_value = int(record.amount_atomic)
+        else:
+            expected_data = encode_usdc_transfer(
+                record.recipient, int(record.amount_atomic),
+            )
+            expected_value = 0
         return (
             transaction_hash.lower() == (record.transaction_hash or "").lower()
             and sender.lower() == record.sender.lower()
@@ -882,8 +1012,10 @@ def _short_address(value: str) -> str:
     return f"{value[:8]}…{value[-6:]}" if value else ""
 
 
-def _result_text(code: MainnetTransferCode) -> tuple[str, str]:
-    return {
+def _result_text(
+    code: MainnetTransferCode, action_type: str = "transfer",
+) -> tuple[str, str]:
+    values = {
         MainnetTransferCode.CONFIRMED: (
             "Transfer confirmed",
             "The exact reviewed transfer was confirmed on-chain.",
@@ -940,7 +1072,33 @@ def _result_text(code: MainnetTransferCode) -> tuple[str, str]:
             "Signing failed",
             "Nothing was sent. Prepare a new action to try again.",
         ),
-    }[code]
+    }
+    title, message = values[code]
+    if action_type != REVOKE_ACTION_TYPE:
+        return title, message
+    replacements = {
+        MainnetTransferCode.CONFIRMED: (
+            "Approval revoked",
+            "The exact reviewed USDC allowance was set to zero on-chain.",
+        ),
+        MainnetTransferCode.FAILED: (
+            "Revoke reverted",
+            "A network fee may have been spent, but the allowance was not revoked.",
+        ),
+        MainnetTransferCode.POLICY_UNAVAILABLE: (
+            "Revoke unavailable",
+            "The selected route requires its local spender, enable, and fee settings.",
+        ),
+        MainnetTransferCode.AMOUNT_LIMIT_EXCEEDED: (
+            "Revoke unavailable",
+            "The revoke action does not use a transfer amount limit.",
+        ),
+        MainnetTransferCode.CANCELLED: (
+            "Revoke cancelled",
+            "No automatic retry or broadcast will occur.",
+        ),
+    }
+    return replacements.get(code, (title, message))
 
 
 _TRANSPORT_ERRORS = (

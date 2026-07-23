@@ -46,6 +46,42 @@ def test_public_data_timestamp_uses_system_local_time_format() -> None:
     assert "UTC" not in _display_local_time(timestamp)
 
 
+def test_bounded_approval_review_edit_and_wrong_password_are_terminal(tmp_path) -> None:
+    item = controller(tmp_path)
+    secret = password()
+    item.beginCreate()
+    assert item.submitPassword(secret, secret)
+    assert item.finishBackup()
+
+    item.showSettings()
+    assert item.showSettingsSection("security")
+    item.showApprovals()
+    assert item.currentScreen == "approvals"
+    assert len(item.approvalRecords) == 2
+    assert {record["status"] for record in item.approvalRecords} == {"LIVE"}
+    assert all(record["revokeAvailable"] for record in item.approvalRecords)
+
+    assert item.prepareRevoke("base")
+    assert item.currentScreen == "revoke_review"
+    first = item.revokeAction["actionId"]
+    assert item.revokeAction["newAllowance"] == "0 USDC"
+    assert item.revokeAction["nativeValueWei"] == "0"
+    item.editRevoke()
+    assert item.currentScreen == "approvals"
+    assert item.prepareRevoke("base")
+    assert item.revokeAction["actionId"] != first
+    assert item.beginRevokeExecution()
+    assert item.currentScreen == "revoke_confirm"
+    assert item.submitRevoke(secret + "-wrong", True)
+    assert item.currentScreen == "revoke_result"
+    assert item.mainnetResult["code"] == "AUTHENTICATION_FAILED"
+    assert item.mainnetResult["actionType"] == "revoke"
+    assert item._test_mainnet_rpc.send_calls == 0
+    assert item._revoke_flow.current is None
+    assert item.historyRecords[0]["actionType"] == "revoke"
+    assert item.historyRecords[0]["amountLabel"] == "Allowance → 0"
+
+
 def password() -> str:
     return secrets.token_urlsafe(18)
 
