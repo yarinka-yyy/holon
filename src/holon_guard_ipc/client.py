@@ -93,3 +93,6 @@ class PipeGuardClient:
             return GuardHealth.unavailable()
         except Exception:
             return GuardHealth.uncertain()
+
+    def open_wallet(self) -> ContractEnvelope:
+        return self.client.request(MessageKind.OPEN_WALLET)

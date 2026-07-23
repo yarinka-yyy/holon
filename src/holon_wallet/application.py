@@ -6,10 +6,11 @@ import sys
 from concurrent.futures import Executor
 from importlib.resources import as_file, files
 
-from PySide6.QtCore import QSize, Qt, QUrl
+from PySide6.QtCore import QObject, QSize, Qt, QUrl, Signal, Slot
 from PySide6.QtGui import QColor, QCloseEvent, QFont, QFontDatabase, QGuiApplication, QIcon
 from PySide6.QtQml import qmlRegisterType
 from PySide6.QtQuick import QQuickView
+from holon_wallet_control import CONTROL_PIPE_NAME, WalletControlServer
 
 from .approval import AllowanceReadService, RevokePreflightService
 from .broadcast import (
@@ -45,6 +46,26 @@ class WalletQuickView(QQuickView):
         super().closeEvent(event)
 
 
+class _ControlBridge(QObject):
+    activationRequested = Signal()
+
+    def __init__(self, application: "WalletApplication") -> None:
+        super().__init__()
+        self._application = application
+        self.activationRequested.connect(self._activate)
+
+    def request_activation(self) -> None:
+        self.activationRequested.emit()
+
+    @Slot()
+    def _activate(self) -> None:
+        application = self._application
+        application.window.showNormal()
+        application.window.raise_()
+        application.window.requestActivate()
+        application.controller.showGuardOpenNotice()
+
+
 class WalletApplication:
     """Owns the Qt runtime, controller, and QML-backed window."""
 
@@ -63,6 +84,8 @@ class WalletApplication:
         price_service: PriceService | None = None,
         allowance_service: AllowanceReadService | None = None,
         revoke_preflight_service: RevokePreflightService | None = None,
+        control_pipe_name: str | None = None,
+        control_server_factory=WalletControlServer,
     ) -> None:
         self.qt_app = qt_app or QGuiApplication.instance()
         if self.qt_app is None:
@@ -142,6 +165,15 @@ class WalletApplication:
             ),
         )
         self.window.show()
+        self._control_bridge: _ControlBridge | None = None
+        self._control_server: WalletControlServer | None = None
+        if control_pipe_name is not None:
+            self._control_bridge = _ControlBridge(self)
+            self._control_server = control_server_factory(
+                self._control_bridge.request_activation,
+                pipe_name=control_pipe_name,
+            )
+            self._control_server.start()
 
     def _record_warnings(self, warnings: list[object]) -> None:
         self.qml_warnings.extend(str(warning.toString()) for warning in warnings)
@@ -150,6 +182,9 @@ class WalletApplication:
         return self.qt_app.exec()
 
     def close(self) -> None:
+        if self._control_server is not None:
+            self._control_server.stop()
+            self._control_server = None
         self.controller.shutdown()
         self.window.close()
         self.window.deleteLater()
@@ -164,7 +199,11 @@ def main() -> int:
     instance = ProcessInstance(MUTEX_NAME, WINDOW_TITLE)
     if not instance.acquire():
         return 0
+    application: WalletApplication | None = None
     try:
-        return WalletApplication().run()
+        application = WalletApplication(control_pipe_name=CONTROL_PIPE_NAME)
+        return application.run()
     finally:
+        if application is not None:
+            application.close()
         instance.release()

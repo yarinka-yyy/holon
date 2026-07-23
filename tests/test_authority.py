@@ -8,6 +8,7 @@ from pathlib import Path
 from holon_contracts import MessageKind, make_envelope
 from holon_guard import GuardLifecycle, SnapshotStore
 from holon_guard.authority import AuthorityService
+from holon_guard.wallet import WalletOpenResult
 from holon_policy import Policy, PolicyEngine
 from guard_support import (
     ACTION_ID, ACTION_ID_2, enabled_policy, make_audit, make_ledger, transfer_request,
@@ -27,6 +28,7 @@ class Handle:
 class Wallet:
     def __init__(self) -> None:
         self.calls = 0
+        self.open_calls = 0
         self.handle = Handle()
 
     def open_or_activate(self, flow_id: str) -> Handle:
@@ -36,6 +38,12 @@ class Wallet:
 
     def request_close(self, handle: Handle) -> None:
         handle.exit_code = 0
+
+    def open_public(self) -> WalletOpenResult:
+        self.open_calls += 1
+        return WalletOpenResult(
+            True, "ACTIVATED", "WALLET_ACTIVATED", "Wallet is open.",
+        )
 
 
 class Owner:
@@ -114,6 +122,32 @@ class AuthorityTests(unittest.TestCase):
         response = self.service.handle(request, owner_pid=None)
         self.assertEqual(response.payload["code"], "SIGNING_DISABLED")
         self.assertNotIn("PRIVATE_SECRET", str(response.to_dict()))
+
+    def test_public_open_preserves_guard_state_and_creates_no_action(self) -> None:
+        request = make_envelope(MessageKind.OPEN_WALLET, {})
+        opened = self.service.handle(request, owner_pid=None)
+        self.assertEqual(opened.kind, MessageKind.WALLET_OPENED)
+        self.assertEqual(opened.payload["wallet_state"], "ACTIVATED")
+        self.assertFalse(opened.payload["authority_available"])
+        self.assertEqual(self.lifecycle.snapshot.state.value, "NORMAL")
+        self.assertIsNone(self.lifecycle.ledger.snapshot.current)
+        self.lifecycle.disable_signing("POLICY_AUTHORITY_DISABLED")
+        opened_disabled = self.service.handle(request, owner_pid=None)
+        self.assertEqual(opened_disabled.kind, MessageKind.WALLET_OPENED)
+        self.assertEqual(opened_disabled.payload["guard_state"], "SIGNING_DISABLED")
+        self.assertEqual(self.wallet.open_calls, 2)
+
+    def test_public_open_failure_is_generic_and_keeps_authority_untouched(self) -> None:
+        def fail():
+            raise RuntimeError("private path and process detail")
+
+        self.wallet.open_public = fail  # type: ignore[method-assign]
+        response = self.service.handle(make_envelope(MessageKind.OPEN_WALLET, {}), None)
+        self.assertEqual(response.kind, MessageKind.ERROR)
+        self.assertEqual(response.payload["code"], "WALLET_UNAVAILABLE")
+        self.assertNotIn("private", str(response.to_dict()).lower())
+        self.assertEqual(self.lifecycle.snapshot.state.value, "NORMAL")
+        self.assertIsNone(self.lifecycle.ledger.snapshot.current)
 
 
 if __name__ == "__main__":

@@ -100,6 +100,32 @@ class AuthorityService(ResponseMixin):
     def handle(self, request: ContractEnvelope, owner_pid: int | None) -> ContractEnvelope:
         if request.kind is MessageKind.HEALTH_REQUEST:
             return self._health(request)
+        if request.kind is MessageKind.OPEN_WALLET:
+            try:
+                result = self.lifecycle.wallet.open_public()
+            except Exception:
+                result = None
+            if (
+                result is None
+                or not result.ok
+                or result.wallet_state not in {"OPENED", "ACTIVATED"}
+            ):
+                return self.error(
+                    request,
+                    "WALLET_UNAVAILABLE",
+                    "Wallet is unavailable.",
+                )
+            return self._response(
+                request,
+                MessageKind.WALLET_OPENED,
+                {
+                    "guard_state": self.lifecycle.snapshot.state.value,
+                    "authority_available": False,
+                    "wallet_state": result.wallet_state,
+                    "code": f"WALLET_{result.wallet_state}",
+                    "message": "Wallet is open.",
+                },
+            )
         if request.kind is MessageKind.PREPARE_TRANSFER:
             if self.security_failure is not None:
                 return self.security_response(request)

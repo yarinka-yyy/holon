@@ -37,5 +37,5 @@ def test_vendored_plugin_registers_without_project_imports(tmp_path: Path, runti
         capture_output=True, text=True, timeout=10,
     )
     tools, hooks = json.loads(completed.stdout)
-    assert tools == ["holon_health"]
+    assert tools == ["holon_health", "holon_open_wallet"]
     assert hooks == ["on_session_start", "pre_tool_call"]

@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from holon_hermes_plugin import plugin
 from holon_hermes_plugin.guard import GuardHealth, GuardState
+from holon_contracts import MessageKind, make_envelope
 
 
 class StaticConnector:
@@ -19,6 +20,18 @@ class StaticConnector:
     def ensure_available(self) -> GuardHealth:
         self.ensure_calls += 1
         return self.health
+
+    def open_wallet(self):
+        return make_envelope(
+            MessageKind.WALLET_OPENED,
+            {
+                "guard_state": self.health.state.value,
+                "authority_available": False,
+                "wallet_state": "ACTIVATED",
+                "code": "WALLET_ACTIVATED",
+                "message": "Wallet is open.",
+            },
+        )
 
 
 class RaisingConnector:
@@ -42,20 +55,38 @@ class FakeContext:
 
 
 class PluginTests(unittest.TestCase):
-    def test_registers_one_health_tool_and_two_hooks(self) -> None:
+    def test_registers_health_and_open_wallet_tools_and_two_hooks(self) -> None:
         context = FakeContext()
         plugin.register(context)
-        self.assertEqual([tool["name"] for tool in context.tools], ["holon_health"])
+        self.assertEqual(
+            [tool["name"] for tool in context.tools],
+            ["holon_health", "holon_open_wallet"],
+        )
         self.assertEqual([name for name, _ in context.hooks], ["on_session_start", "pre_tool_call"])
 
     def test_health_response_is_safe_and_authority_disabled(self) -> None:
         runtime = plugin.PluginRuntime(StaticConnector(GuardHealth.available(GuardState.NORMAL)))
         payload = json.loads(runtime.handle_health({"secret": "must-not-return"}))
         self.assertEqual(payload["status"], "READY")
-        self.assertEqual(payload["capabilities"], ["health"])
+        self.assertEqual(payload["capabilities"], ["health", "open_wallet"])
         self.assertFalse(payload["authority_available"])
         self.assertNotIn("must-not-return", json.dumps(payload))
         self.assertNotIn("pid", runtime.handle_health().lower())
+
+    def test_open_wallet_response_is_safe_and_does_not_echo_arguments(self) -> None:
+        runtime = plugin.PluginRuntime(StaticConnector(GuardHealth.available(GuardState.NORMAL)))
+        payload = json.loads(runtime.handle_open_wallet({"secret": "must-not-return"}))
+        self.assertEqual(payload["status"], "ACTIVATED")
+        self.assertFalse(payload["authority_available"])
+        serialized = json.dumps(payload)
+        self.assertNotIn("must-not-return", serialized)
+        for field in ("pid", "path", "pipe", "launch_id"):
+            self.assertNotIn(field, serialized.lower())
+
+    def test_old_or_unavailable_guard_returns_wallet_unavailable(self) -> None:
+        payload = json.loads(plugin.PluginRuntime(RaisingConnector()).handle_open_wallet())
+        self.assertEqual(payload["status"], "DEGRADED")
+        self.assertEqual(payload["code"], "WALLET_UNAVAILABLE")
 
     def test_health_exception_returns_generic_uncertain_response(self) -> None:
         payload = json.loads(plugin.PluginRuntime(RaisingConnector()).handle_health())

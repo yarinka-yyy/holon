@@ -11,11 +11,13 @@ SCHEMA_VERSION = "1"
 
 class MessageKind(str, Enum):
     HEALTH_REQUEST = "health_request"
+    OPEN_WALLET = "open_wallet"
     PREPARE_TRANSFER = "prepare_transfer"
     ACTION_STATUS_REQUEST = "action_status_request"
     CANCEL_ACTION = "cancel_action"
     RECOVER_ACTION = "recover_action"
     HEALTH_RESPONSE = "health_response"
+    WALLET_OPENED = "wallet_opened"
     PROTECTED_FLOW_STARTED = "protected_flow_started"
     ACTION_STATUS = "action_status"
     REFUSAL = "refusal"

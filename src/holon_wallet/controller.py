@@ -147,6 +147,7 @@ class WalletController(QObject):
     settingsSectionChanged = Signal()
     recoveryChanged = Signal()
     approvalChanged = Signal()
+    guardNoticeChanged = Signal()
     _publicDataReady = Signal(int, object)
     _transferReady = Signal(int, object)
     _maximumReady = Signal(int, object, str, str, str)
@@ -269,6 +270,7 @@ class WalletController(QObject):
         self._approval_preparing = False
         self._approval_error = ""
         self._approval_generation = 0
+        self._guard_open_notice = ""
         self._closed = False
         self._copied_phrase: str | None = None
         self._clipboard_timer = QTimer(self)
@@ -289,6 +291,10 @@ class WalletController(QObject):
         self._revoke_expiry_timer = QTimer(self)
         self._revoke_expiry_timer.setSingleShot(True)
         self._revoke_expiry_timer.timeout.connect(self._expire_revoke)
+        self._guard_notice_timer = QTimer(self)
+        self._guard_notice_timer.setSingleShot(True)
+        self._guard_notice_timer.setInterval(6_000)
+        self._guard_notice_timer.timeout.connect(self._clear_guard_notice)
         self._publicDataReady.connect(self._accept_public_data)
         self._transferReady.connect(self._accept_transfer_preflight)
         self._maximumReady.connect(self._accept_maximum_transfer)
@@ -322,6 +328,10 @@ class WalletController(QObject):
     @Property(str, notify=currentScreenChanged)
     def currentScreen(self) -> str:
         return self._current_screen
+
+    @Property(str, notify=guardNoticeChanged)
+    def guardOpenNotice(self) -> str:
+        return self._guard_open_notice
 
     @Property(str, notify=errorMessageChanged)
     def errorMessage(self) -> str:
@@ -1662,6 +1672,14 @@ class WalletController(QObject):
         self._set_error("Recovery material was hidden when Wallet lost focus")
         self._set_screen("settings_info")
 
+    @Slot()
+    def showGuardOpenNotice(self) -> None:
+        if self._closed:
+            return
+        self._guard_open_notice = "Opened by Guard · no Guard action authorized"
+        self._guard_notice_timer.start()
+        self.guardNoticeChanged.emit()
+
     def attach_recovery_display(self, display: RecoverySecretDisplay) -> None:
         self._recovery_display = display
 
@@ -1674,6 +1692,8 @@ class WalletController(QObject):
         self._approval_generation += 1
         self._receipt_generation += 1
         self._receipt_cancelled.set()
+        self._guard_notice_timer.stop()
+        self._clear_guard_notice()
         self._clear_mainnet_result()
         self._cancel_transfer_request(clear_recipient=True)
         self._cancel_revoke_action(clear_snapshots=True)
@@ -2426,6 +2446,11 @@ class WalletController(QObject):
         if message != self._error_message:
             self._error_message = message
             self.errorMessageChanged.emit()
+
+    def _clear_guard_notice(self) -> None:
+        if self._guard_open_notice:
+            self._guard_open_notice = ""
+            self.guardNoticeChanged.emit()
 
     def _set_screen(self, screen: str) -> None:
         if screen != self._current_screen:

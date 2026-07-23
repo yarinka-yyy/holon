@@ -54,6 +54,39 @@ class ContractTests(unittest.TestCase):
             MessageKind.HEALTH_REQUEST, {}, request_id=REQUEST_ID, timestamp=TIMESTAMP
         )
         self.assertNotIn("action_id", health.to_dict())
+        open_wallet = make_envelope(
+            MessageKind.OPEN_WALLET, {}, request_id=REQUEST_ID, timestamp=TIMESTAMP
+        )
+        self.assertEqual(parse_envelope(open_wallet.to_dict()), open_wallet)
+        self.assertNotIn("action_id", open_wallet.to_dict())
+
+    def test_open_wallet_and_wallet_opened_are_strict_and_safe(self) -> None:
+        request = make_envelope(
+            MessageKind.OPEN_WALLET, {}, request_id=REQUEST_ID, timestamp=TIMESTAMP,
+        )
+        invalid = request.to_dict()
+        invalid["payload"] = {"wallet_path": "private"}
+        self.assert_code(invalid, RefusalCode.REQUEST_INVALID.value)
+        invalid = request.to_dict()
+        invalid["action_id"] = ACTION_ID
+        self.assert_code(invalid, RefusalCode.REQUEST_INVALID.value)
+        response = make_envelope(
+            MessageKind.WALLET_OPENED,
+            {
+                "guard_state": "SIGNING_DISABLED",
+                "authority_available": False,
+                "wallet_state": "ACTIVATED",
+                "code": "WALLET_ACTIVATED",
+                "message": "Wallet is open.",
+            },
+            request_id=REQUEST_ID,
+            timestamp=TIMESTAMP,
+        )
+        self.assertEqual(parse_envelope(response.to_dict()), response)
+        for field in ("pid", "wallet_path", "pipe_name", "launch_id"):
+            unsafe = response.to_dict()
+            unsafe["payload"] = dict(response.payload, **{field: "hidden"})
+            self.assert_code(unsafe, RefusalCode.REQUEST_INVALID.value)
 
     def test_unknown_and_arbitrary_authority_fields_are_distinct(self) -> None:
         unknown = dict(TRANSFER, surprise="x")

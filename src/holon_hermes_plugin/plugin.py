@@ -16,6 +16,7 @@ from .guard import (
 )
 
 HEALTH_TOOL = "holon_health"
+OPEN_WALLET_TOOL = "holon_open_wallet"
 PILOT_BLOCKED_TOOL = "terminal"
 
 
@@ -37,7 +38,7 @@ class PluginRuntime:
         return json.dumps(
             {
                 "status": status,
-                "capabilities": ["health"],
+                "capabilities": ["health", "open_wallet"],
                 "authority_available": False,
                 "guard_status": health.availability.value,
                 "guard_state": health.state.value,
@@ -56,6 +57,40 @@ class PluginRuntime:
             return self._health_response(health)
         except Exception:
             return self._health_response(GuardHealth.uncertain())
+
+    def handle_open_wallet(self, params: Optional[dict] = None, **kwargs: Any) -> str:
+        del params, kwargs
+        try:
+            response = self._connector.open_wallet()
+            payload = response.payload
+            if response.kind.value == "wallet_opened":
+                return json.dumps(
+                    {
+                        "status": payload["wallet_state"],
+                        "capabilities": ["health", "open_wallet"],
+                        "authority_available": False,
+                        "code": payload["code"],
+                        "message": payload["message"],
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            code = "WALLET_UNAVAILABLE"
+            message = "Wallet could not be opened."
+        except Exception:
+            code = "WALLET_UNAVAILABLE"
+            message = "Wallet could not be opened."
+        return json.dumps(
+            {
+                "status": "DEGRADED",
+                "capabilities": ["health", "open_wallet"],
+                "authority_available": False,
+                "code": code,
+                "message": message,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
 
     def on_session_start(self, **kwargs: Any) -> None:
         del kwargs
@@ -96,6 +131,10 @@ def _handle_health(params: Optional[dict] = None, **kwargs: Any) -> str:
     return _runtime.handle_health(params, **kwargs)
 
 
+def _handle_open_wallet(params: Optional[dict] = None, **kwargs: Any) -> str:
+    return _runtime.handle_open_wallet(params, **kwargs)
+
+
 def _on_session_start(**kwargs: Any) -> None:
     _runtime.on_session_start(**kwargs)
 
@@ -115,6 +154,20 @@ def register(ctx: Any) -> None:
         },
         handler=_handle_health,
         description="Return safe Holon health status.",
+    )
+    ctx.register_tool(
+        name=OPEN_WALLET_TOOL,
+        toolset="holon",
+        schema={
+            "name": OPEN_WALLET_TOOL,
+            "description": "Open or activate the local Holon Wallet.",
+            "parameters": {
+                "type": "object", "properties": {}, "required": [],
+                "additionalProperties": False,
+            },
+        },
+        handler=_handle_open_wallet,
+        description="Open or activate the local Holon Wallet.",
     )
     ctx.register_hook("on_session_start", _on_session_start)
     ctx.register_hook("pre_tool_call", _on_pre_tool_call)

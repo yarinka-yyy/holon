@@ -22,7 +22,12 @@ from .lock import GuardAlreadyRunning, SingleInstanceLock
 from .runtime_security import load_authority_audit
 from .server import GuardServer
 from .store import SnapshotStore
-from .wallet import UnavailableWalletController, WindowsOwnerProbe
+from .wallet import (
+    UnavailableWalletController,
+    VerifiedWalletController,
+    WalletController,
+    WindowsOwnerProbe,
+)
 
 
 def _default_data_dir() -> Path:
@@ -41,6 +46,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--app-root", type=Path, default=None)
     parser.add_argument("--plugin-root", type=Path, default=None)
     parser.add_argument("--hermes-version", default="")
+    parser.add_argument("--wallet-path", type=Path, default=None)
     return parser
 
 
@@ -53,6 +59,21 @@ def _integrity_failure(args: argparse.Namespace) -> str | None:
         args.manifest_path, args.app_root, args.plugin_root, args.hermes_version,
     )
     return None if result.ok else result.code
+
+
+def _wallet_controller(
+    args: argparse.Namespace,
+    install_failure: str | None,
+) -> WalletController:
+    if install_failure is not None:
+        return UnavailableWalletController()
+    if args.require_install_integrity:
+        if args.app_root is None:
+            return UnavailableWalletController()
+        return VerifiedWalletController(args.app_root / "HolonWallet.exe")
+    if args.wallet_path is None:
+        return UnavailableWalletController()
+    return VerifiedWalletController(args.wallet_path)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -74,12 +95,15 @@ def main(argv: list[str] | None = None) -> int:
             except PolicyLoadError as exc:
                 policy = Policy("1", "1", False, ())
                 policy_failure = exc.code
+            install_failure = _integrity_failure(args)
             ledger = ActionLedger(action_store, action_snapshot)
             lifecycle = GuardLifecycle.restore(
-                store, UnavailableWalletController(), WindowsOwnerProbe(), ledger
+                store,
+                _wallet_controller(args, install_failure),
+                WindowsOwnerProbe(),
+                ledger,
             )
             audit, audit_failure = load_authority_audit(data_dir)
-            install_failure = _integrity_failure(args)
             failure = install_failure or audit_failure or policy_failure or action_failure
             if failure is not None:
                 lifecycle.disable_signing(failure)

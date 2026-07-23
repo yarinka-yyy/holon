@@ -42,6 +42,24 @@ Item {
         MainnetResultPage { objectName: "mainnetResultPage"; anchors.fill: parent; active: walletController.currentScreen === "transfer_result" }
         UnavailablePage { objectName: "unavailablePage"; anchors.fill: parent; active: walletController.currentScreen === "unavailable" }
         Chrome { anchors.fill: parent; window: walletWindow; z: 50 }
+
+        Rectangle {
+            id: guardBanner
+            objectName: "guardOpenBanner"
+            x: 52; y: 88; width: 410; height: 54; radius: 14; z: 60
+            visible: walletController.guardOpenNotice.length > 0
+            color: Design.accentSoft; border.width: 1; border.color: Design.accent
+
+            Text {
+                anchors.centerIn: parent
+                width: parent.width - 32
+                text: walletController.guardOpenNotice
+                color: Design.text; font.family: Design.fontFamily
+                font.pixelSize: 14; font.weight: Font.DemiBold
+                horizontalAlignment: Text.AlignHCenter
+                elide: Text.ElideRight
+            }
+        }
     }
     ResizeFrame { anchors.fill: parent; window: walletWindow; z: 100 }
 }

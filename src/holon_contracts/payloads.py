@@ -77,6 +77,12 @@ def _response(kind: MessageKind, payload: Mapping[str, Any]) -> None:
         raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid authority status.")
     if kind is MessageKind.HEALTH_RESPONSE and payload.get("compatibility") not in {"COMPATIBLE", "INCOMPATIBLE"}:
         raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid compatibility status.")
+    if kind is MessageKind.WALLET_OPENED and payload.get("wallet_state") not in {
+        "OPENED", "ACTIVATED",
+    }:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Wallet state.")
+    if kind is MessageKind.WALLET_OPENED and payload.get("authority_available") is not False:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid authority status.")
     if kind is MessageKind.COMPATIBILITY_STATUS:
         if payload.get("supported_schema_versions") != [SCHEMA_VERSION]:
             raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid schema list.")

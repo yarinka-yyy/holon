@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from holon_contracts import ContractEnvelope
+
 from holon_guard_ipc import (
     PROTECTED_STATES,
     GuardAvailability,
@@ -20,6 +22,8 @@ from .launcher import (
 
 class GuardClient(Protocol):
     def probe(self) -> GuardHealth: ...
+
+    def open_wallet(self) -> ContractEnvelope: ...
 
 
 class GuardLauncher(Protocol):
@@ -68,3 +72,9 @@ class GuardConnector:
         except Exception:
             return GuardHealth.unavailable()
         return self.probe()
+
+    def open_wallet(self) -> ContractEnvelope:
+        health = self.ensure_available()
+        if health.availability is not GuardAvailability.AVAILABLE:
+            raise RuntimeError("Guard is unavailable")
+        return self._client.open_wallet()

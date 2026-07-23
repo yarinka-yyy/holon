@@ -746,6 +746,24 @@ def test_resize_close_and_idle_first_run_create_no_files(wallet_app, qt_app) -> 
     assert list(repository.paths.data_dir.iterdir()) == []
 
 
+def test_guard_banner_is_public_timed_and_never_navigates(wallet_app, qt_app) -> None:
+    app, _ = wallet_app
+    banner = child(app, "guardOpenBanner")
+    for screen in ("welcome", "password", "main", "transfer_review"):
+        app.controller._set_screen(screen)
+        app.controller.showGuardOpenNotice()
+        qt_app.processEvents()
+        assert app.controller.currentScreen == screen
+        assert banner.property("visible")
+        assert app.controller.guardOpenNotice == (
+            "Opened by Guard · no Guard action authorized"
+        )
+        assert app.controller._guard_notice_timer.interval() == 6_000
+        app.controller._clear_guard_notice()
+        qt_app.processEvents()
+        assert not banner.property("visible")
+
+
 def test_network_filters_refresh_and_history_record_render(tmp_path, qt_app) -> None:
     repository = VaultRepository(WalletPaths(tmp_path))
     password = fresh_password()

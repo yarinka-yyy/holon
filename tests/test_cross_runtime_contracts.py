@@ -48,10 +48,12 @@ class CrossRuntimeContractTests(unittest.TestCase):
             "from holon_guard.request_control import RequestController\n"
             "from holon_guard.request_store import RequestStateStore\n"
             "from holon_guard.server import GuardServer\n"
+            "from holon_guard.wallet import WalletOpenResult\n"
             "from holon_journal import Journal,JournalStore\n"
             "from holon_policy import Policy,PolicyEngine\n"
             "class H:\n    pid=202\n    def poll(self): return None\n"
             "class W:\n    def open_or_activate(self,flow_id): return H()\n"
+            "    def open_public(self): return WalletOpenResult(True,'ACTIVATED','WALLET_ACTIVATED','Wallet is open.')\n"
             "    def request_close(self,handle): pass\n"
             "class O:\n    def is_alive(self,pid): return True\n"
             f"r=Path({str(self.root)!r})\ns=SnapshotStore(r/'guard-state.json')\n"
@@ -77,10 +79,11 @@ class CrossRuntimeContractTests(unittest.TestCase):
             "'max_total_fee_wei':'500'};"
             f"c=PipeClient({self.pipe!r},2.0,1.0);"
             "h=c.request(MessageKind.HEALTH_REQUEST);"
+            "o=c.request(MessageKind.OPEN_WALLET);"
             "a=c.exchange(make_envelope(MessageKind.PREPARE_TRANSFER,p,action_id=new_action_id()),os.getpid());"
             "b=c.exchange(make_envelope(MessageKind.PREPARE_TRANSFER,p,action_id=new_action_id()),os.getpid());"
             "d=c.exchange(make_envelope(MessageKind.PREPARE_TRANSFER,p,action_id=new_action_id()),os.getpid());"
-            "print(json.dumps([h.to_dict(),a.to_dict(),b.to_dict(),d.to_dict()]))"
+            "print(json.dumps([h.to_dict(),o.to_dict(),a.to_dict(),b.to_dict(),d.to_dict()]))"
         )
 
     def _stop(self) -> None:
@@ -103,8 +106,9 @@ class CrossRuntimeContractTests(unittest.TestCase):
             [self.hermes, "-I", "-c", self._client_code()], check=True,
             capture_output=True, text=True, timeout=8, creationflags=0x08000000,
         )
-        health, allowed, active, blocked = json.loads(completed.stdout)
+        health, opened, allowed, active, blocked = json.loads(completed.stdout)
         self.assertEqual(health["payload"]["guard_state"], "NORMAL")
+        self.assertEqual(opened["payload"]["wallet_state"], "ACTIVATED")
         self.assertEqual(allowed["kind"], "protected_flow_started")
         self.assertEqual(active["payload"]["code"], "ACTION_ALREADY_ACTIVE")
         self.assertEqual(blocked["payload"]["code"], "REQUEST_TEMPORARILY_BLOCKED")

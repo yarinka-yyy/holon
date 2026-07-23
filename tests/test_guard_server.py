@@ -11,6 +11,7 @@ from pathlib import Path
 from holon_contracts import MessageKind
 from holon_guard import GuardLifecycle, SnapshotStore
 from holon_guard.authority import AuthorityService
+from holon_guard.wallet import WalletOpenResult
 from holon_guard.server import GuardServer
 from holon_guard_ipc import MAX_MESSAGE_BYTES, PipeClient, PipeProtocolError, PipeUnavailable
 from holon_guard_ipc.codec import decode_message, validate_response
@@ -35,6 +36,11 @@ class MockWallet:
 
     def request_close(self, handle: RunningHandle) -> None:
         handle.exit_code = 0
+
+    def open_public(self) -> WalletOpenResult:
+        return WalletOpenResult(
+            True, "ACTIVATED", "WALLET_ACTIVATED", "Wallet is open.",
+        )
 
 
 class LiveOwner:
@@ -77,6 +83,14 @@ class GuardServerTests(unittest.TestCase):
         self.assertEqual(health.payload["guard_state"], "NORMAL")
         replay = self.client.exchange(transfer_request(), owner_pid=101)
         self.assertEqual(replay.payload["code"], "ACTION_REPLAYED")
+
+    def test_public_open_round_trip_has_no_process_metadata_or_action(self) -> None:
+        opened = self.client.request(MessageKind.OPEN_WALLET)
+        self.assertEqual(opened.kind, MessageKind.WALLET_OPENED)
+        self.assertNotIn("action_id", opened.to_dict())
+        serialized = str(opened.to_dict()).lower()
+        for field in ("pid", "path", "pipe", "launch_id", "flow_id"):
+            self.assertNotIn(field, serialized)
 
     def test_malformed_oversized_and_legacy_frames_are_safe(self) -> None:
         legacy = b'{"ipc_version":"1","command":"health","payload":{}}'
