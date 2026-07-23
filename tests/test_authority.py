@@ -8,7 +8,7 @@ from pathlib import Path
 from holon_contracts import MessageKind, make_envelope
 from holon_guard import GuardLifecycle, SnapshotStore
 from holon_guard.authority import AuthorityService
-from holon_guard.wallet import WalletOpenResult
+from holon_guard.wallet import WalletBalancesResult, WalletOpenResult
 from holon_policy import Policy, PolicyEngine
 from guard_support import (
     ACTION_ID, ACTION_ID_2, enabled_policy, make_audit, make_ledger, transfer_request,
@@ -43,6 +43,29 @@ class Wallet:
         self.open_calls += 1
         return WalletOpenResult(
             True, "ACTIVATED", "WALLET_ACTIVATED", "Wallet is open.",
+        )
+
+    def read_public_balances(self) -> WalletBalancesResult:
+        networks = [
+            {
+                "network": network, "chain_id": chain_id,
+                "status": "UNAVAILABLE", "block_number": None,
+                "updated_at": None, "error_code": "RPC_UNAVAILABLE",
+                "balances": None,
+            }
+            for network, chain_id in (("ethereum", 1), ("base", 8453))
+        ]
+        return WalletBalancesResult(
+            True,
+            {
+                "status": "DEGRADED", "authority_available": False,
+                "account": {
+                    "label": "Account 1",
+                    "address": "0x1111111111111111111111111111111111111111",
+                },
+                "networks": networks, "code": "BALANCES_UNAVAILABLE",
+                "message": "Wallet balances are unavailable.",
+            },
         )
 
 
@@ -148,6 +171,30 @@ class AuthorityTests(unittest.TestCase):
         self.assertNotIn("private", str(response.to_dict()).lower())
         self.assertEqual(self.lifecycle.snapshot.state.value, "NORMAL")
         self.assertIsNone(self.lifecycle.ledger.snapshot.current)
+
+    def test_public_balances_preserve_guard_state_and_create_no_action(self) -> None:
+        request = make_envelope(MessageKind.READ_WALLET_BALANCES, {})
+        response = self.service.handle(request, owner_pid=None)
+        self.assertEqual(response.kind, MessageKind.WALLET_BALANCES)
+        self.assertEqual(response.payload["status"], "DEGRADED")
+        self.assertFalse(response.payload["authority_available"])
+        self.assertNotIn("action_id", response.to_dict())
+        self.assertIsNone(self.lifecycle.ledger.snapshot.current)
+        self.lifecycle.disable_signing("POLICY_AUTHORITY_DISABLED")
+        disabled = self.service.handle(request, owner_pid=None)
+        self.assertEqual(disabled.kind, MessageKind.WALLET_BALANCES)
+
+    def test_public_balance_failure_is_generic(self) -> None:
+        def fail():
+            raise RuntimeError("private endpoint and query detail")
+
+        self.wallet.read_public_balances = fail  # type: ignore[method-assign]
+        response = self.service.handle(
+            make_envelope(MessageKind.READ_WALLET_BALANCES, {}), None,
+        )
+        self.assertEqual(response.kind, MessageKind.ERROR)
+        self.assertEqual(response.payload["code"], "WALLET_BALANCES_UNAVAILABLE")
+        self.assertNotIn("private", str(response.to_dict()).lower())
 
 
 if __name__ == "__main__":

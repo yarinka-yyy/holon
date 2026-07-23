@@ -126,6 +126,22 @@ class AuthorityService(ResponseMixin):
                     "message": "Wallet is open.",
                 },
             )
+        if request.kind is MessageKind.READ_WALLET_BALANCES:
+            try:
+                result = self.lifecycle.wallet.read_public_balances()
+            except Exception:
+                result = None
+            if result is None or not result.ok or result.payload is None:
+                return self.error(
+                    request,
+                    "WALLET_BALANCES_UNAVAILABLE",
+                    "Wallet balances are unavailable.",
+                )
+            return self._response(
+                request,
+                MessageKind.WALLET_BALANCES,
+                result.payload,
+            )
         if request.kind is MessageKind.PREPARE_TRANSFER:
             if self.security_failure is not None:
                 return self.security_response(request)

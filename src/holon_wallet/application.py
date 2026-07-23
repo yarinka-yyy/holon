@@ -195,7 +195,14 @@ class WalletApplication:
             self.controller.shutdown()
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments == ["--public-balances-worker"]:
+        from .public_worker import run_public_balances_worker
+
+        return run_public_balances_worker()
+    if arguments:
+        return 2
     instance = ProcessInstance(MUTEX_NAME, WINDOW_TITLE)
     if not instance.acquire():
         return 0

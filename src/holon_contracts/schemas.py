@@ -25,6 +25,7 @@ REQUEST_KINDS = frozenset(
     {
         MessageKind.HEALTH_REQUEST,
         MessageKind.OPEN_WALLET,
+        MessageKind.READ_WALLET_BALANCES,
         MessageKind.PREPARE_TRANSFER,
         MessageKind.ACTION_STATUS_REQUEST,
         MessageKind.CANCEL_ACTION,
@@ -35,6 +36,7 @@ REQUEST_KINDS = frozenset(
 PAYLOAD_FIELDS = {
     MessageKind.HEALTH_REQUEST: frozenset(),
     MessageKind.OPEN_WALLET: frozenset(),
+    MessageKind.READ_WALLET_BALANCES: frozenset(),
     MessageKind.PREPARE_TRANSFER: frozenset(
         {
             "policy_version",
@@ -54,6 +56,9 @@ PAYLOAD_FIELDS = {
     ),
     MessageKind.WALLET_OPENED: frozenset(
         {"guard_state", "authority_available", "wallet_state", "code", "message"}
+    ),
+    MessageKind.WALLET_BALANCES: frozenset(
+        {"status", "authority_available", "account", "networks", "code", "message"}
     ),
     MessageKind.PROTECTED_FLOW_STARTED: frozenset(
         {"guard_state", "action_state", "flow_id", "code", "message"}

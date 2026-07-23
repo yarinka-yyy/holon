@@ -172,6 +172,60 @@ class GuardWalletTests(unittest.TestCase):
         self.assertEqual(spawned, [])
         self.assertNotIn("mismatch", result.message)
 
+    def test_public_balances_spawn_one_hidden_worker_and_read_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "HolonWallet.exe"
+            path.write_bytes(b"fixture")
+            reads: list[tuple[str, Path, float, float]] = []
+
+            class PublicControl:
+                def read(
+                    self, query_id: str, expected: Path,
+                    readiness_timeout: float, response_timeout: float,
+                ) -> dict[str, object]:
+                    reads.append((query_id, expected, readiness_timeout, response_timeout))
+                    return {"status": "READY"}
+
+            spawned: list[tuple[object, object]] = []
+            controller = VerifiedWalletController(
+                path,
+                process_factory=lambda *args, **kwargs: spawned.append((args, kwargs)),
+                public_control=PublicControl(),  # type: ignore[arg-type]
+            )
+            result = controller.read_public_balances()
+        self.assertTrue(result.ok)
+        self.assertEqual(result.payload, {"status": "READY"})
+        self.assertEqual(len(spawned), 1)
+        self.assertEqual(
+            spawned[0][0][0], [str(path.resolve()), "--public-balances-worker"],
+        )
+        self.assertFalse(spawned[0][1]["shell"])
+        self.assertEqual(len(reads), 1)
+
+    def test_public_balance_failure_does_not_retry_or_expose_detail(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "HolonWallet.exe"
+            path.write_bytes(b"fixture")
+            calls = 0
+
+            class PublicControl:
+                def read(self, *args, **kwargs):
+                    nonlocal calls
+                    del args, kwargs
+                    calls += 1
+                    raise ControlProtocolError("sensitive path and query")
+
+            spawned: list[object] = []
+            result = VerifiedWalletController(
+                path,
+                process_factory=lambda *args, **kwargs: spawned.append(args),
+                public_control=PublicControl(),  # type: ignore[arg-type]
+            ).read_public_balances()
+        self.assertFalse(result.ok)
+        self.assertIsNone(result.payload)
+        self.assertEqual(calls, 1)
+        self.assertEqual(len(spawned), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

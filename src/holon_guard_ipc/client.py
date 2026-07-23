@@ -47,7 +47,8 @@ class PipeClient:
         self.response_timeout = response_timeout
 
     def exchange(
-        self, envelope: ContractEnvelope, owner_pid: int | None = None
+        self, envelope: ContractEnvelope, owner_pid: int | None = None,
+        response_timeout: float | None = None,
     ) -> ContractEnvelope:
         request = encode_message(make_request(envelope, owner_pid))
         wait_for_pipe(self.pipe_name, self.connect_timeout)
@@ -58,7 +59,9 @@ class PipeClient:
         try:
             with connection:
                 connection.send_bytes(request)
-                if not connection.poll(self.response_timeout):
+                if not connection.poll(
+                    self.response_timeout if response_timeout is None else response_timeout,
+                ):
                     raise PipeProtocolError("Guard response timed out")
                 response = decode_message(connection.recv_bytes(MAX_MESSAGE_BYTES + 1))
         except PipeProtocolError:
@@ -76,8 +79,13 @@ class PipeClient:
     def request(
         self, kind: MessageKind, payload: dict | None = None, *,
         action_id: str | None = None, owner_pid: int | None = None,
+        response_timeout: float | None = None,
     ) -> ContractEnvelope:
-        return self.exchange(make_envelope(kind, payload or {}, action_id=action_id), owner_pid)
+        return self.exchange(
+            make_envelope(kind, payload or {}, action_id=action_id),
+            owner_pid,
+            response_timeout,
+        )
 
 
 class PipeGuardClient:
@@ -96,3 +104,9 @@ class PipeGuardClient:
 
     def open_wallet(self) -> ContractEnvelope:
         return self.client.request(MessageKind.OPEN_WALLET)
+
+    def wallet_balances(self) -> ContractEnvelope:
+        return self.client.request(
+            MessageKind.READ_WALLET_BALANCES,
+            response_timeout=35.0,
+        )

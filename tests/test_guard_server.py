@@ -11,7 +11,7 @@ from pathlib import Path
 from holon_contracts import MessageKind
 from holon_guard import GuardLifecycle, SnapshotStore
 from holon_guard.authority import AuthorityService
-from holon_guard.wallet import WalletOpenResult
+from holon_guard.wallet import WalletBalancesResult, WalletOpenResult
 from holon_guard.server import GuardServer
 from holon_guard_ipc import MAX_MESSAGE_BYTES, PipeClient, PipeProtocolError, PipeUnavailable
 from holon_guard_ipc.codec import decode_message, validate_response
@@ -40,6 +40,26 @@ class MockWallet:
     def open_public(self) -> WalletOpenResult:
         return WalletOpenResult(
             True, "ACTIVATED", "WALLET_ACTIVATED", "Wallet is open.",
+        )
+
+    def read_public_balances(self) -> WalletBalancesResult:
+        return WalletBalancesResult(
+            True,
+            {
+                "status": "DEGRADED", "authority_available": False,
+                "account": None,
+                "networks": [
+                    {
+                        "network": network, "chain_id": chain_id,
+                        "status": "UNAVAILABLE", "block_number": None,
+                        "updated_at": None, "error_code": "WALLET_NOT_CREATED",
+                        "balances": None,
+                    }
+                    for network, chain_id in (("ethereum", 1), ("base", 8453))
+                ],
+                "code": "WALLET_NOT_CREATED",
+                "message": "Wallet has not been created.",
+            },
         )
 
 
@@ -90,6 +110,16 @@ class GuardServerTests(unittest.TestCase):
         self.assertNotIn("action_id", opened.to_dict())
         serialized = str(opened.to_dict()).lower()
         for field in ("pid", "path", "pipe", "launch_id", "flow_id"):
+            self.assertNotIn(field, serialized)
+
+    def test_public_balance_round_trip_has_no_process_metadata_or_action(self) -> None:
+        balances = self.client.request(
+            MessageKind.READ_WALLET_BALANCES, response_timeout=2.0,
+        )
+        self.assertEqual(balances.kind, MessageKind.WALLET_BALANCES)
+        self.assertNotIn("action_id", balances.to_dict())
+        serialized = str(balances.to_dict()).lower()
+        for field in ("pid", "path", "pipe", "query_id", "ciphertext"):
             self.assertNotIn(field, serialized)
 
     def test_malformed_oversized_and_legacy_frames_are_safe(self) -> None:

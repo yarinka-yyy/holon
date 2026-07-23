@@ -1,8 +1,10 @@
 name: holon
 version: "0.1.0a0"
-description: "Holon health capability and protected-turn boundary for Hermes."
+description: "Holon public Wallet capabilities and protected-turn boundary for Hermes."
 provides_tools:
   - holon_health
+  - holon_open_wallet
+  - holon_wallet_balances
 provides_hooks:
   - on_session_start
   - pre_tool_call

@@ -33,6 +33,38 @@ class StaticConnector:
             },
         )
 
+    def wallet_balances(self):
+        return make_envelope(
+            MessageKind.WALLET_BALANCES,
+            {
+                "status": "PARTIAL",
+                "authority_available": False,
+                "account": {
+                    "label": "Account 1",
+                    "address": "0x1111111111111111111111111111111111111111",
+                },
+                "networks": [
+                    {
+                        "network": "ethereum", "chain_id": 1, "status": "LIVE",
+                        "block_number": "123", "updated_at": "2026-07-23T12:00:00Z",
+                        "error_code": None,
+                        "balances": {
+                            "ETH": {"asset": "ETH", "amount_atomic": "0", "decimals": 18, "display": "0 ETH"},
+                            "USDC": {"asset": "USDC", "amount_atomic": "0", "decimals": 6, "display": "0 USDC"},
+                        },
+                    },
+                    {
+                        "network": "base", "chain_id": 8453,
+                        "status": "UNAVAILABLE", "block_number": None,
+                        "updated_at": None, "error_code": "RPC_TIMEOUT",
+                        "balances": None,
+                    },
+                ],
+                "code": "BALANCES_PARTIAL",
+                "message": "Some Wallet balances are unavailable.",
+            },
+        )
+
 
 class RaisingConnector:
     def probe(self) -> GuardHealth:
@@ -55,12 +87,12 @@ class FakeContext:
 
 
 class PluginTests(unittest.TestCase):
-    def test_registers_health_and_open_wallet_tools_and_two_hooks(self) -> None:
+    def test_registers_three_public_tools_and_two_hooks(self) -> None:
         context = FakeContext()
         plugin.register(context)
         self.assertEqual(
             [tool["name"] for tool in context.tools],
-            ["holon_health", "holon_open_wallet"],
+            ["holon_health", "holon_open_wallet", "holon_wallet_balances"],
         )
         self.assertEqual([name for name, _ in context.hooks], ["on_session_start", "pre_tool_call"])
 
@@ -68,7 +100,9 @@ class PluginTests(unittest.TestCase):
         runtime = plugin.PluginRuntime(StaticConnector(GuardHealth.available(GuardState.NORMAL)))
         payload = json.loads(runtime.handle_health({"secret": "must-not-return"}))
         self.assertEqual(payload["status"], "READY")
-        self.assertEqual(payload["capabilities"], ["health", "open_wallet"])
+        self.assertEqual(
+            payload["capabilities"], ["health", "open_wallet", "wallet_balances"],
+        )
         self.assertFalse(payload["authority_available"])
         self.assertNotIn("must-not-return", json.dumps(payload))
         self.assertNotIn("pid", runtime.handle_health().lower())
@@ -87,6 +121,21 @@ class PluginTests(unittest.TestCase):
         payload = json.loads(plugin.PluginRuntime(RaisingConnector()).handle_open_wallet())
         self.assertEqual(payload["status"], "DEGRADED")
         self.assertEqual(payload["code"], "WALLET_UNAVAILABLE")
+
+    def test_balance_tool_returns_public_snapshot_without_echoing_arguments(self) -> None:
+        runtime = plugin.PluginRuntime(StaticConnector(GuardHealth.available(GuardState.NORMAL)))
+        payload = json.loads(runtime.handle_wallet_balances({"password": "hidden"}))
+        self.assertEqual(payload["status"], "PARTIAL")
+        self.assertEqual([item["network"] for item in payload["networks"]], ["ethereum", "base"])
+        self.assertNotIn("hidden", json.dumps(payload))
+        self.assertNotIn("password", json.dumps(payload).lower())
+
+    def test_unavailable_balance_tool_keeps_two_networks_nonzero_ambiguous(self) -> None:
+        payload = json.loads(plugin.PluginRuntime(RaisingConnector()).handle_wallet_balances())
+        self.assertEqual(payload["status"], "DEGRADED")
+        self.assertEqual(payload["code"], "WALLET_BALANCES_UNAVAILABLE")
+        self.assertEqual(len(payload["networks"]), 2)
+        self.assertTrue(all(item["balances"] is None for item in payload["networks"]))
 
     def test_health_exception_returns_generic_uncertain_response(self) -> None:
         payload = json.loads(plugin.PluginRuntime(RaisingConnector()).handle_health())

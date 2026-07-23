@@ -7,6 +7,13 @@ from .protocol import (
     WalletControlClient,
     WalletControlServer,
 )
+from .public_protocol import (
+    MAX_PUBLIC_BYTES,
+    PUBLIC_PIPE_NAME,
+    PUBLIC_VERSION,
+    WalletPublicClient,
+    WalletPublicServer,
+)
 
 __all__ = [
     "CONTROL_PIPE_NAME",
@@ -14,4 +21,9 @@ __all__ = [
     "ControlUnavailable",
     "WalletControlClient",
     "WalletControlServer",
+    "MAX_PUBLIC_BYTES",
+    "PUBLIC_PIPE_NAME",
+    "PUBLIC_VERSION",
+    "WalletPublicClient",
+    "WalletPublicServer",
 ]

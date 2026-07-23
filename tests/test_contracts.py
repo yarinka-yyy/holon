@@ -59,6 +59,12 @@ class ContractTests(unittest.TestCase):
         )
         self.assertEqual(parse_envelope(open_wallet.to_dict()), open_wallet)
         self.assertNotIn("action_id", open_wallet.to_dict())
+        balances = make_envelope(
+            MessageKind.READ_WALLET_BALANCES, {}, request_id=REQUEST_ID,
+            timestamp=TIMESTAMP,
+        )
+        self.assertEqual(parse_envelope(balances.to_dict()), balances)
+        self.assertNotIn("action_id", balances.to_dict())
 
     def test_open_wallet_and_wallet_opened_are_strict_and_safe(self) -> None:
         request = make_envelope(
@@ -87,6 +93,64 @@ class ContractTests(unittest.TestCase):
             unsafe = response.to_dict()
             unsafe["payload"] = dict(response.payload, **{field: "hidden"})
             self.assert_code(unsafe, RefusalCode.REQUEST_INVALID.value)
+
+    def test_wallet_balances_are_strict_nested_and_public_only(self) -> None:
+        assets = {
+            "ETH": {
+                "asset": "ETH", "amount_atomic": "1000000000000000000",
+                "decimals": 18, "display": "1 ETH",
+            },
+            "USDC": {
+                "asset": "USDC", "amount_atomic": "2500000",
+                "decimals": 6, "display": "2.5 USDC",
+            },
+        }
+        response = make_envelope(
+            MessageKind.WALLET_BALANCES,
+            {
+                "status": "READY",
+                "authority_available": False,
+                "account": {
+                    "label": "Account 1",
+                    "address": "0x1111111111111111111111111111111111111111",
+                },
+                "networks": [
+                    {
+                        "network": "ethereum", "chain_id": 1, "status": "LIVE",
+                        "block_number": "123", "updated_at": TIMESTAMP,
+                        "error_code": None, "balances": assets,
+                    },
+                    {
+                        "network": "base", "chain_id": 8453, "status": "LIVE",
+                        "block_number": "456", "updated_at": TIMESTAMP,
+                        "error_code": None, "balances": assets,
+                    },
+                ],
+                "code": "BALANCES_READY",
+                "message": "Wallet balances are available.",
+            },
+            request_id=REQUEST_ID,
+            timestamp=TIMESTAMP,
+        )
+        self.assertEqual(parse_envelope(response.to_dict()), response)
+        for mutation in (
+            lambda value: value["payload"].update({"ciphertext": "secret"}),
+            lambda value: value["payload"]["networks"].reverse(),
+            lambda value: value["payload"]["networks"][0]["balances"]["ETH"].update(
+                {"amount_atomic": "1.0"},
+            ),
+            lambda value: value["payload"].update({"status": "PARTIAL"}),
+        ):
+            invalid = response.to_dict()
+            mutation(invalid)
+            self.assert_code(invalid, RefusalCode.REQUEST_INVALID.value)
+
+        request = make_envelope(
+            MessageKind.READ_WALLET_BALANCES, {}, request_id=REQUEST_ID,
+            timestamp=TIMESTAMP,
+        ).to_dict()
+        request["payload"] = {"address": "0x" + "1" * 40}
+        self.assert_code(request, RefusalCode.REQUEST_INVALID.value)
 
     def test_unknown_and_arbitrary_authority_fields_are_distinct(self) -> None:
         unknown = dict(TRANSFER, surprise="x")

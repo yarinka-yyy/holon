@@ -25,6 +25,8 @@ class GuardClient(Protocol):
 
     def open_wallet(self) -> ContractEnvelope: ...
 
+    def wallet_balances(self) -> ContractEnvelope: ...
+
 
 class GuardLauncher(Protocol):
     def start(self) -> None: ...
@@ -33,6 +35,12 @@ class GuardLauncher(Protocol):
 class UnavailableGuardClient:
     def probe(self) -> GuardHealth:
         return GuardHealth.unavailable()
+
+    def open_wallet(self) -> ContractEnvelope:
+        raise RuntimeError("Guard is unavailable")
+
+    def wallet_balances(self) -> ContractEnvelope:
+        raise RuntimeError("Guard is unavailable")
 
 
 class GuardConnector:
@@ -78,3 +86,9 @@ class GuardConnector:
         if health.availability is not GuardAvailability.AVAILABLE:
             raise RuntimeError("Guard is unavailable")
         return self._client.open_wallet()
+
+    def wallet_balances(self) -> ContractEnvelope:
+        health = self.ensure_available()
+        if health.availability is not GuardAvailability.AVAILABLE:
+            raise RuntimeError("Guard is unavailable")
+        return self._client.wallet_balances()

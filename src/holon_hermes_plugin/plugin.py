@@ -17,7 +17,33 @@ from .guard import (
 
 HEALTH_TOOL = "holon_health"
 OPEN_WALLET_TOOL = "holon_open_wallet"
+WALLET_BALANCES_TOOL = "holon_wallet_balances"
 PILOT_BLOCKED_TOOL = "terminal"
+CAPABILITIES = ["health", "open_wallet", "wallet_balances"]
+
+
+def _unavailable_balances() -> dict[str, Any]:
+    networks = []
+    for network, chain_id in (("ethereum", 1), ("base", 8453)):
+        networks.append(
+            {
+                "network": network,
+                "chain_id": chain_id,
+                "status": "UNAVAILABLE",
+                "block_number": None,
+                "updated_at": None,
+                "error_code": "WALLET_BALANCES_UNAVAILABLE",
+                "balances": None,
+            }
+        )
+    return {
+        "status": "DEGRADED",
+        "authority_available": False,
+        "account": None,
+        "networks": networks,
+        "code": "WALLET_BALANCES_UNAVAILABLE",
+        "message": "Wallet balances are unavailable.",
+    }
 
 
 class PluginRuntime:
@@ -38,7 +64,7 @@ class PluginRuntime:
         return json.dumps(
             {
                 "status": status,
-                "capabilities": ["health", "open_wallet"],
+                "capabilities": CAPABILITIES,
                 "authority_available": False,
                 "guard_status": health.availability.value,
                 "guard_state": health.state.value,
@@ -67,7 +93,7 @@ class PluginRuntime:
                 return json.dumps(
                     {
                         "status": payload["wallet_state"],
-                        "capabilities": ["health", "open_wallet"],
+                        "capabilities": CAPABILITIES,
                         "authority_available": False,
                         "code": payload["code"],
                         "message": payload["message"],
@@ -83,11 +109,31 @@ class PluginRuntime:
         return json.dumps(
             {
                 "status": "DEGRADED",
-                "capabilities": ["health", "open_wallet"],
+                "capabilities": CAPABILITIES,
                 "authority_available": False,
                 "code": code,
                 "message": message,
             },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+    def handle_wallet_balances(
+        self, params: Optional[dict] = None, **kwargs: Any,
+    ) -> str:
+        del params, kwargs
+        try:
+            response = self._connector.wallet_balances()
+            if response.kind.value == "wallet_balances":
+                return json.dumps(
+                    response.payload,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+        except Exception:
+            pass
+        return json.dumps(
+            _unavailable_balances(),
             ensure_ascii=False,
             separators=(",", ":"),
         )
@@ -135,6 +181,10 @@ def _handle_open_wallet(params: Optional[dict] = None, **kwargs: Any) -> str:
     return _runtime.handle_open_wallet(params, **kwargs)
 
 
+def _handle_wallet_balances(params: Optional[dict] = None, **kwargs: Any) -> str:
+    return _runtime.handle_wallet_balances(params, **kwargs)
+
+
 def _on_session_start(**kwargs: Any) -> None:
     _runtime.on_session_start(**kwargs)
 
@@ -168,6 +218,24 @@ def register(ctx: Any) -> None:
         },
         handler=_handle_open_wallet,
         description="Open or activate the local Holon Wallet.",
+    )
+    ctx.register_tool(
+        name=WALLET_BALANCES_TOOL,
+        toolset="holon",
+        schema={
+            "name": WALLET_BALANCES_TOOL,
+            "description": (
+                "Read live public ETH and USDC balances for the active Holon "
+                "Account on Ethereum and Base. Use when a request depends on "
+                "available Wallet funds."
+            ),
+            "parameters": {
+                "type": "object", "properties": {}, "required": [],
+                "additionalProperties": False,
+            },
+        },
+        handler=_handle_wallet_balances,
+        description="Read live public balances for the active Holon Account.",
     )
     ctx.register_hook("on_session_start", _on_session_start)
     ctx.register_hook("pre_tool_call", _on_pre_tool_call)
