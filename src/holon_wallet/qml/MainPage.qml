@@ -18,6 +18,23 @@ PageState {
                 x: 28; y: 4; text: "Holon Wallet"; color: Design.text
                 font.family: Design.fontFamily; font.pixelSize: 24; font.weight: Font.DemiBold
             }
+            Rectangle {
+                objectName: "signingLockedChip"
+                x: 186; y: 1; width: 126; height: 30; radius: 10
+                color: Design.surfaceSecondary; border.width: 1; border.color: Design.border
+                Image {
+                    x: 12; anchors.verticalCenter: parent.verticalCenter
+                    width: 14; height: 14; source: "assets/lock.svg"
+                    sourceSize: Qt.size(28, 28)
+                }
+                Text {
+                    objectName: "signingLockedChipLabel"
+                    x: 34; anchors.verticalCenter: parent.verticalCenter
+                    text: "Signing locked"; color: Design.textMuted
+                    font.family: Design.fontFamily; font.pixelSize: 12
+                    font.weight: Font.Medium
+                }
+            }
             AccountCard {
                 id: accountCard; objectName: "accountCard"
                 x: 28; y: 54; width: 458; height: 96

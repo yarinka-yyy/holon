@@ -153,22 +153,27 @@ def test_create_persists_only_after_backup_acknowledgement(tmp_path) -> None:
     assert item.profiles[0]["typeLabel"] == "Seed phrase"
 
 
-def test_locked_restart_rejects_wrong_password_without_session(tmp_path) -> None:
+def test_public_restart_opens_main_without_password_session(tmp_path) -> None:
     original = controller(tmp_path)
     secret = password()
     original.beginCreate()
     assert original.submitPassword(secret, secret)
     assert original.finishBackup()
+    second = original._repository.new_record(
+        import_private_key(raw_private_key()), "Account 2",
+    )
+    profiles = original._repository.append(secret, second)
+    original._replace_profiles(profiles, profiles[0].profile_id)
+    assert original.selectProfile(second.summary.profile_id)
 
     restarted = controller(tmp_path)
-    assert restarted.currentScreen == "password"
-    assert restarted.passwordTitle == "Unlock Wallet"
-    assert not restarted.passwordConfirmRequired
-    assert not restarted.submitPassword(password(), "")
-    assert restarted.errorMessage == "Authentication failed"
-    assert restarted.submitPassword(secret, "")
     assert restarted.currentScreen == "main"
+    assert len(restarted.profiles) == 2
+    assert restarted.activeProfile["label"] == "Account 2"
+    assert restarted.activeProfileId == second.summary.profile_id
+    assert not restarted.passwordConfirmRequired
     assert restarted.passwordTitle == "Enter Password"
+    assert not restarted.submitPassword(secret, "")
 
 
 def test_recovery_requires_new_exact_action_after_wrong_password(tmp_path) -> None:
@@ -217,7 +222,7 @@ def test_raw_key_recovery_refuses_seed_phrase_and_reveals_only_key(tmp_path) -> 
     item = controller(tmp_path)
     display = RecoveryDisplayStub()
     item.attach_recovery_display(display)  # type: ignore[arg-type]
-    assert item.submitPassword(secret, "")
+    assert item.currentScreen == "main"
 
     item.showRecoveryReview()
     assert item.recoverySelection == "private_key"
@@ -477,7 +482,7 @@ def test_wrong_password_cancel_and_late_execution_result_are_terminal(tmp_path) 
         receipt_executor=ImmediateExecutor(),
         price_service=StubPriceService(),
     )
-    assert second.submitPassword(secret, "")
+    assert second.currentScreen == "main"
     second.showSend()
     assert second.prepareTransfer("0x" + "55" * 20)
     deferred.run_next()
@@ -788,9 +793,20 @@ def test_corrupt_history_degrades_only_history_screen(tmp_path) -> None:
     assert item.profiles
 
 
-def test_public_refresh_never_authenticates_or_decrypts_vault(tmp_path, monkeypatch) -> None:
+def test_public_startup_and_refresh_never_authenticate_or_decrypt_vault(
+    tmp_path, monkeypatch,
+) -> None:
     repository = VaultRepository(WalletPaths(tmp_path))
+    secret = password()
+    repository.create_new(
+        secret, repository.new_record(generate_mnemonic(), "Main Account"),
+    )
     service = StubPublicDataService()
+
+    def forbidden_authentication(_password: str):
+        raise AssertionError("Public startup touched vault authentication")
+
+    monkeypatch.setattr(repository, "authenticate", forbidden_authentication)
     item = WalletController(
         repository,
         service,
@@ -799,15 +815,8 @@ def test_public_refresh_never_authenticates_or_decrypts_vault(tmp_path, monkeypa
         transfer_executor=ImmediateExecutor(),
         price_service=StubPriceService(),
     )
-    secret = password()
-    item.beginCreate()
-    assert item.submitPassword(secret, secret)
-    assert item.finishBackup()
-
-    def forbidden_authentication(_password: str):
-        raise AssertionError("Public refresh touched vault authentication")
-
-    monkeypatch.setattr(repository, "authenticate", forbidden_authentication)
+    assert item.currentScreen == "main"
+    assert service.calls[-1][2] == ("ethereum", "base")
     assert item.refreshPublicData()
     assert service.calls[-1][0] == item.activeProfileId
 

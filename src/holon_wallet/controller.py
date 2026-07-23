@@ -344,7 +344,6 @@ class WalletController(QObject):
     @Property(str, notify=flowChanged)
     def passwordTitle(self) -> str:
         return {
-            "unlock": "Unlock Wallet",
             "create": "Set Password",
             "first_import": "Set Password",
             "add_private": "Confirm Password",
@@ -353,7 +352,6 @@ class WalletController(QObject):
     @Property(str, notify=flowChanged)
     def passwordSubtitle(self) -> str:
         return {
-            "unlock": "Enter your password to continue",
             "create": "4 characters min · longer is safer",
             "first_import": "4 characters min · longer is safer",
             "add_private": "Fresh authentication is required",
@@ -361,7 +359,7 @@ class WalletController(QObject):
 
     @Property(str, notify=flowChanged)
     def passwordActionLabel(self) -> str:
-        return "Unlock" if self._flow == "unlock" else "Confirm"
+        return "Confirm"
 
     @Property(bool, notify=flowChanged)
     def passwordConfirmRequired(self) -> bool:
@@ -1116,13 +1114,7 @@ class WalletController(QObject):
             self._set_error("Password must contain at least 4 characters")
             return False
         try:
-            if self._flow == "unlock":
-                profiles = self._repository.authenticate(password)
-                self._replace_profiles(profiles)
-                self._flow = "none"
-                self.flowChanged.emit()
-                self._set_screen("main")
-            elif self._flow == "create":
+            if self._flow == "create":
                 secret = generate_mnemonic()
                 record = self._repository.new_record(secret, "Main Account")
                 self._pending_vault = self._repository.prepare_new(password, record)
@@ -1181,8 +1173,6 @@ class WalletController(QObject):
     @Slot()
     def cancelFlow(self) -> None:
         destination = "wallets" if self._flow == "add_private" else "welcome"
-        if self._flow == "unlock":
-            return
         self._clear_sensitive()
         self._flow = "none"
         self.flowChanged.emit()
@@ -1722,9 +1712,9 @@ class WalletController(QObject):
         try:
             profiles = self._repository.load_public()
             self._replace_profiles(profiles)
-            self._flow = "unlock"
+            self._flow = "none"
             self.flowChanged.emit()
-            self._set_screen("password")
+            self._set_screen("main")
         except VaultUnavailableError:
             self._state = WalletShellState()
             self.profilesChanged.emit()

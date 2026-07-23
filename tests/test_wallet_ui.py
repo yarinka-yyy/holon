@@ -19,7 +19,7 @@ from holon_wallet.history import HistoryStatus, HistoryStore, WalletHistoryRecor
 from holon_wallet.storage import WalletPaths, atomic_write_json
 from holon_wallet.transfer import TransferPreflightCode, TransferPreflightError
 from holon_wallet.vault import VaultRepository
-from holon_wallet.wallet_crypto import generate_mnemonic
+from holon_wallet.wallet_crypto import generate_mnemonic, import_private_key
 from wallet_public_support import (
     DeferredExecutor,
     ImmediateExecutor,
@@ -284,21 +284,36 @@ def test_import_navigation_and_cancel_clear_fields(wallet_app, qt_app) -> None:
     assert not repository.exists
 
 
-def test_locked_restart_has_masked_password_and_generic_failure(tmp_path, qt_app) -> None:
+def test_existing_vault_opens_public_main_and_refreshes_without_password(
+    tmp_path, qt_app,
+) -> None:
     repository = VaultRepository(WalletPaths(tmp_path))
     password = fresh_password()
     record = repository.new_record(generate_mnemonic(), "Main Account")
     repository.create_new(password, record)
-    app = make_app(qt_app, repository)
+    second = repository.new_record(
+        import_private_key(secrets.token_hex(32)), "Account 2",
+    )
+    repository.append(password, second)
+    service = StubPublicDataService()
+    app = make_app(qt_app, repository, service)
     try:
-        assert app.controller.currentScreen == "password"
-        assert app.controller.passwordTitle == "Unlock Wallet"
-        set_text(app, "passwordTextInput", fresh_password())
-        invoke(child(app, "passwordSubmitButton"), "trigger")
-        assert app.controller.errorMessage == "Authentication failed"
-        set_text(app, "passwordTextInput", password)
-        invoke(child(app, "passwordSubmitButton"), "trigger")
         assert app.controller.currentScreen == "main"
+        assert app.controller.activeProfile["address"] == record.summary.address
+        assert service.calls[-1][2] == ("ethereum", "base")
+        assert child(app, "signingLockedChip").property("visible")
+        assert child(app, "signingLockedChipLabel").property("text") == (
+            "Signing locked"
+        )
+        assert app.controller.ethereumData["ethValue"] == "1 ETH"
+        assert app.controller.baseData["usdcValue"] == "2.5 USDC"
+        assert len(app.controller.profiles) == 2
+        assert app.controller.selectProfile(second.summary.profile_id)
+        qt_app.processEvents()
+        assert app.controller.currentScreen == "main"
+        assert app.controller.activeProfileId == second.summary.profile_id
+        assert service.calls[-1][0] == second.summary.profile_id
+        assert service.calls[-1][2] == ("ethereum", "base")
     finally:
         app.close()
 
@@ -313,8 +328,6 @@ def test_protected_recovery_review_confirm_reveal_and_clipboard(tmp_path, qt_app
     vault_before = repository.paths.vault.read_bytes()
     app = make_app(qt_app, repository)
     try:
-        set_text(app, "passwordTextInput", password)
-        invoke(child(app, "passwordSubmitButton"), "trigger")
         invoke(child(app, "settingsAction"), "trigger")
         invoke(child(app, "settingsSecurity"), "trigger")
         assert app.controller.currentScreen == "settings_info"
@@ -398,8 +411,6 @@ def test_send_review_mainnet_confirmation_result_and_history(tmp_path, qt_app) -
     )
     app = make_app(qt_app, repository)
     try:
-        set_text(app, "passwordTextInput", password)
-        invoke(child(app, "passwordSubmitButton"), "trigger")
         invoke(child(app, "sendAction"), "trigger")
         qt_app.processEvents()
 
@@ -510,8 +521,6 @@ def test_mainnet_runtime_gate_wrong_password_and_cancel(tmp_path, qt_app) -> Non
     )
     app = make_app(qt_app, repository, mainnet_enabled=False)
     try:
-        set_text(app, "passwordTextInput", password)
-        invoke(child(app, "passwordSubmitButton"), "trigger")
         invoke(child(app, "sendAction"), "trigger")
         fill_send(app, "0x" + "44" * 20)
         invoke(child(app, "prepareTransferButton"), "trigger")
@@ -524,8 +533,6 @@ def test_mainnet_runtime_gate_wrong_password_and_cancel(tmp_path, qt_app) -> Non
 
     active = make_app(qt_app, repository)
     try:
-        set_text(active, "passwordTextInput", password)
-        invoke(child(active, "passwordSubmitButton"), "trigger")
         invoke(child(active, "sendAction"), "trigger")
         fill_send(active, "0x" + "55" * 20)
         invoke(child(active, "prepareTransferButton"), "trigger")
@@ -563,8 +570,6 @@ def test_ordinary_window_close_is_blocked_only_during_submission(
     deferred = DeferredExecutor()
     app = make_app(qt_app, repository, transfer_executor=deferred)
     try:
-        set_text(app, "passwordTextInput", password)
-        invoke(child(app, "passwordSubmitButton"), "trigger")
         invoke(child(app, "sendAction"), "trigger")
         fill_send(app, "0x" + "44" * 20)
         invoke(child(app, "prepareTransferButton"), "trigger")
@@ -603,8 +608,6 @@ def test_send_failure_remains_on_form_and_writes_no_history(tmp_path, qt_app) ->
     )
     app = make_app(qt_app, repository, transfer_preflight_service=failure)
     try:
-        set_text(app, "passwordTextInput", password)
-        invoke(child(app, "passwordSubmitButton"), "trigger")
         invoke(child(app, "sendAction"), "trigger")
         fill_send(app, "0x" + "44" * 20)
         invoke(child(app, "prepareTransferButton"), "trigger")
@@ -628,8 +631,6 @@ def test_send_loading_back_ignores_late_result(tmp_path, qt_app) -> None:
     executor = DeferredExecutor()
     app = make_app(qt_app, repository, transfer_executor=executor)
     try:
-        set_text(app, "passwordTextInput", password)
-        invoke(child(app, "passwordSubmitButton"), "trigger")
         invoke(child(app, "sendAction"), "trigger")
         fill_send(app, "0x" + "44" * 20)
         invoke(child(app, "prepareTransferButton"), "trigger")
@@ -658,8 +659,6 @@ def test_v2_receive_settings_privacy_and_transaction_details(tmp_path, qt_app) -
     app = make_app(qt_app, repository)
     try:
         assert "Inter" in app.font_family
-        set_text(app, "passwordTextInput", password)
-        invoke(child(app, "passwordSubmitButton"), "trigger")
 
         assert app.controller.balancesVisible
         invoke(child(app, "balanceEyeButton"), "trigger")
@@ -792,9 +791,8 @@ def test_network_filters_refresh_and_history_record_render(tmp_path, qt_app) -> 
     service = StubPublicDataService()
     app = make_app(qt_app, repository, service)
     try:
-        set_text(app, "passwordTextInput", password)
-        invoke(child(app, "passwordSubmitButton"), "trigger")
         assert app.controller.selectedNetwork == "all"
+        assert service.calls[-1][2] == ("ethereum", "base")
         assert app.controller.ethereumData["ethValue"] == "1 ETH"
         assert app.controller.baseData["usdcValue"] == "2.5 USDC"
 

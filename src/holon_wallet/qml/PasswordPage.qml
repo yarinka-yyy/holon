@@ -10,7 +10,7 @@ PageState {
         objectName: "password"; x: 28; y: 54; width: 458
         title: walletController.passwordTitle
         subtitle: walletController.passwordSubtitle
-        backVisible: walletController.passwordTitle !== "Unlock Wallet"
+        backVisible: true
         onBackRequested: walletController.cancelFlow()
     }
     SurfaceCard {
@@ -26,9 +26,7 @@ PageState {
     }
     Text {
         x: 72; y: 389; width: 370; horizontalAlignment: Text.AlignHCenter
-        text: walletController.passwordTitle === "Unlock Wallet"
-            ? "Unlock access to your encrypted Accounts"
-            : "Use one Wallet password for protected actions"
+        text: "Use one Wallet password for protected actions"
         color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 14
         wrapMode: Text.Wrap
     }
