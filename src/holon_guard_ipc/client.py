@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import os
 import time
 from multiprocessing.connection import Client
 
@@ -110,3 +111,22 @@ class PipeGuardClient:
             MessageKind.READ_WALLET_BALANCES,
             response_timeout=35.0,
         )
+
+    def prepare_transfer(
+        self, payload: dict[str, str], action_id: str,
+    ) -> ContractEnvelope:
+        return self.client.request(
+            MessageKind.TRANSFER_INTENT,
+            payload,
+            action_id=action_id,
+            owner_pid=os.getpid(),
+            response_timeout=35.0,
+        )
+
+    def transfer_status(self, action_id: str) -> ContractEnvelope:
+        return self.client.request(
+            MessageKind.ACTION_STATUS_REQUEST, action_id=action_id,
+        )
+
+    def cancel_transfer(self, action_id: str) -> ContractEnvelope:
+        return self.client.request(MessageKind.CANCEL_ACTION, action_id=action_id)

@@ -8,6 +8,7 @@ from holon_policy import PolicyEngine
 
 from .authority_audit import AuthorityAudit
 from .authority_prepare import prepare
+from .authority_intent import prepare_intent
 from .authority_responses import REFUSAL_CODES, ResponseMixin
 from .lifecycle import GuardLifecycle
 
@@ -147,6 +148,20 @@ class AuthorityService(ResponseMixin):
                 return self.security_response(request)
             assert owner_pid is not None
             return prepare(self, request, owner_pid)
+        if request.kind is MessageKind.TRANSFER_INTENT:
+            if self.security_failure is not None:
+                return self.security_response(request)
+            if self.lifecycle.snapshot.state is GuardState.SIGNING_DISABLED:
+                return self._signing_disabled(
+                    request,
+                    self.lifecycle.snapshot.reason
+                    if self.lifecycle.snapshot.reason in {
+                        "POLICY_AUTHORITY_DISABLED", "SIGNING_DISABLED",
+                    }
+                    else "SIGNING_DISABLED",
+                )
+            assert owner_pid is not None
+            return prepare_intent(self, request, owner_pid)
         if request.kind is MessageKind.ACTION_STATUS_REQUEST:
             return self._status(request, MessageKind.ACTION_STATUS, "ACTION_STATUS")
         if request.kind is MessageKind.CANCEL_ACTION:

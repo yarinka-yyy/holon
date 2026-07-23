@@ -27,6 +27,12 @@ class GuardClient(Protocol):
 
     def wallet_balances(self) -> ContractEnvelope: ...
 
+    def prepare_transfer(self, payload: dict[str, str], action_id: str) -> ContractEnvelope: ...
+
+    def transfer_status(self, action_id: str) -> ContractEnvelope: ...
+
+    def cancel_transfer(self, action_id: str) -> ContractEnvelope: ...
+
 
 class GuardLauncher(Protocol):
     def start(self) -> None: ...
@@ -40,6 +46,18 @@ class UnavailableGuardClient:
         raise RuntimeError("Guard is unavailable")
 
     def wallet_balances(self) -> ContractEnvelope:
+        raise RuntimeError("Guard is unavailable")
+
+    def prepare_transfer(self, payload: dict[str, str], action_id: str) -> ContractEnvelope:
+        del payload, action_id
+        raise RuntimeError("Guard is unavailable")
+
+    def transfer_status(self, action_id: str) -> ContractEnvelope:
+        del action_id
+        raise RuntimeError("Guard is unavailable")
+
+    def cancel_transfer(self, action_id: str) -> ContractEnvelope:
+        del action_id
         raise RuntimeError("Guard is unavailable")
 
 
@@ -92,3 +110,23 @@ class GuardConnector:
         if health.availability is not GuardAvailability.AVAILABLE:
             raise RuntimeError("Guard is unavailable")
         return self._client.wallet_balances()
+
+    def prepare_transfer(
+        self, payload: dict[str, str], action_id: str,
+    ) -> ContractEnvelope:
+        health = self.ensure_available()
+        if health.availability is not GuardAvailability.AVAILABLE:
+            raise RuntimeError("Guard is unavailable")
+        return self._client.prepare_transfer(payload, action_id)
+
+    def transfer_status(self, action_id: str) -> ContractEnvelope:
+        health = self.ensure_available()
+        if health.availability is not GuardAvailability.AVAILABLE:
+            raise RuntimeError("Guard is unavailable")
+        return self._client.transfer_status(action_id)
+
+    def cancel_transfer(self, action_id: str) -> ContractEnvelope:
+        health = self.ensure_available()
+        if health.availability is not GuardAvailability.AVAILABLE:
+            raise RuntimeError("Guard is unavailable")
+        return self._client.cancel_transfer(action_id)

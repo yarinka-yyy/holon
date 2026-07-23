@@ -14,6 +14,13 @@ from .public_protocol import (
     WalletPublicClient,
     WalletPublicServer,
 )
+from .authority_protocol import (
+    AUTHORITY_PIPE_NAME,
+    AUTHORITY_VERSION,
+    MAX_AUTHORITY_BYTES,
+    WalletAuthorityClient,
+    WalletAuthorityServer,
+)
 
 __all__ = [
     "CONTROL_PIPE_NAME",
@@ -26,4 +33,9 @@ __all__ = [
     "PUBLIC_VERSION",
     "WalletPublicClient",
     "WalletPublicServer",
+    "AUTHORITY_PIPE_NAME",
+    "AUTHORITY_VERSION",
+    "MAX_AUTHORITY_BYTES",
+    "WalletAuthorityClient",
+    "WalletAuthorityServer",
 ]

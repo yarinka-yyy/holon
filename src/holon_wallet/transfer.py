@@ -655,6 +655,41 @@ class TransferFlowCoordinator:
         self._state = TransferFlowState.PREPARING
         return request
 
+    def begin_external(
+        self, action_id: str, profile_id: str, created_at: datetime,
+        expires_at: datetime, network_id: str, asset_id: str, amount_atomic: int,
+    ) -> PendingTransferRequest:
+        if self._state is not TransferFlowState.LOCKED:
+            raise TransferFlowError("A transfer flow is already active")
+        transfer_route(network_id, asset_id)
+        now = self._clock().astimezone(UTC)
+        if (
+            not isinstance(action_id, str)
+            or not action_id.startswith("act-")
+            or action_id in self._terminal_ids
+            or type(amount_atomic) is not int
+            or amount_atomic <= 0
+            or amount_atomic >= 2**256
+            or created_at.tzinfo is None
+            or expires_at.tzinfo is None
+            or expires_at - created_at != ACTION_LIFETIME
+            or created_at.astimezone(UTC) > now
+            or now >= expires_at.astimezone(UTC)
+        ):
+            raise TransferFlowError("Invalid external transfer authority")
+        request = PendingTransferRequest(
+            action_id,
+            profile_id,
+            created_at.astimezone(UTC),
+            expires_at.astimezone(UTC),
+            network_id,
+            asset_id,
+            amount_atomic,
+        )
+        self._pending = request
+        self._state = TransferFlowState.PREPARING
+        return request
+
     def accept(self, action: PreparedTransferAction) -> bool:
         pending = self._pending
         if self._state is not TransferFlowState.PREPARING or pending is None:

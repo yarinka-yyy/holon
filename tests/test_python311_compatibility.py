@@ -10,6 +10,7 @@ COMPATIBLE_PACKAGES = ("holon_contracts", "holon_guard_ipc", "holon_hermes_plugi
 ALLOWED_IMPORT_ROOTS = {
     "__future__",
     "ctypes",
+    "collections",
     "dataclasses",
     "datetime",
     "enum",
@@ -23,6 +24,7 @@ ALLOWED_IMPORT_ROOTS = {
     "re",
     "subprocess",
     "sys",
+    "threading",
     "time",
     "typing",
     "uuid",

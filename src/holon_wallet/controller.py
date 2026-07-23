@@ -6,6 +6,7 @@ import hashlib
 from concurrent.futures import Executor, Future, ThreadPoolExecutor
 from datetime import UTC, datetime
 from threading import Event
+from typing import Callable
 
 from PySide6.QtCore import Property, QLocale, QObject, QTime, QTimer, Signal, Slot
 from PySide6.QtGui import QGuiApplication
@@ -231,6 +232,9 @@ class WalletController(QObject):
         self._transfer_asset = ""
         self._transfer_recipient = ""
         self._transfer_amount_input = ""
+        self._external_transfer: dict[str, object] | None = None
+        self._external_completion: Callable[[dict[str, object]], None] | None = None
+        self._guard_status_sender: Callable[[dict[str, object]], None] | None = None
         self._mainnet_in_progress = False
         self._mainnet_result: MainnetTransferResult | None = None
         self._receipt_checking = False
@@ -833,6 +837,107 @@ class WalletController(QObject):
         )
         return True
 
+    def attach_guard_status_sender(
+        self, sender: Callable[[dict[str, object]], None],
+    ) -> None:
+        self._guard_status_sender = sender
+
+    def prepareExternalTransfer(
+        self,
+        request: dict[str, object],
+        completion: Callable[[dict[str, object]], None],
+    ) -> None:
+        active = self._state.active_profile
+        busy = (
+            active is None
+            or self._closed
+            or self._flow != "none"
+            or self._transfer_preparing
+            or self._transfer_flow.pending is not None
+            or self._transfer_flow.current is not None
+            or self._mainnet_in_progress
+            or self._recovery_flow.current is not None
+            or self._revoke_flow.current is not None
+            or self._revoke_flow.pending is not None
+            or self._current_screen in {
+                "send", "recovery_reveal", "submit_transfer", "revoke_submit",
+            }
+        )
+        if busy:
+            completion(self._external_refusal(request, "WALLET_BUSY"))
+            return
+        try:
+            network_id = str(request["network"])
+            asset_id = str(request["asset"])
+            route = transfer_route(network_id, asset_id)
+            amount_atomic = int(str(request["amount_atomic"]))
+            normalized = normalize_recipient(str(request["recipient"]), active.address)
+            created_at = datetime.fromisoformat(str(request["created_at"]).replace("Z", "+00:00"))
+            expires_at = datetime.fromisoformat(str(request["expires_at"]).replace("Z", "+00:00"))
+            if self._mainnet_executor.policy.draft_amount_code(
+                network_id, asset_id, amount_atomic,
+            ) is MainnetTransferCode.AMOUNT_LIMIT_EXCEEDED:
+                raise TransferPreflightError(TransferPreflightCode.AMOUNT_LIMIT_EXCEEDED)
+            pending = self._transfer_flow.begin_external(
+                str(request["action_id"]), active.profile_id, created_at, expires_at,
+                network_id, asset_id, amount_atomic,
+            )
+        except (KeyError, TypeError, ValueError, RuntimeError, TransferPreflightError) as error:
+            code = error.code.value if isinstance(error, TransferPreflightError) else "TRANSFER_INTENT_INVALID"
+            completion(self._external_refusal(request, code))
+            return
+        self._transfer_network = network_id
+        self._transfer_asset = asset_id
+        self._transfer_recipient = normalized
+        self._transfer_amount_input = format_atomic_amount(amount_atomic, route.decimals)
+        self._external_transfer = dict(request)
+        self._external_completion = completion
+        self._set_transfer_error("")
+        self._transfer_preparing = True
+        self._transfer_generation += 1
+        generation = self._transfer_generation
+        self.transferChanged.emit()
+        future = self._transfer_executor.submit(
+            self._transfer_preflight_service.prepare, pending, active, normalized,
+        )
+        future.add_done_callback(
+            lambda completed, current=generation: self._transfer_finished(current, completed),
+        )
+
+    def cancelExternalTransfer(self, request: dict[str, object]) -> dict[str, object]:
+        context = self._external_transfer
+        action = self._transfer_flow.current
+        if (
+            context is None
+            or action is None
+            or request.get("flow_id") != context.get("flow_id")
+            or request.get("action_id") != action.action_id
+            or request.get("prepared_digest") != action.digest
+        ):
+            return self._external_refusal(request, "ACTION_MISMATCH")
+        self._external_transfer = None
+        self._external_completion = None
+        self._cancel_transfer_request(clear_recipient=True)
+        self._guard_open_notice = "Transfer cancelled by Hermes"
+        self.guardNoticeChanged.emit()
+        self._guard_notice_timer.start()
+        self._set_screen("main")
+        return {
+            "authority_version": "1", "kind": "transfer_cancelled",
+            "flow_id": request["flow_id"], "action_id": request["action_id"],
+            "code": "ACTION_CANCELLED",
+        }
+
+    @staticmethod
+    def _external_refusal(
+        request: dict[str, object], code: str,
+    ) -> dict[str, object]:
+        return {
+            "authority_version": "1", "kind": "transfer_refused",
+            "flow_id": request.get("flow_id"), "action_id": request.get("action_id"),
+            "code": code,
+        }
+
     @Slot(str, str, str, result=bool)
     def requestMaximumTransfer(
         self, network_id: str, asset_id: str, recipient: str,
@@ -913,6 +1018,7 @@ class WalletController(QObject):
     def cancelTransfer(self) -> None:
         if self._mainnet_in_progress:
             return
+        self._notify_external_transfer("REJECTED", "LOCAL_CANCELLED")
         self._clear_mainnet_result()
         self._cancel_transfer_request(clear_recipient=True)
         self._set_screen("main")
@@ -921,6 +1027,7 @@ class WalletController(QObject):
     def editTransfer(self) -> None:
         if self._mainnet_in_progress:
             return
+        self._notify_external_transfer("REJECTED", "TRANSFER_EDITED")
         self._clear_mainnet_result()
         action = self._transfer_flow.current
         if action is None:
@@ -1202,6 +1309,8 @@ class WalletController(QObject):
             revoke_invalidated = self._revoke_flow.profile_changed(profile_id)
             if recovery_invalidated or recovery_open:
                 self._cancel_recovery_action(clear_clipboard=True)
+            if invalidated:
+                self._notify_external_transfer("FAILED", "ACCOUNT_CHANGED")
             if revoke_invalidated or approval_open:
                 self._cancel_revoke_action(clear_snapshots=True)
             self.activeProfileChanged.emit()
@@ -1881,6 +1990,17 @@ class WalletController(QObject):
             self._transfer_flow.close()
         self._transfer_expiry_timer.stop()
         self._mainnet_result = result
+        if (
+            result.broadcast_attempted
+            and result.history_status in {
+                HistoryStatus.PENDING, HistoryStatus.CONFIRMED, HistoryStatus.UNKNOWN,
+            }
+        ):
+            self._notify_external_transfer(
+                "COMPLETED", result.code.value, result.history_status.value,
+            )
+        else:
+            self._notify_external_transfer("FAILED", result.code.value)
         self._load_history()
         self.transferChanged.emit()
         self._set_screen("transfer_result")
@@ -2023,11 +2143,15 @@ class WalletController(QObject):
             self._transfer_flow.close()
             self._set_transfer_error(_transfer_error_message(result.code))
             self.transferChanged.emit()
+            self._finish_external_preflight(None, result.code.value)
+            self._set_screen("send")
             return
         if not isinstance(result, PreparedTransferAction) or active is None:
             self._transfer_flow.close()
             self._set_transfer_error("Transaction preparation failed")
             self.transferChanged.emit()
+            self._finish_external_preflight(None, "TRANSFER_PREPARATION_FAILED")
+            self._set_screen("send")
             return
         if (
             active.profile_id != result.profile_id
@@ -2040,6 +2164,8 @@ class WalletController(QObject):
             self._transfer_flow.close()
             self._set_transfer_error("Transaction preparation expired")
             self.transferChanged.emit()
+            self._finish_external_preflight(None, "ACTION_EXPIRED")
+            self._set_screen("send")
             return
         try:
             records = self._history_store.append(_history_record(result))
@@ -2053,6 +2179,8 @@ class WalletController(QObject):
             self.historyChanged.emit()
             self._set_transfer_error("History unavailable · transaction was not prepared")
             self.transferChanged.emit()
+            self._finish_external_preflight(None, "HISTORY_UNAVAILABLE")
+            self._set_screen("send")
             return
         self._history_records = records
         self._history_available = True
@@ -2066,6 +2194,32 @@ class WalletController(QObject):
         self._set_transfer_error("")
         self.transferChanged.emit()
         self._set_screen("transfer_review")
+        self._finish_external_preflight(result, "TRANSFER_PREPARED")
+
+    def _finish_external_preflight(
+        self, action: PreparedTransferAction | None, code: str,
+    ) -> None:
+        completion = self._external_completion
+        context = self._external_transfer
+        if completion is None or context is None:
+            return
+        self._external_completion = None
+        if action is None:
+            self._external_transfer = None
+            completion(self._external_refusal(context, code))
+            return
+        self._external_transfer["prepared_digest"] = action.digest
+        completion({
+            "authority_version": "1", "kind": "transfer_prepared",
+            "flow_id": context["flow_id"], "action_id": action.action_id,
+            "profile_id": action.profile_id, "sender": action.sender,
+            "recipient": action.recipient, "network": action.network_id,
+            "asset": action.asset_id, "amount_atomic": str(action.amount_atomic),
+            "max_total_fee_wei": str(action.max_total_fee_wei),
+            "prepared_digest": action.digest,
+            "created_at": context["created_at"], "expires_at": context["expires_at"],
+            "code": code,
+        })
 
     @Slot(int, object, str, str, str)
     def _accept_maximum_transfer(
@@ -2179,6 +2333,7 @@ class WalletController(QObject):
         }:
             self._show_mainnet_failure(action, MainnetTransferCode.ACTION_EXPIRED)
             return
+        self._notify_external_transfer("FAILED", "ACTION_EXPIRED")
         self._transfer_preparing = False
         self._set_transfer_error("Transaction preparation expired")
         self.transferChanged.emit()
@@ -2187,6 +2342,7 @@ class WalletController(QObject):
     def _show_mainnet_failure(
         self, action: PreparedTransferAction, code: MainnetTransferCode,
     ) -> None:
+        self._notify_external_transfer("FAILED", code.value)
         self._transfer_generation += 1
         self._transfer_expiry_timer.stop()
         self._transfer_flow.close()
@@ -2195,6 +2351,30 @@ class WalletController(QObject):
         self._mainnet_result = self._safe_mainnet_result(action, code)
         self.transferChanged.emit()
         self._set_screen("transfer_result")
+
+    def _notify_external_transfer(
+        self, event: str, code: str, outcome: str | None = None,
+    ) -> None:
+        context = self._external_transfer
+        sender = self._guard_status_sender
+        if context is None or sender is None or "prepared_digest" not in context:
+            return
+        update = {
+            "status_version": "1",
+            "kind": "transfer_status",
+            "flow_id": context["flow_id"],
+            "action_id": context["action_id"],
+            "prepared_digest": context["prepared_digest"],
+            "event": event,
+            "code": code,
+            "outcome": outcome,
+        }
+        self._external_transfer = None
+        self._external_completion = None
+        try:
+            sender(update)
+        except Exception:
+            pass
 
     def _expire_revoke(self) -> None:
         self._revoke_expiry_timer.stop()

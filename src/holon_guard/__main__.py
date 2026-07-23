@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 
 from holon_guard_ipc import PIPE_NAME
+from holon_guard_ipc.wallet_status import WalletStatusServer
 from holon_contracts import RefusalCode, SecurityCode
 from holon_policy import Policy, PolicyEngine, PolicyLoadError
 from holon_policy.baseline import load_baseline_policy
@@ -97,9 +98,10 @@ def main(argv: list[str] | None = None) -> int:
                 policy_failure = exc.code
             install_failure = _integrity_failure(args)
             ledger = ActionLedger(action_store, action_snapshot)
+            wallet = _wallet_controller(args, install_failure)
             lifecycle = GuardLifecycle.restore(
                 store,
-                _wallet_controller(args, install_failure),
+                wallet,
                 WindowsOwnerProbe(),
                 ledger,
             )
@@ -117,7 +119,15 @@ def main(argv: list[str] | None = None) -> int:
                     EventType.SIGNING_DISABLED, lifecycle.snapshot.reason,
                     guard_state=lifecycle.snapshot.state.value,
                 )
-            GuardServer(args.pipe_name, authority).serve_forever()
+            wallet_path = getattr(wallet, "wallet_path", None)
+            status_server = WalletStatusServer(
+                lifecycle.accept_wallet_status,
+                lambda: (lifecycle.snapshot.wallet_pid, wallet_path),
+                invalid_handler=lifecycle.wallet_status_mismatch,
+            )
+            GuardServer(
+                args.pipe_name, authority, status_server=status_server,
+            ).serve_forever()
     except GuardAlreadyRunning:
         return 3
     except KeyboardInterrupt:

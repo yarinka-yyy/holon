@@ -7,7 +7,7 @@ from typing import Any, Mapping
 
 from holon_contracts import RefusalCode
 
-from .model import Policy
+from .model import Policy, TransferRule
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,5 +57,51 @@ class PolicyEngine:
         if int(payload["max_total_fee_wei"]) > int(rule.max_total_fee_wei):
             return PolicyDecision.refuse(
                 RefusalCode.MAX_FEE_EXCEEDED, "Maximum fee exceeds the policy limit."
+            )
+        return PolicyDecision.allow()
+
+    def evaluate_intent(
+        self, network: object, asset: object, amount_atomic: int,
+    ) -> tuple[PolicyDecision, TransferRule | None]:
+        if not self.policy.authority_enabled:
+            return PolicyDecision.refuse(
+                RefusalCode.POLICY_AUTHORITY_DISABLED,
+                "Wallet authority is disabled by policy.",
+            ), None
+        network_rules = [
+            rule for rule in self.policy.transfer_rules if rule.network == network
+        ]
+        if not network_rules:
+            return PolicyDecision.refuse(
+                RefusalCode.NETWORK_NOT_ALLOWED, "Network is not allowed."
+            ), None
+        rule = next((item for item in network_rules if item.asset == asset), None)
+        if rule is None:
+            return PolicyDecision.refuse(
+                RefusalCode.ASSET_NOT_ALLOWED, "Asset is not allowed."
+            ), None
+        if type(amount_atomic) is not int or amount_atomic <= 0:
+            return PolicyDecision.refuse(
+                RefusalCode.AMOUNT_INVALID, "Amount is invalid."
+            ), None
+        if amount_atomic > int(rule.max_amount_atomic):
+            return PolicyDecision.refuse(
+                RefusalCode.AMOUNT_LIMIT_EXCEEDED,
+                "Amount exceeds the policy limit.",
+            ), None
+        return PolicyDecision.allow(), rule
+
+    @staticmethod
+    def evaluate_prepared_fee(
+        max_total_fee_wei: int, rule: TransferRule,
+    ) -> PolicyDecision:
+        if type(max_total_fee_wei) is not int or max_total_fee_wei <= 0:
+            return PolicyDecision.refuse(
+                RefusalCode.MAX_FEE_REQUIRED, "Maximum fee is required."
+            )
+        if max_total_fee_wei > int(rule.max_total_fee_wei):
+            return PolicyDecision.refuse(
+                RefusalCode.MAX_FEE_EXCEEDED,
+                "Maximum fee exceeds the policy limit.",
             )
         return PolicyDecision.allow()

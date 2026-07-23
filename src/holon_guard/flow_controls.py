@@ -49,7 +49,20 @@ def interrupt_for_security_block(guard, code: str) -> GuardResult:
             return guard.health()
         if guard.wallet_handle is not None:
             try:
-                guard.wallet.request_close(guard.wallet_handle)
+                if (
+                    guard.prepared_digest is not None
+                    and guard.snapshot.flow_id is not None
+                    and guard.snapshot.action_id is not None
+                ):
+                    guard.wallet.cancel_transfer({
+                        "authority_version": "1",
+                        "kind": "cancel_transfer",
+                        "flow_id": guard.snapshot.flow_id,
+                        "action_id": guard.snapshot.action_id,
+                        "prepared_digest": guard.prepared_digest,
+                    })
+                else:
+                    guard.wallet.request_close(guard.wallet_handle)
             except Exception:
                 pass
         return guard._recover(code)

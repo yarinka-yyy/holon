@@ -20,6 +20,32 @@ class FakeProcess:
 
 
 class GuardWalletTests(unittest.TestCase):
+    @staticmethod
+    def authority_request() -> dict[str, object]:
+        return {
+            "authority_version": "1", "kind": "prepare_transfer",
+            "flow_id": "11111111-1111-4111-8111-111111111111",
+            "action_id": "act-22222222-2222-4222-8222-222222222222",
+            "policy_version": "1", "network": "base", "asset": "usdc",
+            "amount_atomic": "1000000",
+            "recipient": "0x4444444444444444444444444444444444444444",
+            "created_at": "2026-07-23T12:00:00Z",
+            "expires_at": "2026-07-23T12:05:00Z",
+        }
+
+    @staticmethod
+    def authority_response(request: dict[str, object]) -> dict[str, object]:
+        return {
+            "authority_version": "1", "kind": "transfer_prepared",
+            "flow_id": request["flow_id"], "action_id": request["action_id"],
+            "wallet_pid": 202, "profile_id": "profile-one",
+            "sender": "0x2222222222222222222222222222222222222222",
+            "recipient": request["recipient"], "network": request["network"],
+            "asset": request["asset"], "amount_atomic": request["amount_atomic"],
+            "max_total_fee_wei": "500", "prepared_digest": "a" * 64,
+            "created_at": request["created_at"], "expires_at": request["expires_at"],
+            "code": "TRANSFER_PREPARED",
+        }
     def test_installed_path_is_derived_and_development_path_is_explicit(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -225,6 +251,67 @@ class GuardWalletTests(unittest.TestCase):
         self.assertIsNone(result.payload)
         self.assertEqual(calls, 1)
         self.assertEqual(len(spawned), 1)
+
+    def test_authority_existing_wallet_prepares_without_spawn(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "HolonWallet.exe"
+            path.write_bytes(b"fixture")
+            request = self.authority_request()
+            calls = []
+
+            class Authority:
+                def exchange(self, *args):
+                    calls.append(args)
+                    return GuardWalletTests.authority_response(request)
+
+            spawned = []
+            result = VerifiedWalletController(
+                path, process_factory=lambda *args, **kwargs: spawned.append(args),
+                authority_control=Authority(),  # type: ignore[arg-type]
+            ).prepare_transfer(request)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.payload["prepared_digest"], "a" * 64)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(spawned, [])
+
+    def test_authority_cold_start_spawns_once_and_never_retries_protocol_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "HolonWallet.exe"
+            path.write_bytes(b"fixture")
+            request = self.authority_request()
+            calls = 0
+
+            class Authority:
+                def exchange(self, *args):
+                    nonlocal calls
+                    del args
+                    calls += 1
+                    if calls == 1:
+                        raise ControlUnavailable("not ready")
+                    return GuardWalletTests.authority_response(request)
+
+            spawned = []
+            result = VerifiedWalletController(
+                path, process_factory=lambda *args, **kwargs: spawned.append((args, kwargs)),
+                authority_control=Authority(),  # type: ignore[arg-type]
+            ).prepare_transfer(request)
+            self.assertTrue(result.ok)
+            self.assertEqual(calls, 2)
+            self.assertEqual(len(spawned), 1)
+
+            class Broken:
+                def exchange(self, *args):
+                    del args
+                    raise ControlProtocolError("private mismatch")
+
+            untouched = []
+            failed = VerifiedWalletController(
+                path, process_factory=lambda *args, **kwargs: untouched.append(args),
+                authority_control=Broken(),  # type: ignore[arg-type]
+            ).prepare_transfer(request)
+        self.assertFalse(failed.ok)
+        self.assertEqual(failed.code, "WALLET_PREPARATION_AMBIGUOUS")
+        self.assertEqual(untouched, [])
 
 
 if __name__ == "__main__":

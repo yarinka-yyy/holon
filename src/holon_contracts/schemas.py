@@ -8,6 +8,7 @@ ACTION_FIELDS = BASE_FIELDS | {"action_id"}
 ACTION_REQUIRED_KINDS = frozenset(
     {
         MessageKind.PREPARE_TRANSFER,
+        MessageKind.TRANSFER_INTENT,
         MessageKind.ACTION_STATUS_REQUEST,
         MessageKind.CANCEL_ACTION,
         MessageKind.RECOVER_ACTION,
@@ -27,6 +28,7 @@ REQUEST_KINDS = frozenset(
         MessageKind.OPEN_WALLET,
         MessageKind.READ_WALLET_BALANCES,
         MessageKind.PREPARE_TRANSFER,
+        MessageKind.TRANSFER_INTENT,
         MessageKind.ACTION_STATUS_REQUEST,
         MessageKind.CANCEL_ACTION,
         MessageKind.RECOVER_ACTION,
@@ -37,6 +39,9 @@ PAYLOAD_FIELDS = {
     MessageKind.HEALTH_REQUEST: frozenset(),
     MessageKind.OPEN_WALLET: frozenset(),
     MessageKind.READ_WALLET_BALANCES: frozenset(),
+    MessageKind.TRANSFER_INTENT: frozenset(
+        {"network", "asset", "amount", "recipient"}
+    ),
     MessageKind.PREPARE_TRANSFER: frozenset(
         {
             "policy_version",

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 import secrets
+from datetime import UTC, datetime, timedelta
 
 os.environ.setdefault("QT_PREFERRED_PHYSICAL_DEVICE", "cpu")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -509,6 +510,44 @@ def test_send_review_mainnet_confirmation_result_and_history(tmp_path, qt_app) -
         qt_app.processEvents()
         assert child(app, "historyList").property("count") == 2
         QGuiApplication.clipboard().clear()
+    finally:
+        app.close()
+
+
+def test_guard_transfer_handoff_opens_existing_review_qml(tmp_path, qt_app) -> None:
+    repository = VaultRepository(WalletPaths(tmp_path))
+    password = fresh_password()
+    repository.create_new(
+        password, repository.new_record(generate_mnemonic(), "Main Account"),
+    )
+    app = make_app(qt_app, repository)
+    now = datetime.now(UTC)
+    responses, statuses = [], []
+    request = {
+        "authority_version": "1", "kind": "prepare_transfer",
+        "flow_id": "11111111-1111-4111-8111-111111111111",
+        "action_id": "act-22222222-2222-4222-8222-222222222222",
+        "policy_version": "1", "network": "ethereum", "asset": "eth",
+        "amount_atomic": "1000000000000000",
+        "recipient": "0x4444444444444444444444444444444444444444",
+        "created_at": now.isoformat().replace("+00:00", "Z"),
+        "expires_at": (now + timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),
+    }
+    try:
+        app.controller.attach_guard_status_sender(statuses.append)
+        app.controller.prepareExternalTransfer(request, responses.append)
+        qt_app.processEvents()
+        assert app.controller.currentScreen == "transfer_review"
+        assert child(app, "transferReviewAmount").property("text") == "0.001 ETH"
+        assert child(app, "transferReviewNetwork").property("text") == "Ethereum · 1"
+        assert responses[0]["kind"] == "transfer_prepared"
+        invoke(child(app, "continueMainnetButton"), "trigger")
+        qt_app.processEvents()
+        assert app.controller.currentScreen == "sign_transfer"
+        assert child(app, "mainnetPasswordInput").property("text") == ""
+        app.controller.cancelTransfer()
+        assert app.controller.currentScreen == "main"
+        assert statuses[0]["event"] == "REJECTED"
     finally:
         app.close()
 

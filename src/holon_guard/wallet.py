@@ -14,6 +14,7 @@ from typing import Callable, Protocol
 from holon_wallet_control import (
     ControlProtocolError,
     ControlUnavailable,
+    WalletAuthorityClient,
     WalletControlClient,
     WalletPublicClient,
 )
@@ -35,6 +36,10 @@ class WalletController(Protocol):
 
     def request_close(self, handle: WalletHandle) -> None: ...
 
+    def prepare_transfer(self, request: dict[str, object]) -> "WalletPreparedResult": ...
+
+    def cancel_transfer(self, request: dict[str, object]) -> bool: ...
+
 
 class OwnerProbe(Protocol):
     def is_alive(self, pid: int) -> bool: ...
@@ -52,6 +57,14 @@ class WalletOpenResult:
 class WalletBalancesResult:
     ok: bool
     payload: dict[str, object] | None
+
+
+@dataclass(frozen=True)
+class WalletPreparedResult:
+    ok: bool
+    code: str
+    payload: dict[str, object] | None
+    handle: WalletHandle | None
 
 
 class UnavailableWalletController:
@@ -73,6 +86,14 @@ class UnavailableWalletController:
     def request_close(self, handle: WalletHandle) -> None:
         del handle
         raise RuntimeError("Wallet implementation is unavailable")
+
+    def prepare_transfer(self, request: dict[str, object]) -> WalletPreparedResult:
+        del request
+        return WalletPreparedResult(False, "WALLET_UNAVAILABLE", None, None)
+
+    def cancel_transfer(self, request: dict[str, object]) -> bool:
+        del request
+        return False
 
 
 class SubprocessWalletController:
@@ -121,6 +142,8 @@ class VerifiedWalletController(UnavailableWalletController):
         activation_timeout: float = 0.15,
         public_control: WalletPublicClient | None = None,
         public_response_timeout: float = 22.0,
+        authority_control: WalletAuthorityClient | None = None,
+        authority_timeout: float = 25.0,
     ) -> None:
         self._wallet_path = wallet_path.resolve(strict=False)
         self._control = control or WalletControlClient()
@@ -129,6 +152,12 @@ class VerifiedWalletController(UnavailableWalletController):
         self._readiness_timeout = readiness_timeout
         self._activation_timeout = activation_timeout
         self._public_response_timeout = public_response_timeout
+        self._authority_control = authority_control or WalletAuthorityClient()
+        self._authority_timeout = authority_timeout
+
+    @property
+    def wallet_path(self) -> Path:
+        return self._wallet_path
 
     def open_public(self) -> WalletOpenResult:
         launch_id = str(uuid.uuid4())
@@ -206,6 +235,60 @@ class VerifiedWalletController(UnavailableWalletController):
                         pass
             return WalletBalancesResult(False, None)
 
+    def prepare_transfer(self, request: dict[str, object]) -> WalletPreparedResult:
+        response: dict[str, object] | None = None
+        try:
+            response = self._authority_control.exchange(
+                request, self._wallet_path, self._activation_timeout,
+                self._authority_timeout,
+            )
+        except ControlUnavailable:
+            if not self._wallet_path.is_file():
+                return WalletPreparedResult(False, "WALLET_UNAVAILABLE", None, None)
+            creationflags = 0x08000000 if sys.platform == "win32" else 0
+            try:
+                self._process_factory(
+                    [str(self._wallet_path)], shell=False, close_fds=True,
+                    creationflags=creationflags,
+                )
+                response = self._authority_control.exchange(
+                    request, self._wallet_path, self._readiness_timeout,
+                    self._authority_timeout,
+                )
+            except ControlProtocolError:
+                return WalletPreparedResult(
+                    False, "WALLET_PREPARATION_AMBIGUOUS", None, None,
+                )
+            except Exception:
+                return WalletPreparedResult(False, "WALLET_UNAVAILABLE", None, None)
+        except ControlProtocolError:
+            return WalletPreparedResult(
+                False, "WALLET_PREPARATION_AMBIGUOUS", None, None,
+            )
+        except Exception:
+            return WalletPreparedResult(False, "WALLET_UNAVAILABLE", None, None)
+        if response is None:
+            return WalletPreparedResult(False, "WALLET_UNAVAILABLE", None, None)
+        pid = response.get("wallet_pid")
+        if type(pid) is not int:
+            return WalletPreparedResult(False, "WALLET_UNAVAILABLE", None, None)
+        handle = WindowsProcessReference(pid)
+        if response.get("kind") != "transfer_prepared":
+            return WalletPreparedResult(
+                False, str(response.get("code", "TRANSFER_PREPARATION_FAILED")),
+                response, handle,
+            )
+        return WalletPreparedResult(True, str(response["code"]), response, handle)
+
+    def cancel_transfer(self, request: dict[str, object]) -> bool:
+        try:
+            response = self._authority_control.exchange(
+                request, self._wallet_path, self._activation_timeout, 2.0,
+            )
+        except Exception:
+            return False
+        return response.get("kind") == "transfer_cancelled"
+
     @staticmethod
     def _unavailable() -> WalletOpenResult:
         return WalletOpenResult(
@@ -214,6 +297,14 @@ class VerifiedWalletController(UnavailableWalletController):
             "WALLET_UNAVAILABLE",
             "Wallet is unavailable.",
         )
+
+
+class WindowsProcessReference:
+    def __init__(self, pid: int) -> None:
+        self.pid = pid
+
+    def poll(self) -> int | None:
+        return None if WindowsOwnerProbe().is_alive(self.pid) else 1
 
 
 class WindowsOwnerProbe:

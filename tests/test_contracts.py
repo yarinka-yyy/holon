@@ -158,6 +158,24 @@ class ContractTests(unittest.TestCase):
         arbitrary = dict(TRANSFER, calldata="0xdeadbeef")
         self.assert_code(self.envelope(arbitrary), RefusalCode.ARBITRARY_CALL_REFUSED.value)
 
+    def test_transfer_intent_is_human_decimal_and_strict(self) -> None:
+        payload = {
+            "network": "ethereum", "asset": "eth", "amount": "0,001",
+            "recipient": "0x1111111111111111111111111111111111111111",
+        }
+        intent = make_envelope(
+            MessageKind.TRANSFER_INTENT, payload, request_id=REQUEST_ID,
+            action_id=ACTION_ID, timestamp=TIMESTAMP,
+        )
+        self.assertEqual(parse_envelope(intent.to_dict()), intent)
+        for amount in ("0", "+1", "1e2", "1.", "1,2.3", "0.0000000000000000001"):
+            invalid = intent.to_dict()
+            invalid["payload"]["amount"] = amount
+            self.assert_code(invalid, RefusalCode.AMOUNT_INVALID.value)
+        unsafe = intent.to_dict()
+        unsafe["payload"]["calldata"] = "0x"
+        self.assert_code(unsafe, RefusalCode.ARBITRARY_CALL_REFUSED.value)
+
     def test_amount_fee_recipient_and_action_id_are_bounded(self) -> None:
         for field, value, code in (
             ("amount_atomic", "0", RefusalCode.AMOUNT_INVALID.value),

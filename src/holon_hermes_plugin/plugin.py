@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from typing import Any, Optional
 
+from holon_contracts import MessageKind, new_action_id
+
 from .guard import (
     PROTECTED_STATES,
     GuardAvailability,
@@ -18,8 +20,14 @@ from .guard import (
 HEALTH_TOOL = "holon_health"
 OPEN_WALLET_TOOL = "holon_open_wallet"
 WALLET_BALANCES_TOOL = "holon_wallet_balances"
+PREPARE_TRANSFER_TOOL = "holon_prepare_transfer"
+TRANSFER_STATUS_TOOL = "holon_transfer_status"
+CANCEL_TRANSFER_TOOL = "holon_cancel_transfer"
 PILOT_BLOCKED_TOOL = "terminal"
-CAPABILITIES = ["health", "open_wallet", "wallet_balances"]
+CAPABILITIES = [
+    "health", "open_wallet", "wallet_balances", "prepare_transfer",
+    "transfer_status", "cancel_transfer",
+]
 
 
 def _unavailable_balances() -> dict[str, Any]:
@@ -138,6 +146,115 @@ class PluginRuntime:
             separators=(",", ":"),
         )
 
+    @staticmethod
+    def _safe_transfer_failure(action_id: str | None = None) -> str:
+        payload: dict[str, Any] = {
+            "status": "DEGRADED",
+            "authority_available": False,
+            "code": "WALLET_TRANSFER_UNAVAILABLE",
+            "message": "Wallet transfer preparation is unavailable.",
+        }
+        if action_id is not None:
+            payload["action_id"] = action_id
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+    def handle_prepare_transfer(
+        self, params: Optional[dict] = None, **kwargs: Any,
+    ) -> str:
+        del kwargs
+        if not isinstance(params, dict) or set(params) != {
+            "network", "asset", "amount", "recipient",
+        }:
+            return self._safe_transfer_failure()
+        action_id = new_action_id()
+        try:
+            response = self._connector.prepare_transfer(dict(params), action_id)
+        except Exception:
+            return self._safe_transfer_failure(action_id)
+        if response.kind is MessageKind.PROTECTED_FLOW_STARTED:
+            self._protected_latch = True
+            return json.dumps(
+                {
+                    "status": "AWAITING_LOCAL_CONFIRMATION",
+                    "authority_available": True,
+                    "action_id": action_id,
+                    "network": params["network"],
+                    "asset": params["asset"],
+                    "amount": params["amount"],
+                    "recipient": params["recipient"],
+                    "code": response.payload["code"],
+                    "message": "Review and confirm the exact transfer in Wallet.",
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        return json.dumps(
+            {
+                "status": "REFUSED",
+                "authority_available": False,
+                "action_id": action_id,
+                "code": response.payload.get("code", "TRANSFER_REFUSED"),
+                "message": response.payload.get("message", "Transfer was refused."),
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+    def _handle_transfer_action(
+        self, params: Optional[dict], *, cancel: bool,
+    ) -> str:
+        if not isinstance(params, dict) or set(params) != {"action_id"}:
+            return self._safe_transfer_failure()
+        action_id = params.get("action_id")
+        if not isinstance(action_id, str):
+            return self._safe_transfer_failure()
+        try:
+            response = (
+                self._connector.cancel_transfer(action_id)
+                if cancel else self._connector.transfer_status(action_id)
+            )
+        except Exception:
+            return self._safe_transfer_failure()
+        payload = response.payload
+        if response.kind is MessageKind.ACTION_STATUS:
+            state = payload["action_state"]
+            if state in {"REJECTED", "COMPLETED", "FAILED", "REFUSED"}:
+                self._protected_latch = False
+            return json.dumps(
+                {
+                    "status": state,
+                    "authority_available": state == "AWAITING_LOCAL_CONFIRMATION",
+                    "action_id": action_id,
+                    "code": payload["code"],
+                    "message": payload["message"],
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        return json.dumps(
+            {
+                "status": "REFUSED",
+                "authority_available": False,
+                "action_id": action_id,
+                "code": payload.get("code", "ACTION_UNAVAILABLE"),
+                "message": payload.get("message", "Action is unavailable."),
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+    def handle_transfer_status(
+        self, params: Optional[dict] = None, **kwargs: Any,
+    ) -> str:
+        del kwargs
+        return self._handle_transfer_action(params, cancel=False)
+
+    def handle_cancel_transfer(
+        self, params: Optional[dict] = None, **kwargs: Any,
+    ) -> str:
+        del kwargs
+        return self._handle_transfer_action(params, cancel=True)
+
     def on_session_start(self, **kwargs: Any) -> None:
         del kwargs
         try:
@@ -183,6 +300,18 @@ def _handle_open_wallet(params: Optional[dict] = None, **kwargs: Any) -> str:
 
 def _handle_wallet_balances(params: Optional[dict] = None, **kwargs: Any) -> str:
     return _runtime.handle_wallet_balances(params, **kwargs)
+
+
+def _handle_prepare_transfer(params: Optional[dict] = None, **kwargs: Any) -> str:
+    return _runtime.handle_prepare_transfer(params, **kwargs)
+
+
+def _handle_transfer_status(params: Optional[dict] = None, **kwargs: Any) -> str:
+    return _runtime.handle_transfer_status(params, **kwargs)
+
+
+def _handle_cancel_transfer(params: Optional[dict] = None, **kwargs: Any) -> str:
+    return _runtime.handle_cancel_transfer(params, **kwargs)
 
 
 def _on_session_start(**kwargs: Any) -> None:
@@ -236,6 +365,55 @@ def register(ctx: Any) -> None:
         },
         handler=_handle_wallet_balances,
         description="Read live public balances for the active Holon Account.",
+    )
+    transfer_properties = {
+        "network": {"type": "string", "enum": ["ethereum", "base"]},
+        "asset": {"type": "string", "enum": ["eth", "usdc"]},
+        "amount": {"type": "string"},
+        "recipient": {"type": "string"},
+    }
+    ctx.register_tool(
+        name=PREPARE_TRANSFER_TOOL,
+        toolset="holon",
+        schema={
+            "name": PREPARE_TRANSFER_TOOL,
+            "description": "Prepare an exact ETH or USDC transfer for local Wallet review.",
+            "parameters": {
+                "type": "object", "properties": transfer_properties,
+                "required": ["network", "asset", "amount", "recipient"],
+                "additionalProperties": False,
+            },
+        },
+        handler=_handle_prepare_transfer,
+        description="Prepare an exact transfer for local Wallet confirmation.",
+    )
+    action_parameters = {
+        "type": "object",
+        "properties": {"action_id": {"type": "string"}},
+        "required": ["action_id"],
+        "additionalProperties": False,
+    }
+    ctx.register_tool(
+        name=TRANSFER_STATUS_TOOL,
+        toolset="holon",
+        schema={
+            "name": TRANSFER_STATUS_TOOL,
+            "description": "Read the public lifecycle status of a prepared transfer.",
+            "parameters": action_parameters,
+        },
+        handler=_handle_transfer_status,
+        description="Read prepared transfer status.",
+    )
+    ctx.register_tool(
+        name=CANCEL_TRANSFER_TOOL,
+        toolset="holon",
+        schema={
+            "name": CANCEL_TRANSFER_TOOL,
+            "description": "Cancel a prepared transfer before submission.",
+            "parameters": action_parameters,
+        },
+        handler=_handle_cancel_transfer,
+        description="Cancel a prepared transfer.",
     )
     ctx.register_hook("on_session_start", _on_session_start)
     ctx.register_hook("pre_tool_call", _on_pre_tool_call)

@@ -384,3 +384,41 @@ def test_profile_change_and_close_terminalize_pending_flow() -> None:
     other.begin(profile().profile_id)
     other.close()
     assert other.state is TransferFlowState.LOCKED
+
+
+def test_external_flow_binds_guard_action_and_exact_expiry() -> None:
+    flow = TransferFlowCoordinator(lambda: NOW)
+    action_id = "act-22222222-2222-4222-8222-222222222222"
+    pending = flow.begin_external(
+        action_id,
+        profile().profile_id,
+        NOW,
+        NOW + timedelta(minutes=5),
+        "ethereum",
+        "eth",
+        10**15,
+    )
+    assert pending.action_id == action_id
+    assert pending.network_id == "ethereum"
+    assert pending.asset_id == "eth"
+    flow.close()
+    with pytest.raises(TransferFlowError):
+        flow.begin_external(
+            action_id,
+            profile().profile_id,
+            NOW,
+            NOW + timedelta(minutes=5),
+            "ethereum",
+            "eth",
+            10**15,
+        )
+    with pytest.raises(TransferFlowError):
+        TransferFlowCoordinator(lambda: NOW).begin_external(
+            "act-33333333-3333-4333-8333-333333333333",
+            profile().profile_id,
+            NOW,
+            NOW + timedelta(minutes=4),
+            "base",
+            "usdc",
+            1,
+        )

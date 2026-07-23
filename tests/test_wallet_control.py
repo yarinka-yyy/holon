@@ -16,6 +16,10 @@ from holon_wallet_control import (
     WalletPublicClient,
 )
 from holon_wallet_control.public_protocol import MAX_PUBLIC_BYTES
+from holon_wallet_control.authority_protocol import (
+    validate_request as validate_authority_request,
+    validate_response as validate_authority_response,
+)
 from holon_wallet_control.protocol import _process_image
 
 
@@ -211,3 +215,35 @@ def test_real_control_pipe_activates_and_stops_cleanly() -> None:
     finally:
         server.stop()
     assert thread is not None and not thread.is_alive()
+
+
+def test_authority_protocol_is_exact_correlated_and_fee_bounded() -> None:
+    request = {
+        "authority_version": "1", "kind": "prepare_transfer",
+        "flow_id": "11111111-1111-4111-8111-111111111111",
+        "action_id": "act-22222222-2222-4222-8222-222222222222",
+        "policy_version": "1", "network": "base", "asset": "usdc",
+        "amount_atomic": "1000000",
+        "recipient": "0x4444444444444444444444444444444444444444",
+        "created_at": "2026-07-23T12:00:00Z",
+        "expires_at": "2026-07-23T12:05:00Z",
+    }
+    checked = validate_authority_request(request)
+    response = {
+        "authority_version": "1", "kind": "transfer_prepared",
+        "flow_id": request["flow_id"], "action_id": request["action_id"],
+        "wallet_pid": 202, "profile_id": "profile-one",
+        "sender": "0x2222222222222222222222222222222222222222",
+        "recipient": request["recipient"], "network": "base", "asset": "usdc",
+        "amount_atomic": "1000000", "max_total_fee_wei": "500",
+        "prepared_digest": "a" * 64, "created_at": request["created_at"],
+        "expires_at": request["expires_at"], "code": "TRANSFER_PREPARED",
+    }
+    assert validate_authority_response(response, checked, 202) == response
+    for field, value in (("wallet_pid", 303), ("recipient", "0x" + "5" * 40)):
+        invalid = dict(response)
+        invalid[field] = value
+        with pytest.raises(ControlProtocolError):
+            validate_authority_response(invalid, checked, 202)
+    with pytest.raises(ControlProtocolError):
+        validate_authority_request(dict(request, password="hidden"))

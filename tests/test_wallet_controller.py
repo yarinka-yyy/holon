@@ -176,6 +176,75 @@ def test_public_restart_opens_main_without_password_session(tmp_path) -> None:
     assert not restarted.submitPassword(secret, "")
 
 
+def test_guard_handoff_lands_on_exact_review_and_edit_rejects(tmp_path) -> None:
+    item = controller(tmp_path)
+    secret = password()
+    item.beginCreate()
+    assert item.submitPassword(secret, secret)
+    assert item.finishBackup()
+    now = datetime.now(UTC)
+    request = {
+        "authority_version": "1",
+        "kind": "prepare_transfer",
+        "flow_id": "11111111-1111-4111-8111-111111111111",
+        "action_id": "act-22222222-2222-4222-8222-222222222222",
+        "policy_version": "1",
+        "network": "base",
+        "asset": "usdc",
+        "amount_atomic": "1000000",
+        "recipient": "0x4444444444444444444444444444444444444444",
+        "created_at": now.isoformat().replace("+00:00", "Z"),
+        "expires_at": (now + timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),
+    }
+    responses = []
+    statuses = []
+    item.attach_guard_status_sender(statuses.append)
+    item.prepareExternalTransfer(request, responses.append)
+    assert item.currentScreen == "transfer_review"
+    assert item.transferAction["actionId"] == request["action_id"]
+    assert item.transferAction["recipient"] == request["recipient"]
+    assert responses[0]["kind"] == "transfer_prepared"
+    assert responses[0]["prepared_digest"] == item.transferAction["digest"]
+    item.editTransfer()
+    assert item.currentScreen == "send"
+    assert item.transferRecipient == request["recipient"]
+    assert item.transferAmountInput == "1"
+    assert statuses[0]["event"] == "REJECTED"
+    assert statuses[0]["code"] == "TRANSFER_EDITED"
+
+
+def test_guard_handoff_refuses_busy_and_reserved_sender(tmp_path) -> None:
+    item = controller(tmp_path)
+    secret = password()
+    item.beginCreate()
+    assert item.submitPassword(secret, secret)
+    assert item.finishBackup()
+    now = datetime.now(UTC)
+    request = {
+        "authority_version": "1",
+        "kind": "prepare_transfer",
+        "flow_id": "11111111-1111-4111-8111-111111111111",
+        "action_id": "act-22222222-2222-4222-8222-222222222222",
+        "policy_version": "1",
+        "network": "base", "asset": "usdc", "amount_atomic": "1000000",
+        "recipient": item.activeProfile["address"],
+        "created_at": now.isoformat().replace("+00:00", "Z"),
+        "expires_at": (now + timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),
+    }
+    responses = []
+    item.prepareExternalTransfer(request, responses.append)
+    assert responses[0]["kind"] == "transfer_refused"
+    assert responses[0]["code"] == "RESERVED_RECIPIENT"
+    item.showSend()
+    assert item.prepareTransfer(
+        "base", "usdc", "0x5555555555555555555555555555555555555555", "1",
+    )
+    assert item.currentScreen == "transfer_review"
+    request["recipient"] = "0x4444444444444444444444444444444444444444"
+    item.prepareExternalTransfer(request, responses.append)
+    assert responses[-1]["code"] == "WALLET_BUSY"
+
+
 def test_recovery_requires_new_exact_action_after_wrong_password(tmp_path) -> None:
     item = controller(tmp_path)
     display = RecoveryDisplayStub()

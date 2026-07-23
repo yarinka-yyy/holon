@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import queue
 import threading
+import ctypes
+import sys
+from ctypes import wintypes
 from multiprocessing.connection import Connection, Listener
 
-from holon_contracts import ContractViolation, SecurityCode
+from holon_contracts import ContractViolation, MessageKind, SecurityCode
 from holon_journal import EventType
 from holon_guard_ipc.codec import (
     MAX_MESSAGE_BYTES, decode_message, encode_message, make_response, validate_request,
@@ -18,14 +21,30 @@ from .server_responses import contract_failure, generic_error
 MONITOR_INTERVAL = 0.25
 
 
+def _named_pipe_client_pid(handle: int) -> int:
+    if sys.platform != "win32":
+        raise RuntimeError("Client process verification is unavailable")
+    process_id = wintypes.ULONG()
+    call = ctypes.WinDLL("kernel32", use_last_error=True).GetNamedPipeClientProcessId
+    call.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.ULONG)]
+    call.restype = wintypes.BOOL
+    if not call(handle, ctypes.byref(process_id)) or process_id.value <= 0:
+        raise RuntimeError("Client process verification failed")
+    return int(process_id.value)
+
+
 class GuardServer:
     def __init__(
         self, pipe_name: str, authority: AuthorityService,
         monitor_interval: float = MONITOR_INTERVAL,
+        client_pid_probe=_named_pipe_client_pid,
+        status_server=None,
     ) -> None:
         self.pipe_name = pipe_name
         self.authority = authority
         self.monitor_interval = monitor_interval
+        self._client_pid_probe = client_pid_probe
+        self._status_server = status_server
         self._stop = threading.Event()
         self._listener: Listener | None = None
         self._connections: queue.Queue[Connection] = queue.Queue()
@@ -37,6 +56,11 @@ class GuardServer:
                 raise TimeoutError("Guard request timed out")
             frame = decode_message(connection.recv_bytes(MAX_MESSAGE_BYTES + 1))
             request, owner_pid = validate_request(frame)
+            if (
+                request.kind is MessageKind.TRANSFER_INTENT
+                and owner_pid != self._client_pid_probe(connection.fileno())
+            ):
+                raise RuntimeError("Authority owner mismatch")
             try:
                 response = self.authority.handle(request, owner_pid)
             except Exception:
@@ -79,6 +103,8 @@ class GuardServer:
 
     def serve_forever(self) -> None:
         self._listener = Listener(self.pipe_name, family="AF_PIPE", authkey=None)
+        if self._status_server is not None:
+            self._status_server.start()
         accept_thread = threading.Thread(target=self._accept_loop, daemon=True)
         accept_thread.start()
         try:
@@ -95,6 +121,8 @@ class GuardServer:
                     self.authority.audit_monitor(result, snapshot.action_id, snapshot.flow_id)
         finally:
             self._stop.set()
+            if self._status_server is not None:
+                self._status_server.stop()
             self._listener.close()
             accept_thread.join(timeout=1.0)
 

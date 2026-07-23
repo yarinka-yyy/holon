@@ -5,12 +5,17 @@ from __future__ import annotations
 import sys
 from concurrent.futures import Executor
 from importlib.resources import as_file, files
+from threading import Event
 
 from PySide6.QtCore import QObject, QSize, Qt, QUrl, Signal, Slot
 from PySide6.QtGui import QColor, QCloseEvent, QFont, QFontDatabase, QGuiApplication, QIcon
 from PySide6.QtQml import qmlRegisterType
 from PySide6.QtQuick import QQuickView
-from holon_wallet_control import CONTROL_PIPE_NAME, WalletControlServer
+from holon_guard_ipc.wallet_status import WalletStatusClient
+from holon_wallet_control import (
+    AUTHORITY_PIPE_NAME, CONTROL_PIPE_NAME, WalletAuthorityServer,
+    WalletControlServer,
+)
 
 from .approval import AllowanceReadService, RevokePreflightService
 from .broadcast import (
@@ -66,6 +71,39 @@ class _ControlBridge(QObject):
         application.controller.showGuardOpenNotice()
 
 
+class _AuthorityBridge(QObject):
+    requested = Signal(object)
+
+    def __init__(self, application: "WalletApplication") -> None:
+        super().__init__()
+        self._application = application
+        self.requested.connect(self._handle)
+
+    def request(self, request: dict[str, object]) -> dict[str, object]:
+        pending = {"request": request, "event": Event(), "response": None}
+        self.requested.emit(pending)
+        if not pending["event"].wait(24.0) or not isinstance(pending["response"], dict):
+            return WalletController._external_refusal(request, "WALLET_TIMEOUT")
+        return pending["response"]
+
+    @Slot(object)
+    def _handle(self, pending: dict[str, object]) -> None:
+        request = pending["request"]
+        application = self._application
+        application.window.showNormal()
+        application.window.raise_()
+        application.window.requestActivate()
+
+        def complete(response: dict[str, object]) -> None:
+            pending["response"] = response
+            pending["event"].set()
+
+        if request.get("kind") == "cancel_transfer":
+            complete(application.controller.cancelExternalTransfer(request))
+        else:
+            application.controller.prepareExternalTransfer(request, complete)
+
+
 class WalletApplication:
     """Owns the Qt runtime, controller, and QML-backed window."""
 
@@ -86,6 +124,9 @@ class WalletApplication:
         revoke_preflight_service: RevokePreflightService | None = None,
         control_pipe_name: str | None = None,
         control_server_factory=WalletControlServer,
+        authority_pipe_name: str | None = None,
+        authority_server_factory=WalletAuthorityServer,
+        status_client: WalletStatusClient | None = None,
     ) -> None:
         self.qt_app = qt_app or QGuiApplication.instance()
         if self.qt_app is None:
@@ -167,6 +208,8 @@ class WalletApplication:
         self.window.show()
         self._control_bridge: _ControlBridge | None = None
         self._control_server: WalletControlServer | None = None
+        self._authority_bridge: _AuthorityBridge | None = None
+        self._authority_server: WalletAuthorityServer | None = None
         if control_pipe_name is not None:
             self._control_bridge = _ControlBridge(self)
             self._control_server = control_server_factory(
@@ -174,6 +217,15 @@ class WalletApplication:
                 pipe_name=control_pipe_name,
             )
             self._control_server.start()
+        if authority_pipe_name is not None:
+            self._authority_bridge = _AuthorityBridge(self)
+            self._authority_server = authority_server_factory(
+                self._authority_bridge.request,
+                pipe_name=authority_pipe_name,
+            )
+            self._authority_server.start()
+            status = status_client or WalletStatusClient()
+            self.controller.attach_guard_status_sender(status.send)
 
     def _record_warnings(self, warnings: list[object]) -> None:
         self.qml_warnings.extend(str(warning.toString()) for warning in warnings)
@@ -182,6 +234,9 @@ class WalletApplication:
         return self.qt_app.exec()
 
     def close(self) -> None:
+        if self._authority_server is not None:
+            self._authority_server.stop()
+            self._authority_server = None
         if self._control_server is not None:
             self._control_server.stop()
             self._control_server = None
@@ -208,7 +263,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     application: WalletApplication | None = None
     try:
-        application = WalletApplication(control_pipe_name=CONTROL_PIPE_NAME)
+        application = WalletApplication(
+            control_pipe_name=CONTROL_PIPE_NAME,
+            authority_pipe_name=AUTHORITY_PIPE_NAME,
+        )
         return application.run()
     finally:
         if application is not None:

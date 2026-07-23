@@ -67,7 +67,10 @@ def validate_request(request: Mapping[str, Any]) -> tuple[ContractEnvelope, int 
     if envelope.kind not in REQUEST_KINDS:
         raise CodecError("Contract message is not a request")
     owner_pid = request.get("owner_pid")
-    requires_owner = envelope.kind is MessageKind.PREPARE_TRANSFER
+    requires_owner = envelope.kind in {
+        MessageKind.PREPARE_TRANSFER,
+        MessageKind.TRANSFER_INTENT,
+    }
     if requires_owner and (type(owner_pid) is not int or owner_pid <= 0):
         raise CodecError("Invalid owner PID")
     if not requires_owner and owner_pid is not None:

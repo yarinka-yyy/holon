@@ -15,6 +15,7 @@ NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 DECIMAL_RE = re.compile(r"^[1-9][0-9]{0,77}$")
 NON_NEGATIVE_RE = re.compile(r"^(?:0|[1-9][0-9]{0,77})$")
 ADDRESS_RE = re.compile(r"^0x[0-9A-Fa-f]{40}$")
+HUMAN_AMOUNT_RE = re.compile(r"^[0-9]+(?:[.,][0-9]+)?$")
 CODE_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
 FLOW_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 DANGEROUS_FIELDS = frozenset({"contract", "method", "selector", "calldata", "value"})
@@ -85,6 +86,46 @@ def _transfer(payload: Mapping[str, Any]) -> None:
         if not isinstance(payload.get(field), str) or DECIMAL_RE.fullmatch(payload[field]) is None:
             code = RefusalCode.MAX_FEE_REQUIRED if field.startswith("max_") else RefusalCode.AMOUNT_INVALID
             raise ContractViolation(code.value, "Invalid bounded amount.")
+    recipient = payload.get("recipient")
+    if not isinstance(recipient, str) or ADDRESS_RE.fullmatch(recipient) is None:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid recipient.")
+
+
+def _transfer_intent(payload: Mapping[str, Any]) -> None:
+    expected = PAYLOAD_FIELDS[MessageKind.TRANSFER_INTENT]
+    if DANGEROUS_FIELDS & set(payload):
+        raise ContractViolation(
+            RefusalCode.ARBITRARY_CALL_REFUSED.value, "Arbitrary calls are refused."
+        )
+    if set(payload) != expected:
+        code = (
+            RefusalCode.UNKNOWN_AUTHORITY_FIELD
+            if set(payload) - expected
+            else RefusalCode.REQUEST_INVALID
+        )
+        raise ContractViolation(code.value, "Invalid authority fields.")
+    network = payload.get("network")
+    asset = payload.get("asset")
+    if network not in {"ethereum", "base"} or asset not in {"eth", "usdc"}:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid transfer route.")
+    amount = payload.get("amount")
+    decimals = 18 if asset == "eth" else 6
+    if (
+        not isinstance(amount, str)
+        or len(amount) > 80
+        or "." in amount and "," in amount
+        or HUMAN_AMOUNT_RE.fullmatch(amount) is None
+    ):
+        raise ContractViolation(RefusalCode.AMOUNT_INVALID.value, "Invalid transfer amount.")
+    normalized = amount.replace(",", ".")
+    whole, separator, fraction = normalized.partition(".")
+    if len(fraction) > decimals:
+        raise ContractViolation(RefusalCode.AMOUNT_INVALID.value, "Invalid transfer amount.")
+    atomic = int(whole) * 10**decimals
+    if separator:
+        atomic += int(fraction.ljust(decimals, "0"))
+    if atomic <= 0 or atomic >= 2**256:
+        raise ContractViolation(RefusalCode.AMOUNT_INVALID.value, "Invalid transfer amount.")
     recipient = payload.get("recipient")
     if not isinstance(recipient, str) or ADDRESS_RE.fullmatch(recipient) is None:
         raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid recipient.")
@@ -234,6 +275,9 @@ def _response(kind: MessageKind, payload: Mapping[str, Any]) -> None:
 
 
 def validate_payload(kind: MessageKind, payload: Mapping[str, Any]) -> None:
+    if kind is MessageKind.TRANSFER_INTENT:
+        _transfer_intent(payload)
+        return
     if kind is MessageKind.PREPARE_TRANSFER:
         _transfer(payload)
         return

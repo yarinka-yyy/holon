@@ -8,7 +8,7 @@ import uuid
 from multiprocessing.connection import Client, Listener
 from pathlib import Path
 
-from holon_contracts import MessageKind
+from holon_contracts import MessageKind, make_envelope
 from holon_guard import GuardLifecycle, SnapshotStore
 from holon_guard.authority import AuthorityService
 from holon_guard.wallet import WalletBalancesResult, WalletOpenResult
@@ -161,3 +161,15 @@ class GuardServerTests(unittest.TestCase):
         silent.close()
         health = self.client.request(MessageKind.HEALTH_REQUEST)
         self.assertEqual(health.payload["code"], "OK")
+
+    def test_transfer_intent_claimed_owner_must_match_pipe_client(self) -> None:
+        request = make_envelope(
+            MessageKind.TRANSFER_INTENT,
+            {
+                "network": "base", "asset": "usdc", "amount": "1",
+                "recipient": "0x1111111111111111111111111111111111111111",
+            },
+            action_id=ACTION_ID,
+        )
+        with self.assertRaises(PipeProtocolError):
+            self.client.exchange(request, owner_pid=1)

@@ -13,6 +13,7 @@ class MessageKind(str, Enum):
     HEALTH_REQUEST = "health_request"
     OPEN_WALLET = "open_wallet"
     READ_WALLET_BALANCES = "read_wallet_balances"
+    TRANSFER_INTENT = "transfer_intent"
     PREPARE_TRANSFER = "prepare_transfer"
     ACTION_STATUS_REQUEST = "action_status_request"
     CANCEL_ACTION = "cancel_action"

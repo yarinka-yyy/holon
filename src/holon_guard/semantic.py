@@ -22,3 +22,20 @@ def semantic_fingerprint(
     material["method"] = None if operation is None else operation.lower()
     canonical = json.dumps(material, separators=(",", ":"), sort_keys=True).encode("utf-8")
     return hashlib.sha256(canonical).hexdigest()
+
+
+def intent_fingerprint(
+    *, policy_version: str, network: str, asset: str, amount_atomic: str,
+    recipient: str, max_total_fee_wei: str,
+) -> str:
+    material = {
+        "schema_version": "1",
+        "policy_version": policy_version,
+        "network": network,
+        "asset": asset,
+        "amount_atomic": amount_atomic,
+        "recipient": recipient.lower(),
+        "max_total_fee_wei": max_total_fee_wei,
+    }
+    canonical = json.dumps(material, separators=(",", ":"), sort_keys=True).encode()
+    return hashlib.sha256(canonical).hexdigest()

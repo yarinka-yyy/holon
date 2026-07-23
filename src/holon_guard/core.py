@@ -33,6 +33,8 @@ class GuardCore:
         self.id_factory = id_factory or (lambda: str(uuid.uuid4()))
         self.clock = clock
         self.wallet_handle: WalletHandle | None = None
+        self.prepared_digest: str | None = None
+        self.authority_expires_at: float | None = None
         self._lock = threading.RLock()
 
     @classmethod
@@ -76,6 +78,8 @@ class GuardCore:
             self.snapshot.action_fingerprint,
         )
         self.wallet_handle = None
+        self.prepared_digest = None
+        self.authority_expires_at = None
         self._persist(recovery)
         return self._result(False, code, "Protected flow requires recovery.")
 
@@ -92,9 +96,50 @@ class GuardCore:
         with self._lock:
             if self.snapshot.state not in {GuardState.ACTIVE, GuardState.EXITING}:
                 return self.health()
+            if (
+                self.authority_expires_at is not None
+                and self.clock() >= self.authority_expires_at
+            ):
+                if (
+                    self.snapshot.flow_id is None
+                    or self.snapshot.action_id is None
+                    or self.prepared_digest is None
+                    or not self.wallet.cancel_transfer({
+                        "authority_version": "1",
+                        "kind": "cancel_transfer",
+                        "flow_id": self.snapshot.flow_id,
+                        "action_id": self.snapshot.action_id,
+                        "prepared_digest": self.prepared_digest,
+                    })
+                ):
+                    return self._recover("WALLET_CALLBACK_FAILED")
+                try:
+                    self.ledger.terminalize(ActionState.FAILED, "ACTION_EXPIRED")
+                except ActionLedgerFailure:
+                    return self.disable_signing(SecurityCode.ACTION_STATE_INVALID.value)
+                self.wallet_handle = None
+                self.prepared_digest = None
+                self.authority_expires_at = None
+                self._persist(idle_snapshot(GuardState.NORMAL, "ACTION_EXPIRED", self.clock()))
+                return self._result(False, "ACTION_EXPIRED", "Protected flow expired.")
             if self.snapshot.owner_pid is None or not self.owner_probe.is_alive(
                 self.snapshot.owner_pid
             ):
+                if (
+                    self.prepared_digest is not None
+                    and self.snapshot.flow_id is not None
+                    and self.snapshot.action_id is not None
+                ):
+                    try:
+                        self.wallet.cancel_transfer({
+                            "authority_version": "1",
+                            "kind": "cancel_transfer",
+                            "flow_id": self.snapshot.flow_id,
+                            "action_id": self.snapshot.action_id,
+                            "prepared_digest": self.prepared_digest,
+                        })
+                    except Exception:
+                        pass
                 return self._recover("OWNER_INTERRUPTED")
             if self.wallet_handle is None:
                 return self._recover("WALLET_INTERRUPTED")
@@ -114,6 +159,8 @@ class GuardCore:
     def disable_signing(self, reason: str = "SIGNING_DISABLED") -> GuardResult:
         with self._lock:
             self.wallet_handle = None
+            self.prepared_digest = None
+            self.authority_expires_at = None
             self._persist(
                 idle_snapshot(GuardState.SIGNING_DISABLED, reason, self.clock())
             )

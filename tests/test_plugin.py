@@ -65,6 +65,39 @@ class StaticConnector:
             },
         )
 
+    def prepare_transfer(self, payload, action_id):
+        self.last_transfer = (payload, action_id)
+        return make_envelope(
+            MessageKind.PROTECTED_FLOW_STARTED,
+            {
+                "guard_state": "ACTIVE",
+                "action_state": "AWAITING_LOCAL_CONFIRMATION",
+                "flow_id": "11111111-1111-4111-8111-111111111111",
+                "code": "AWAITING_LOCAL_CONFIRMATION",
+                "message": "Action status is available.",
+            },
+            action_id=action_id,
+        )
+
+    def transfer_status(self, action_id):
+        return self._action_status(action_id, "AWAITING_LOCAL_CONFIRMATION")
+
+    def cancel_transfer(self, action_id):
+        return self._action_status(action_id, "REJECTED")
+
+    def _action_status(self, action_id, state):
+        return make_envelope(
+            MessageKind.ACTION_STATUS,
+            {
+                "guard_state": "NORMAL" if state == "REJECTED" else "ACTIVE",
+                "action_state": state,
+                "flow_id": None,
+                "code": "ACTION_STATUS",
+                "message": "Action status is available.",
+            },
+            action_id=action_id,
+        )
+
 
 class RaisingConnector:
     def probe(self) -> GuardHealth:
@@ -87,12 +120,16 @@ class FakeContext:
 
 
 class PluginTests(unittest.TestCase):
-    def test_registers_three_public_tools_and_two_hooks(self) -> None:
+    def test_registers_six_tools_and_two_hooks(self) -> None:
         context = FakeContext()
         plugin.register(context)
         self.assertEqual(
             [tool["name"] for tool in context.tools],
-            ["holon_health", "holon_open_wallet", "holon_wallet_balances"],
+            [
+                "holon_health", "holon_open_wallet", "holon_wallet_balances",
+                "holon_prepare_transfer", "holon_transfer_status",
+                "holon_cancel_transfer",
+            ],
         )
         self.assertEqual([name for name, _ in context.hooks], ["on_session_start", "pre_tool_call"])
 
@@ -101,7 +138,10 @@ class PluginTests(unittest.TestCase):
         payload = json.loads(runtime.handle_health({"secret": "must-not-return"}))
         self.assertEqual(payload["status"], "READY")
         self.assertEqual(
-            payload["capabilities"], ["health", "open_wallet", "wallet_balances"],
+            payload["capabilities"], [
+                "health", "open_wallet", "wallet_balances", "prepare_transfer",
+                "transfer_status", "cancel_transfer",
+            ],
         )
         self.assertFalse(payload["authority_available"])
         self.assertNotIn("must-not-return", json.dumps(payload))
@@ -183,6 +223,31 @@ class PluginTests(unittest.TestCase):
         self.assertEqual(result["action"], "block")
         self.assertNotIn("detail", result["message"])
         self.assertNotIn("hidden", result["message"])
+
+    def test_prepare_transfer_generates_action_and_returns_safe_intent(self) -> None:
+        connector = StaticConnector(GuardHealth.available(GuardState.NORMAL))
+        runtime = plugin.PluginRuntime(connector)
+        result = json.loads(runtime.handle_prepare_transfer({
+            "network": "base", "asset": "usdc", "amount": "1,25",
+            "recipient": "0x1111111111111111111111111111111111111111",
+        }))
+        self.assertEqual(result["status"], "AWAITING_LOCAL_CONFIRMATION")
+        self.assertTrue(result["action_id"].startswith("act-"))
+        self.assertEqual(connector.last_transfer[1], result["action_id"])
+        serialized = json.dumps(result).lower()
+        for field in ("flow_id", "digest", "pid", "path", "pipe", "password"):
+            self.assertNotIn(field, serialized)
+
+    def test_status_and_cancel_expose_no_internal_flow(self) -> None:
+        runtime = plugin.PluginRuntime(
+            StaticConnector(GuardHealth.available(GuardState.ACTIVE)),
+        )
+        action_id = "act-22222222-2222-4222-8222-222222222222"
+        status = json.loads(runtime.handle_transfer_status({"action_id": action_id}))
+        cancelled = json.loads(runtime.handle_cancel_transfer({"action_id": action_id}))
+        self.assertEqual(status["status"], "AWAITING_LOCAL_CONFIRMATION")
+        self.assertEqual(cancelled["status"], "REJECTED")
+        self.assertNotIn("flow", json.dumps((status, cancelled)).lower())
 
 
 if __name__ == "__main__":
