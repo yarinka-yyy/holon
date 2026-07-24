@@ -24,6 +24,11 @@ Item {
         ReceivePage { objectName: "receivePage"; anchors.fill: parent; active: walletController.currentScreen === "receive" }
         SettingsPage { objectName: "settingsPage"; anchors.fill: parent; active: walletController.currentScreen === "settings" }
         SettingsInfoPage { objectName: "settingsInfoPage"; anchors.fill: parent; active: walletController.currentScreen === "settings_info" }
+        TrustedRecipientsPage { objectName: "trustedRecipientsPage"; anchors.fill: parent; active: walletController.currentScreen === "trusted_recipients" }
+        TrustedRoutePage { objectName: "trustedRoutePage"; anchors.fill: parent; active: walletController.currentScreen === "trusted_route" }
+        TrustedRecipientPage { objectName: "trustedRecipientPage"; anchors.fill: parent; active: walletController.currentScreen === "trusted_recipient" }
+        TrustedPolicyReviewPage { objectName: "trustedReviewPage"; anchors.fill: parent; active: walletController.currentScreen === "trusted_review" }
+        TrustedPolicyPasswordPage { objectName: "trustedPasswordPage"; anchors.fill: parent; active: walletController.currentScreen === "trusted_password" }
         RecoveryReviewPage { objectName: "recoveryReviewPage"; anchors.fill: parent; active: walletController.currentScreen === "recovery_review" }
         RecoveryConfirmPage { objectName: "recoveryConfirmPage"; anchors.fill: parent; active: walletController.currentScreen === "recovery_confirm" }
         RecoveryRevealPage { objectName: "recoveryRevealPage"; anchors.fill: parent; active: walletController.currentScreen === "recovery_reveal" }

@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
+import json
 from concurrent.futures import Executor, Future, ThreadPoolExecutor
+from dataclasses import replace
 from datetime import UTC, datetime
 from threading import Event
 from typing import Callable
@@ -85,6 +88,19 @@ from .transfer import (
     transfer_action_to_map,
     transfer_route,
 )
+from .trusted_recipients import (
+    ROUTE_ORDER,
+    TrustedDraftError,
+    TrustedDraftUnavailable,
+    TrustedPolicyDraft,
+    TrustedPolicyDraftStore,
+    TrustedRecipientDraft,
+    TrustedRouteDraft,
+    parse_cap,
+    parse_fee_cap,
+    validate_draft_address,
+    validate_label,
+)
 from .vault import (
     MIN_PASSWORD_LENGTH,
     AuthenticationFailedError,
@@ -147,6 +163,7 @@ class WalletController(QObject):
     receiveNetworkChanged = Signal()
     historySelectionChanged = Signal()
     settingsSectionChanged = Signal()
+    trustedDraftChanged = Signal()
     recoveryChanged = Signal()
     approvalChanged = Signal()
     guardNoticeChanged = Signal()
@@ -178,6 +195,7 @@ class WalletController(QObject):
         super().__init__()
         self._repository = repository or VaultRepository()
         self._settings = SettingsStore(self._repository.paths)
+        self._trusted_store = TrustedPolicyDraftStore(self._repository.paths)
         self._public_data_service = public_data_service or PublicDataService()
         self._price_service = price_service or PriceService()
         self._history_store = history_store or HistoryStore(self._repository.paths)
@@ -261,6 +279,13 @@ class WalletController(QObject):
         self._history_available = True
         self._selected_history_action_id = ""
         self._settings_section = ""
+        self._trusted_saved = TrustedPolicyDraft()
+        self._trusted_working = TrustedPolicyDraft()
+        self._trusted_available = True
+        self._trusted_status = ""
+        self._trusted_route_key: tuple[str, str] | None = None
+        self._trusted_recipient_address: str | None = None
+        self._trusted_review_digest = ""
         self._wallets_return_screen = "settings"
         self._recovery_flow = RecoveryFlowCoordinator()
         self._recovery_selection = ""
@@ -645,6 +670,77 @@ class WalletController(QObject):
     @Property(str, notify=settingsSectionChanged)
     def settingsSection(self) -> str:
         return self._settings_section
+
+    @Property("QVariantList", notify=trustedDraftChanged)
+    def trustedDraftRoutes(self) -> list[dict[str, object]]:
+        return [self._trusted_route_map(item) for item in self._trusted_working.routes]
+
+    @Property("QVariantMap", notify=trustedDraftChanged)
+    def trustedRoute(self) -> dict[str, object]:
+        if self._trusted_route_key is not None:
+            route = self._trusted_working.route(*self._trusted_route_key)
+            if route is not None:
+                value = self._trusted_route_map(route)
+                value["isNew"] = False
+                return value
+        return {
+            "networkId": "base", "networkLabel": "Base",
+            "assetId": "usdc", "assetLabel": "USDC", "chainId": "8453",
+            "routeAmount": "", "routeAmountUsd": "Data unavailable",
+            "feeAmount": "", "feeUsd": "Data unavailable",
+            "recipients": [], "recipientCount": 0, "isNew": True,
+        }
+
+    @Property("QVariantMap", notify=trustedDraftChanged)
+    def trustedRecipient(self) -> dict[str, object]:
+        route = (
+            self._trusted_working.route(*self._trusted_route_key)
+            if self._trusted_route_key is not None else None
+        )
+        if route is not None and self._trusted_recipient_address is not None:
+            recipient = next((
+                item for item in route.recipients
+                if item.address.lower() == self._trusted_recipient_address.lower()
+            ), None)
+            if recipient is not None:
+                value = self._trusted_recipient_map(route, recipient)
+                value["isNew"] = False
+                return value
+        return {
+            "label": "", "address": "", "shortAddress": "",
+            "maxAmount": "", "maxAmountUsd": "Data unavailable", "isNew": True,
+        }
+
+    @Property(bool, notify=trustedDraftChanged)
+    def trustedDraftAvailable(self) -> bool:
+        return self._trusted_available
+
+    @Property(bool, notify=trustedDraftChanged)
+    def trustedDraftDirty(self) -> bool:
+        return self._trusted_working.canonical() != self._trusted_saved.canonical()
+
+    @Property(str, notify=trustedDraftChanged)
+    def trustedDraftStatus(self) -> str:
+        return self._trusted_status
+
+    @Slot(str, str, result=str)
+    def trustedAmountUsd(self, asset: str, amount_input: str) -> str:
+        try:
+            atomic = int(parse_cap(amount_input, asset))
+            spec = transfer_route("base", asset)
+        except (TrustedDraftError, TransferPreflightError, ValueError):
+            return "Data unavailable"
+        return estimate_asset_usd(
+            atomic, spec.decimals, asset, self._price_snapshot,
+        )
+
+    @Slot(str, result=str)
+    def trustedFeeUsd(self, fee_input: str) -> str:
+        try:
+            atomic = int(parse_fee_cap(fee_input))
+        except (TrustedDraftError, ValueError):
+            return "Data unavailable"
+        return estimate_wei_usd(atomic, self._price_snapshot)
 
     @Property(str, notify=recoveryChanged)
     def recoverySelection(self) -> str:
@@ -1447,6 +1543,313 @@ class WalletController(QObject):
         self._set_screen("settings")
 
     @Slot()
+    def showTrustedRecipients(self) -> None:
+        if (
+            not self._state.profiles
+            or self._closed
+            or self._mainnet_in_progress
+            or self._transfer_flow.current is not None
+            or self._transfer_flow.pending is not None
+            or self._recovery_flow.current is not None
+            or self._revoke_flow.current is not None
+            or self._revoke_flow.pending is not None
+        ):
+            return
+        self._set_error("")
+        self._trusted_route_key = None
+        self._trusted_recipient_address = None
+        self._trusted_review_digest = ""
+        try:
+            loaded = self._trusted_store.load()
+            self._trusted_saved = loaded
+            self._trusted_working = loaded
+            self._trusted_available = True
+            self._trusted_status = "Draft only · transfers remain disabled"
+        except TrustedDraftUnavailable:
+            self._trusted_saved = TrustedPolicyDraft()
+            self._trusted_working = TrustedPolicyDraft()
+            self._trusted_available = False
+            self._trusted_status = "Trusted recipients draft is unavailable"
+        self.trustedDraftChanged.emit()
+        self._set_screen("trusted_recipients")
+
+    @Slot()
+    def closeTrustedRecipients(self) -> None:
+        self._trusted_working = self._trusted_saved
+        self._trusted_route_key = None
+        self._trusted_recipient_address = None
+        self._trusted_review_digest = ""
+        self._settings_section = "security"
+        self.settingsSectionChanged.emit()
+        self.trustedDraftChanged.emit()
+        self._set_screen("settings_info")
+
+    @Slot()
+    def beginTrustedRoute(self) -> None:
+        if not self._trusted_available or self._current_screen != "trusted_recipients":
+            return
+        self._trusted_route_key = None
+        self._trusted_recipient_address = None
+        self._set_error("")
+        self.trustedDraftChanged.emit()
+        self._set_screen("trusted_route")
+
+    @Slot(str, str, result=bool)
+    def editTrustedRoute(self, network: str, asset: str) -> bool:
+        if (
+            not self._trusted_available
+            or self._current_screen != "trusted_recipients"
+            or self._trusted_working.route(network, asset) is None
+        ):
+            return False
+        self._trusted_route_key = network, asset
+        self._trusted_recipient_address = None
+        self._set_error("")
+        self.trustedDraftChanged.emit()
+        self._set_screen("trusted_route")
+        return True
+
+    @Slot(str, str, str, str, result=bool)
+    def saveTrustedRoute(
+        self, network: str, asset: str, amount_input: str, fee_input: str,
+    ) -> bool:
+        self._set_error("")
+        if (
+            not self._trusted_available
+            or self._current_screen != "trusted_route"
+            or (network, asset) not in ROUTE_ORDER
+        ):
+            self._set_error("Select a supported network and asset")
+            return False
+        original = (
+            self._trusted_working.route(*self._trusted_route_key)
+            if self._trusted_route_key is not None else None
+        )
+        if (
+            original is None
+            and self._trusted_working.route(network, asset) is not None
+        ):
+            self._set_error("This transfer route already exists")
+            return False
+        if original is not None and original.key != (network, asset):
+            self._set_error("Create a new route to change network or asset")
+            return False
+        try:
+            route = TrustedRouteDraft(
+                network,
+                asset,
+                NETWORK_BY_ID[network].chain_id,
+                parse_cap(amount_input, asset),
+                parse_fee_cap(fee_input),
+                original.recipients if original is not None else (),
+            )
+            working = self._trusted_working
+            self._trusted_working = working.with_route(route)
+        except (TrustedDraftError, ValueError) as exc:
+            self._set_error(str(exc))
+            return False
+        self._trusted_route_key = route.key
+        self._trusted_review_digest = ""
+        self._trusted_status = "Unsaved draft changes"
+        self.trustedDraftChanged.emit()
+        return True
+
+    @Slot()
+    def closeTrustedRoute(self) -> None:
+        self._trusted_route_key = None
+        self._trusted_recipient_address = None
+        self._set_error("")
+        self.trustedDraftChanged.emit()
+        self._set_screen("trusted_recipients")
+
+    @Slot(result=bool)
+    def deleteTrustedRoute(self) -> bool:
+        if self._current_screen != "trusted_route" or self._trusted_route_key is None:
+            return False
+        self._trusted_working = self._trusted_working.without_route(
+            *self._trusted_route_key,
+        )
+        self._trusted_route_key = None
+        self._trusted_recipient_address = None
+        self._trusted_review_digest = ""
+        self._trusted_status = "Unsaved draft changes"
+        self._set_error("")
+        self.trustedDraftChanged.emit()
+        self._set_screen("trusted_recipients")
+        return True
+
+    @Slot(str, result=bool)
+    def beginTrustedRecipient(self, address: str = "") -> bool:
+        if self._current_screen != "trusted_route" or self._trusted_route_key is None:
+            return False
+        route = self._trusted_working.route(*self._trusted_route_key)
+        if route is None:
+            return False
+        if address and not any(
+            item.address.lower() == address.lower() for item in route.recipients
+        ):
+            return False
+        self._trusted_recipient_address = address or None
+        self._set_error("")
+        self.trustedDraftChanged.emit()
+        self._set_screen("trusted_recipient")
+        return True
+
+    @Slot(str, str, str, result=bool)
+    def saveTrustedRecipient(
+        self, label: str, address: str, amount_input: str,
+    ) -> bool:
+        self._set_error("")
+        active = self._state.active_profile
+        route = (
+            self._trusted_working.route(*self._trusted_route_key)
+            if self._trusted_route_key is not None else None
+        )
+        if not self._trusted_available or active is None or route is None:
+            return False
+        if self._current_screen != "trusted_recipient":
+            return False
+        try:
+            normalized = validate_draft_address(address, active.address)
+            recipient = TrustedRecipientDraft(
+                validate_label(label), normalized, parse_cap(amount_input, route.asset),
+            )
+            if int(recipient.max_amount_atomic) > int(route.max_amount_atomic):
+                raise TrustedDraftError("Recipient limit exceeds route limit")
+            retained = tuple(
+                item for item in route.recipients
+                if self._trusted_recipient_address is None
+                or item.address.lower() != self._trusted_recipient_address.lower()
+            )
+            if any(item.address.lower() == normalized.lower() for item in retained):
+                raise TrustedDraftError("Recipient already exists on this route")
+            changed = replace(route, recipients=retained + (recipient,))
+            self._trusted_working = self._trusted_working.with_route(changed)
+        except (TrustedDraftError, ValueError) as exc:
+            self._set_error(str(exc))
+            return False
+        self._trusted_recipient_address = normalized
+        self._trusted_review_digest = ""
+        self._trusted_status = "Unsaved draft changes"
+        self.trustedDraftChanged.emit()
+        self._set_screen("trusted_route")
+        return True
+
+    @Slot()
+    def closeTrustedRecipient(self) -> None:
+        self._trusted_recipient_address = None
+        self._set_error("")
+        self.trustedDraftChanged.emit()
+        self._set_screen("trusted_route")
+
+    @Slot(result=bool)
+    def deleteTrustedRecipient(self) -> bool:
+        route = (
+            self._trusted_working.route(*self._trusted_route_key)
+            if self._trusted_route_key is not None else None
+        )
+        if route is None or self._trusted_recipient_address is None:
+            return False
+        if self._current_screen != "trusted_recipient":
+            return False
+        changed = replace(route, recipients=tuple(
+            item for item in route.recipients
+            if item.address.lower() != self._trusted_recipient_address.lower()
+        ))
+        self._trusted_working = self._trusted_working.with_route(changed)
+        self._trusted_recipient_address = None
+        self._trusted_review_digest = ""
+        self._trusted_status = "Unsaved draft changes"
+        self._set_error("")
+        self.trustedDraftChanged.emit()
+        self._set_screen("trusted_route")
+        return True
+
+    @Slot(result=bool)
+    def showTrustedDraftReview(self) -> bool:
+        if not self._trusted_available or self._current_screen != "trusted_recipients":
+            return False
+        try:
+            envelope = self._trusted_working.to_envelope()
+        except TrustedDraftError as exc:
+            self._set_error(str(exc))
+            return False
+        self._set_error("")
+        self._trusted_review_digest = _trusted_envelope_digest(envelope)
+        self._set_screen("trusted_review")
+        return True
+
+    @Slot()
+    def closeTrustedDraftReview(self) -> None:
+        self._trusted_review_digest = ""
+        self._set_error("")
+        self._set_screen("trusted_recipients")
+
+    @Slot()
+    def beginTrustedDraftPassword(self) -> None:
+        if (
+            self._trusted_available
+            and self._current_screen == "trusted_review"
+            and self._trusted_review_digest
+        ):
+            self._set_error("")
+            self._set_screen("trusted_password")
+
+    @Slot()
+    def closeTrustedDraftPassword(self) -> None:
+        self._set_error("")
+        self._set_screen("trusted_review")
+
+    @Slot(str, result=bool)
+    def submitTrustedDraft(self, password: str) -> bool:
+        self._set_error("")
+        if (
+            len(password) < MIN_PASSWORD_LENGTH
+            or not self._trusted_available
+            or self._current_screen != "trusted_password"
+            or not self._trusted_review_digest
+        ):
+            self._set_error("Enter the Wallet password")
+            return False
+        try:
+            candidate = self._trusted_working.canonical()
+            candidate_envelope = candidate.to_envelope()
+            if not hmac.compare_digest(
+                _trusted_envelope_digest(candidate_envelope),
+                self._trusted_review_digest,
+            ):
+                self._trusted_review_digest = ""
+                self._set_error("Draft changed; review it again")
+                self._set_screen("trusted_recipients")
+                return False
+            self._repository.authenticate(password)
+            del password
+            self._trusted_store.save(candidate)
+            self._trusted_saved = candidate
+            self._trusted_working = candidate
+            self._trusted_status = (
+                "Draft saved. Transfers remain disabled until policy activation."
+            )
+            self._trusted_review_digest = ""
+            self.trustedDraftChanged.emit()
+            self._set_screen("trusted_recipients")
+            return True
+        except AuthenticationFailedError:
+            self._set_error("Authentication failed")
+        except TrustedDraftError as exc:
+            self._set_error(str(exc))
+        except TrustedDraftUnavailable:
+            self._set_error("Trusted recipients draft could not be saved")
+        except VaultUnavailableError:
+            self._set_error("Wallet vault is unavailable")
+        finally:
+            try:
+                del password
+            except UnboundLocalError:
+                pass
+        return False
+
+    @Slot()
     def showApprovals(self) -> None:
         if (
             not self._state.profiles
@@ -1864,6 +2267,49 @@ class WalletController(QObject):
             self._flow = "none"
             self.flowChanged.emit()
             self._set_screen("unavailable")
+
+    def _trusted_route_map(
+        self, route: TrustedRouteDraft,
+    ) -> dict[str, object]:
+        spec = transfer_route(route.network, route.asset)
+        return {
+            "networkId": route.network,
+            "networkLabel": NETWORK_BY_ID[route.network].label,
+            "assetId": route.asset,
+            "assetLabel": spec.symbol,
+            "chainId": str(route.chain_id),
+            "routeAmount": route.display_amount(),
+            "routeAmountUsd": estimate_asset_usd(
+                int(route.max_amount_atomic), spec.decimals, route.asset,
+                self._price_snapshot,
+            ),
+            "feeAmount": route.display_fee(),
+            "feeUsd": estimate_wei_usd(
+                int(route.max_total_fee_wei), self._price_snapshot,
+            ),
+            "recipientCount": len(route.recipients),
+            "recipients": [
+                self._trusted_recipient_map(route, item)
+                for item in route.recipients
+            ],
+        }
+
+    def _trusted_recipient_map(
+        self,
+        route: TrustedRouteDraft,
+        recipient: TrustedRecipientDraft,
+    ) -> dict[str, object]:
+        spec = transfer_route(route.network, route.asset)
+        return {
+            "label": recipient.label,
+            "address": recipient.address,
+            "shortAddress": f"{recipient.address[:8]}…{recipient.address[-6:]}",
+            "maxAmount": recipient.display_amount(route.asset),
+            "maxAmountUsd": estimate_asset_usd(
+                int(recipient.max_amount_atomic), spec.decimals, route.asset,
+                self._price_snapshot,
+            ),
+        }
 
     def _replace_profiles(
         self, profiles: tuple[ProfileSummary, ...], active_id: str | None = None,
@@ -2592,6 +3038,7 @@ class WalletController(QObject):
             else "Refresh unavailable"
         )
         self.publicDataChanged.emit()
+        self.trustedDraftChanged.emit()
 
     def _clear_clipboard(self) -> None:
         self._clipboard_timer.stop()
@@ -2686,6 +3133,13 @@ def _recovery_value(
         for index in range(len(private_key)):
             private_key[index] = 0
         del private_key
+
+
+def _trusted_envelope_digest(value: dict[str, object]) -> str:
+    encoded = json.dumps(
+        value, ensure_ascii=False, separators=(",", ":"), sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 def _display_local_time(timestamp: str) -> str:
     parsed = datetime.fromisoformat(timestamp.removesuffix("Z") + "+00:00")

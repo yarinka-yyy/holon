@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 from PySide6.QtCore import QLocale, QTime
 from holon_policy import Policy, RecipientRule, TransferRule
+from holon_policy.baseline import load_baseline_policy
 
 from holon_wallet.broadcast import (
     TRANSFER_EVENT_TOPIC,
@@ -22,6 +23,12 @@ from holon_wallet.transfer import (
     TransferPreflightCode,
     TransferPreflightError,
     format_atomic_amount,
+)
+from holon_wallet.trusted_recipients import (
+    TrustedPolicyDraft,
+    TrustedPolicyDraftStore,
+    TrustedRecipientDraft,
+    TrustedRouteDraft,
 )
 from holon_wallet.vault import VaultRepository
 from holon_wallet.wallet_crypto import generate_mnemonic, import_private_key
@@ -171,6 +178,150 @@ def test_create_persists_only_after_backup_acknowledgement(tmp_path) -> None:
     assert item.backupWords == []
     assert len(item.profiles) == 1
     assert item.profiles[0]["typeLabel"] == "Seed phrase"
+
+
+def test_trusted_recipients_draft_review_password_restart_and_cancel(tmp_path) -> None:
+    item = controller(tmp_path)
+    secret = password()
+    item.beginCreate()
+    assert item.submitPassword(secret, secret)
+    assert item.finishBackup()
+
+    item.showSettings()
+    assert item.showSettingsSection("security")
+    item.showTrustedRecipients()
+    assert item.currentScreen == "trusted_recipients"
+    assert item.trustedDraftAvailable
+    assert item.trustedDraftRoutes == []
+    assert "transfers remain disabled" in item.trustedDraftStatus
+
+    item.beginTrustedRoute()
+    assert item.saveTrustedRoute("base", "usdc", "100", "0.005")
+    item.closeTrustedRoute()
+    assert not item.showTrustedDraftReview()
+    assert item.errorMessage == "Each route requires at least one recipient"
+    assert item.editTrustedRoute("base", "usdc")
+    assert item.beginTrustedRecipient()
+    recipient = "0x" + "ab" * 20
+    assert item.saveTrustedRecipient("Savings", recipient, "50")
+    route = item.trustedRoute
+    assert route["routeAmount"] == "100"
+    assert route["routeAmountUsd"] == "≈ $100.00"
+    assert route["feeUsd"] == "≈ $12.50"
+    assert route["recipients"][0]["label"] == "Savings"
+    assert route["recipients"][0]["maxAmountUsd"] == "≈ $50.00"
+    assert not item.saveTrustedRoute("ethereum", "eth", "1", "0.005")
+    assert item.errorMessage == "Create a new route to change network or asset"
+
+    item.closeTrustedRoute()
+    assert item.showTrustedDraftReview()
+    assert not item.saveTrustedRoute("base", "usdc", "75", "0.003")
+    reviewed = item._trusted_working
+    item.beginTrustedDraftPassword()
+    item._trusted_working = TrustedPolicyDraft()
+    assert not item.submitTrustedDraft(secret)
+    assert item.errorMessage == "Draft changed; review it again"
+    assert not (tmp_path / "transfer-policy-draft.json").exists()
+    item._trusted_working = reviewed
+    assert item.showTrustedDraftReview()
+    item.beginTrustedDraftPassword()
+    assert not item.submitTrustedDraft(secret + "-wrong")
+    assert item.errorMessage == "Authentication failed"
+    assert not (tmp_path / "transfer-policy-draft.json").exists()
+    assert item.submitTrustedDraft(secret)
+    assert item.currentScreen == "trusted_recipients"
+    assert not item.trustedDraftDirty
+    assert item.trustedDraftStatus == (
+        "Draft saved. Transfers remain disabled until policy activation."
+    )
+    stored = (tmp_path / "transfer-policy-draft.json").read_text(encoding="utf-8")
+    assert '"authority_enabled": false' in stored
+    assert '"max_amount_atomic": "100000000"' in stored
+    assert "$" not in stored and "USD" not in stored
+
+    restarted = controller(tmp_path)
+    restarted.showSettings()
+    assert restarted.showSettingsSection("security")
+    restarted.showTrustedRecipients()
+    assert restarted.trustedDraftRoutes[0]["recipients"][0]["label"] == "Savings"
+    assert restarted.editTrustedRoute("base", "usdc")
+    assert restarted.saveTrustedRoute("base", "usdc", "80", "0.004")
+    restarted.closeTrustedRoute()
+    assert restarted.trustedDraftDirty
+    restarted.closeTrustedRecipients()
+    restarted.showTrustedRecipients()
+    assert restarted.trustedDraftRoutes[0]["routeAmount"] == "100"
+    assert (tmp_path / "transfer-policy-draft.json").read_text(encoding="utf-8") == stored
+
+    assert restarted.editTrustedRoute("base", "usdc")
+    checksum = restarted.trustedRoute["recipients"][0]["address"]
+    assert restarted.beginTrustedRecipient(checksum)
+    assert restarted.saveTrustedRecipient("Demo wallet", checksum, "40")
+    assert restarted.trustedRoute["recipients"][0]["label"] == "Demo wallet"
+    assert restarted.beginTrustedRecipient(checksum)
+    assert restarted.deleteTrustedRecipient()
+    assert restarted.trustedRoute["recipients"] == []
+    assert restarted.deleteTrustedRoute()
+    assert restarted.trustedDraftRoutes == []
+
+
+def test_corrupt_trusted_draft_does_not_block_public_wallet(tmp_path) -> None:
+    item = controller(tmp_path)
+    secret = password()
+    item.beginCreate()
+    assert item.submitPassword(secret, secret)
+    assert item.finishBackup()
+    (tmp_path / "transfer-policy-draft.json").write_text("{broken", encoding="utf-8")
+
+    item.showSettings()
+    assert item.showSettingsSection("security")
+    item.showTrustedRecipients()
+    assert not item.trustedDraftAvailable
+    assert item.trustedDraftRoutes == []
+    item.closeTrustedRecipients()
+    item.showMain()
+    assert item.currentScreen == "main"
+    assert item.portfolioData["assets"]
+
+
+def test_trusted_draft_cannot_enable_direct_or_guard_transfer(tmp_path) -> None:
+    item = controller(tmp_path)
+    secret = password()
+    item.beginCreate()
+    assert item.submitPassword(secret, secret)
+    assert item.finishBackup()
+    recipient = "0x" + "44" * 20
+    TrustedPolicyDraftStore(item._repository.paths).save(TrustedPolicyDraft((
+        TrustedRouteDraft(
+            "base", "usdc", 8453, "100000000", "5000000000000000",
+            (TrustedRecipientDraft("Demo", recipient, "50000000"),),
+        ),
+    )))
+    item._mainnet_executor.policy = MainnetBroadcastPolicy.from_policy(
+        load_baseline_policy(),
+    )
+
+    item.showSend()
+    assert not item.prepareTransfer("base", "usdc", recipient, "1")
+    assert item.transferError == "Transfers are disabled by local policy"
+    assert item._transfer_preflight_service.calls == []
+
+    now = datetime.now(UTC)
+    request = {
+        "authority_version": "1", "kind": "prepare_transfer",
+        "flow_id": "11111111-1111-4111-8111-111111111111",
+        "action_id": "act-22222222-2222-4222-8222-222222222222",
+        "policy_version": "1", "network": "base", "asset": "usdc",
+        "amount_atomic": "1000000", "recipient": recipient,
+        "created_at": now.isoformat().replace("+00:00", "Z"),
+        "expires_at": (now + timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),
+    }
+    item.showMain()
+    responses = []
+    item.prepareExternalTransfer(request, responses.append)
+    assert responses[0]["code"] == "POLICY_AUTHORITY_DISABLED"
+    assert item._transfer_preflight_service.calls == []
+    assert item._test_mainnet_rpc.send_calls == 0
 
 
 def test_public_restart_opens_main_without_password_session(tmp_path) -> None:

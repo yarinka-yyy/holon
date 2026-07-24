@@ -578,6 +578,67 @@ def test_guard_transfer_handoff_opens_existing_review_qml(tmp_path, qt_app) -> N
         app.close()
 
 
+def test_trusted_recipients_qml_review_and_password_save(tmp_path, qt_app) -> None:
+    repository = VaultRepository(WalletPaths(tmp_path))
+    password = fresh_password()
+    repository.create_new(
+        password, repository.new_record(generate_mnemonic(), "Main Account"),
+    )
+    app = make_app(qt_app, repository)
+    try:
+        invoke(child(app, "settingsAction"), "trigger")
+        QTest.qWait(220)
+        invoke(child(app, "settingsSecurity"), "trigger")
+        QTest.qWait(220)
+        assert child(app, "settingsTrustedRecipients").property("visible")
+        invoke(child(app, "settingsTrustedRecipients"), "trigger")
+        QTest.qWait(220)
+        assert app.controller.currentScreen == "trusted_recipients"
+        assert child(app, "trustedDraftStatus").property("text") == (
+            "Draft only · transfers remain disabled"
+        )
+
+        invoke(child(app, "trustedAddRouteButton"), "trigger")
+        QTest.qWait(220)
+        assert app.controller.currentScreen == "trusted_route"
+        set_text(app, "trustedRouteAmountInput", "100")
+        set_text(app, "trustedFeeAmountInput", "0.005")
+        invoke(child(app, "trustedSaveRouteButton"), "trigger")
+        assert app.controller.trustedRoute["routeAmount"] == "100"
+        assert child(app, "trustedAddRecipientButton").property("enabled")
+
+        invoke(child(app, "trustedAddRecipientButton"), "trigger")
+        QTest.qWait(220)
+        assert app.controller.currentScreen == "trusted_recipient"
+        set_text(app, "trustedLabelInput", "Demo wallet")
+        set_text(app, "trustedAddressInput", "0x" + "ab" * 20)
+        set_text(app, "trustedRecipientAmountInput", "50")
+        invoke(child(app, "trustedSaveRecipientButton"), "trigger")
+        assert app.controller.currentScreen == "trusted_route"
+        assert app.controller.trustedRoute["recipients"][0]["label"] == "Demo wallet"
+        assert child(app, "trustedRecipientUsd").property("text") == "≈ $50.00"
+
+        app.controller.closeTrustedRoute()
+        invoke(child(app, "trustedReviewButton"), "trigger")
+        QTest.qWait(220)
+        assert app.controller.currentScreen == "trusted_review"
+        assert child(app, "trustedReviewList").property("count") == 1
+        invoke(child(app, "trustedReviewContinueButton"), "trigger")
+        QTest.qWait(220)
+        assert app.controller.currentScreen == "trusted_password"
+        set_text(app, "trustedPasswordInput", password)
+        invoke(child(app, "trustedPasswordSubmitButton"), "trigger")
+        assert app.controller.currentScreen == "trusted_recipients"
+        assert child(app, "trustedDraftStatus").property("text") == (
+            "Draft saved. Transfers remain disabled until policy activation."
+        )
+        assert repository.paths.transfer_policy_draft.is_file()
+        assert not app.controller.trustedDraftDirty
+        assert app._test_mainnet_rpc.send_calls == 0
+    finally:
+        app.close()
+
+
 def test_mainnet_runtime_gate_wrong_password_and_cancel(tmp_path, qt_app) -> None:
     repository = VaultRepository(WalletPaths(tmp_path))
     password = fresh_password()

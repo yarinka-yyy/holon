@@ -40,9 +40,18 @@ PageState {
         }
     }
     SettingsRow {
+        objectName: "settingsTrustedRecipients"
+        visible: root.section === "security"
+        x: 28; y: 438; width: 458; height: 78
+        title: "Trusted Recipients"
+        subtitle: "Prepare exact addresses and per-transfer limits"
+        iconSource: "assets/user.svg"
+        onTriggered: walletController.showTrustedRecipients()
+    }
+    SettingsRow {
         objectName: "settingsRecoveryMaterial"
         visible: root.section === "security"
-        x: 28; y: 438; width: 458; height: 86
+        x: 28; y: 530; width: 458; height: 78
         title: "Recovery Material"
         subtitle: "Reveal for " + (walletController.activeProfile.label || "active Account")
         iconSource: "assets/lock.svg"
@@ -51,7 +60,7 @@ PageState {
     SettingsRow {
         objectName: "settingsTokenApprovals"
         visible: root.section === "security"
-        x: 28; y: 538; width: 458; height: 86
+        x: 28; y: 622; width: 458; height: 78
         title: "Token Approvals"
         subtitle: "Inspect and revoke bounded USDC allowances"
         iconSource: "assets/check.svg"
@@ -59,7 +68,7 @@ PageState {
     }
     Text {
         visible: root.section === "security" && walletController.errorMessage.length > 0
-        x: 48; y: 642; width: 418; horizontalAlignment: Text.AlignHCenter
+        x: 48; y: 720; width: 418; horizontalAlignment: Text.AlignHCenter
         text: walletController.errorMessage; color: Design.warning
         font.family: Design.fontFamily; font.pixelSize: 12; wrapMode: Text.Wrap
     }
