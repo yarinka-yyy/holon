@@ -13,7 +13,9 @@ from holon_guard import GuardLifecycle, SnapshotStore
 from holon_guard.authority import AuthorityService
 from holon_guard.wallet import WalletBalancesResult, WalletOpenResult
 from holon_guard.server import GuardServer
-from holon_guard_ipc import MAX_MESSAGE_BYTES, PipeClient, PipeProtocolError, PipeUnavailable
+from holon_guard_ipc import (
+    MAX_MESSAGE_BYTES, PipeClient, PipeGuardClient, PipeProtocolError, PipeUnavailable,
+)
 from holon_guard_ipc.codec import decode_message, validate_response
 from guard_support import ACTION_ID, enabled_policy, make_audit, make_ledger, transfer_request
 
@@ -77,7 +79,8 @@ class GuardServerTests(unittest.TestCase):
         store = SnapshotStore(root / "guard-state.json")
         store.bootstrap_normal_for_test(1.0)
         ledger = make_ledger(root)
-        lifecycle = GuardLifecycle(store, store.load(), MockWallet(), LiveOwner(), ledger)
+        self.wallet = MockWallet()
+        lifecycle = GuardLifecycle(store, store.load(), self.wallet, LiveOwner(), ledger)
         authority = AuthorityService(lifecycle, enabled_policy(), make_audit(root))
         self.pipe = rf"\\.\pipe\Holon.Guard.test.{uuid.uuid4()}"
         self.server = GuardServer(self.pipe, authority, 0.02)
@@ -173,3 +176,21 @@ class GuardServerTests(unittest.TestCase):
         )
         with self.assertRaises(PipeProtocolError):
             self.client.exchange(request, owner_pid=1)
+
+    def test_pipe_client_exact_recovery_invalidates_interrupted_action(self) -> None:
+        self.client.exchange(transfer_request(), owner_pid=101)
+        self.wallet.handle.exit_code = 1
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            health = self.client.request(MessageKind.HEALTH_REQUEST)
+            if health.payload["guard_state"] == "RECOVERY_REQUIRED":
+                break
+            time.sleep(0.02)
+        self.assertEqual(health.payload["guard_state"], "RECOVERY_REQUIRED")
+        recovered = PipeGuardClient(self.client).recover_transfer(ACTION_ID)
+        self.assertEqual(recovered.kind, MessageKind.ACTION_STATUS)
+        self.assertEqual(recovered.payload["guard_state"], "NORMAL")
+        self.assertEqual(recovered.payload["action_state"], "RECOVERY_REQUIRED")
+        self.assertEqual(recovered.payload["code"], "RECOVERY_COMPLETED")
+        repeated = PipeGuardClient(self.client).recover_transfer(ACTION_ID)
+        self.assertEqual(repeated.payload["code"], "RECOVERY_NOT_REQUIRED")

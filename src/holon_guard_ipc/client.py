@@ -130,3 +130,6 @@ class PipeGuardClient:
 
     def cancel_transfer(self, action_id: str) -> ContractEnvelope:
         return self.client.request(MessageKind.CANCEL_ACTION, action_id=action_id)
+
+    def recover_transfer(self, action_id: str) -> ContractEnvelope:
+        return self.client.request(MessageKind.RECOVER_ACTION, action_id=action_id)

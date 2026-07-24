@@ -85,6 +85,19 @@ class StaticConnector:
     def cancel_transfer(self, action_id):
         return self._action_status(action_id, "REJECTED")
 
+    def recover_transfer(self, action_id):
+        return make_envelope(
+            MessageKind.ACTION_STATUS,
+            {
+                "guard_state": "NORMAL",
+                "action_state": "RECOVERY_REQUIRED",
+                "flow_id": None,
+                "code": "RECOVERY_COMPLETED",
+                "message": "Action status is available.",
+            },
+            action_id=action_id,
+        )
+
     def _action_status(self, action_id, state):
         return make_envelope(
             MessageKind.ACTION_STATUS,
@@ -120,7 +133,7 @@ class FakeContext:
 
 
 class PluginTests(unittest.TestCase):
-    def test_registers_six_tools_and_two_hooks(self) -> None:
+    def test_registers_seven_tools_and_two_hooks(self) -> None:
         context = FakeContext()
         plugin.register(context)
         self.assertEqual(
@@ -128,7 +141,7 @@ class PluginTests(unittest.TestCase):
             [
                 "holon_health", "holon_open_wallet", "holon_wallet_balances",
                 "holon_prepare_transfer", "holon_transfer_status",
-                "holon_cancel_transfer",
+                "holon_cancel_transfer", "holon_recover_transfer",
             ],
         )
         self.assertEqual([name for name, _ in context.hooks], ["on_session_start", "pre_tool_call"])
@@ -140,7 +153,7 @@ class PluginTests(unittest.TestCase):
         self.assertEqual(
             payload["capabilities"], [
                 "health", "open_wallet", "wallet_balances", "prepare_transfer",
-                "transfer_status", "cancel_transfer",
+                "transfer_status", "cancel_transfer", "recover_transfer",
             ],
         )
         self.assertFalse(payload["authority_available"])
@@ -186,7 +199,7 @@ class PluginTests(unittest.TestCase):
     def test_session_start_never_raises(self) -> None:
         plugin.PluginRuntime(RaisingConnector()).on_session_start(session_id="public")
 
-    def test_terminal_blocks_in_every_protected_state(self) -> None:
+    def test_every_non_lifecycle_tool_blocks_in_every_protected_state(self) -> None:
         for state in (
             GuardState.ENTERING,
             GuardState.ACTIVE,
@@ -195,15 +208,42 @@ class PluginTests(unittest.TestCase):
         ):
             with self.subTest(state=state):
                 runtime = plugin.PluginRuntime(StaticConnector(GuardHealth.available(state)))
-                self.assertEqual(runtime.pre_tool_call("terminal")["action"], "block")
+                for tool_name in (
+                    "terminal", "browser", "future_unknown_tool",
+                    "holon_open_wallet", "holon_wallet_balances",
+                    "holon_prepare_transfer",
+                ):
+                    with self.subTest(tool_name=tool_name):
+                        self.assertEqual(
+                            runtime.pre_tool_call(tool_name)["action"], "block",
+                        )
 
-    def test_health_is_allowed_and_normal_restores_terminal(self) -> None:
+    def test_lifecycle_allowlist_is_available_in_protected_state(self) -> None:
+        runtime = plugin.PluginRuntime(
+            StaticConnector(GuardHealth.available(GuardState.ACTIVE)),
+        )
+        for tool_name in (
+            "holon_health", "holon_transfer_status", "holon_cancel_transfer",
+            "holon_recover_transfer",
+        ):
+            with self.subTest(tool_name=tool_name):
+                self.assertIsNone(runtime.pre_tool_call(tool_name))
+
+    def test_normal_restores_all_tools(self) -> None:
         connector = StaticConnector(GuardHealth.available(GuardState.ACTIVE))
         runtime = plugin.PluginRuntime(connector)
-        self.assertIsNone(runtime.pre_tool_call("holon_health"))
         self.assertEqual(runtime.pre_tool_call("terminal")["action"], "block")
         connector.health = GuardHealth.available(GuardState.NORMAL)
         self.assertIsNone(runtime.pre_tool_call("terminal"))
+        self.assertIsNone(runtime.pre_tool_call("future_unknown_tool"))
+
+    def test_signing_disabled_does_not_globally_block_hermes(self) -> None:
+        connector = StaticConnector(GuardHealth.available(GuardState.ACTIVE))
+        runtime = plugin.PluginRuntime(connector)
+        self.assertEqual(runtime.pre_tool_call("terminal")["action"], "block")
+        connector.health = GuardHealth.available(GuardState.SIGNING_DISABLED)
+        self.assertIsNone(runtime.pre_tool_call("terminal"))
+        self.assertIsNone(runtime.pre_tool_call("future_unknown_tool"))
 
     def test_uncertain_state_blocks_only_after_protected_latch(self) -> None:
         connector = StaticConnector(GuardHealth.uncertain())
@@ -237,6 +277,19 @@ class PluginTests(unittest.TestCase):
         serialized = json.dumps(result).lower()
         for field in ("flow_id", "digest", "pid", "path", "pipe", "password"):
             self.assertNotIn(field, serialized)
+        self.assertEqual(result["turn_state"], "END_REQUIRED")
+        self.assertIn("End this turn", result["next_step"])
+
+    def test_successful_prepare_latches_and_blocks_second_prepare(self) -> None:
+        connector = StaticConnector(GuardHealth.available(GuardState.NORMAL))
+        runtime = plugin.PluginRuntime(connector)
+        runtime.handle_prepare_transfer({
+            "network": "base", "asset": "eth", "amount": "0.01",
+            "recipient": "0x1111111111111111111111111111111111111111",
+        })
+        connector.health = GuardHealth.available(GuardState.ACTIVE)
+        result = runtime.pre_tool_call("holon_prepare_transfer")
+        self.assertEqual(result["action"], "block")
 
     def test_status_and_cancel_expose_no_internal_flow(self) -> None:
         runtime = plugin.PluginRuntime(
@@ -248,6 +301,40 @@ class PluginTests(unittest.TestCase):
         self.assertEqual(status["status"], "AWAITING_LOCAL_CONFIRMATION")
         self.assertEqual(cancelled["status"], "REJECTED")
         self.assertNotIn("flow", json.dumps((status, cancelled)).lower())
+
+    def test_mismatched_terminal_response_cannot_clear_retained_latch(self) -> None:
+        connector = StaticConnector(GuardHealth.available(GuardState.NORMAL))
+        runtime = plugin.PluginRuntime(connector)
+        prepared = json.loads(runtime.handle_prepare_transfer({
+            "network": "base", "asset": "eth", "amount": "0.01",
+            "recipient": "0x1111111111111111111111111111111111111111",
+        }))
+        connector.health = GuardHealth.uncertain()
+        other_action = "act-33333333-3333-4333-8333-333333333333"
+        runtime.handle_cancel_transfer({"action_id": other_action})
+        self.assertEqual(runtime.pre_tool_call("terminal")["action"], "block")
+        runtime.handle_cancel_transfer({"action_id": prepared["action_id"]})
+        self.assertIsNone(runtime.pre_tool_call("terminal"))
+
+    def test_recovery_returns_safe_terminal_result_and_clears_exact_latch(self) -> None:
+        connector = StaticConnector(GuardHealth.available(GuardState.RECOVERY_REQUIRED))
+        runtime = plugin.PluginRuntime(connector)
+        runtime.on_session_start()
+        action_id = "act-22222222-2222-4222-8222-222222222222"
+        payload = json.loads(runtime.handle_recover_transfer({"action_id": action_id}))
+        self.assertEqual(payload["status"], "RECOVERED")
+        self.assertEqual(payload["code"], "RECOVERY_COMPLETED")
+        self.assertNotIn("flow", json.dumps(payload).lower())
+        connector.health = GuardHealth.available(GuardState.NORMAL)
+        self.assertIsNone(runtime.pre_tool_call("terminal"))
+
+    def test_invalid_recovery_arguments_do_not_echo_secret_canary(self) -> None:
+        runtime = plugin.PluginRuntime(RaisingConnector())
+        payload = runtime.handle_recover_transfer({
+            "action_id": "bad", "password": "hidden-canary",
+        })
+        self.assertNotIn("hidden-canary", payload)
+        self.assertNotIn("password", payload.lower())
 
 
 if __name__ == "__main__":

@@ -23,11 +23,14 @@ WALLET_BALANCES_TOOL = "holon_wallet_balances"
 PREPARE_TRANSFER_TOOL = "holon_prepare_transfer"
 TRANSFER_STATUS_TOOL = "holon_transfer_status"
 CANCEL_TRANSFER_TOOL = "holon_cancel_transfer"
-PILOT_BLOCKED_TOOL = "terminal"
+RECOVER_TRANSFER_TOOL = "holon_recover_transfer"
 CAPABILITIES = [
     "health", "open_wallet", "wallet_balances", "prepare_transfer",
-    "transfer_status", "cancel_transfer",
+    "transfer_status", "cancel_transfer", "recover_transfer",
 ]
+PROTECTED_TOOL_ALLOWLIST = frozenset({
+    HEALTH_TOOL, TRANSFER_STATUS_TOOL, CANCEL_TRANSFER_TOOL, RECOVER_TRANSFER_TOOL,
+})
 
 
 def _unavailable_balances() -> dict[str, Any]:
@@ -58,14 +61,16 @@ class PluginRuntime:
     def __init__(self, connector: GuardConnector) -> None:
         self._connector = connector
         self._protected_latch = False
+        self._protected_action_id: str | None = None
 
     def _observe(self, health: GuardHealth) -> None:
         if health.availability is not GuardAvailability.AVAILABLE:
             return
         if health.state in PROTECTED_STATES:
             self._protected_latch = True
-        elif health.state is GuardState.NORMAL:
+        elif health.state in {GuardState.NORMAL, GuardState.SIGNING_DISABLED}:
             self._protected_latch = False
+            self._protected_action_id = None
 
     def _health_response(self, health: GuardHealth) -> str:
         status = "READY" if health.availability is GuardAvailability.AVAILABLE else "DEGRADED"
@@ -173,6 +178,7 @@ class PluginRuntime:
             return self._safe_transfer_failure(action_id)
         if response.kind is MessageKind.PROTECTED_FLOW_STARTED:
             self._protected_latch = True
+            self._protected_action_id = action_id
             return json.dumps(
                 {
                     "status": "AWAITING_LOCAL_CONFIRMATION",
@@ -184,6 +190,8 @@ class PluginRuntime:
                     "recipient": params["recipient"],
                     "code": response.payload["code"],
                     "message": "Review and confirm the exact transfer in Wallet.",
+                    "turn_state": "END_REQUIRED",
+                    "next_step": "End this turn and wait for the user's decision in Wallet.",
                 },
                 ensure_ascii=False,
                 separators=(",", ":"),
@@ -218,8 +226,7 @@ class PluginRuntime:
         payload = response.payload
         if response.kind is MessageKind.ACTION_STATUS:
             state = payload["action_state"]
-            if state in {"REJECTED", "COMPLETED", "FAILED", "REFUSED"}:
-                self._protected_latch = False
+            self._observe_action_payload(payload, action_id)
             return json.dumps(
                 {
                     "status": state,
@@ -255,6 +262,65 @@ class PluginRuntime:
         del kwargs
         return self._handle_transfer_action(params, cancel=True)
 
+    def handle_recover_transfer(
+        self, params: Optional[dict] = None, **kwargs: Any,
+    ) -> str:
+        del kwargs
+        if not isinstance(params, dict) or set(params) != {"action_id"}:
+            return self._safe_transfer_failure()
+        action_id = params.get("action_id")
+        if not isinstance(action_id, str):
+            return self._safe_transfer_failure()
+        try:
+            response = self._connector.recover_transfer(action_id)
+        except Exception:
+            return self._safe_transfer_failure()
+        payload = response.payload
+        if (
+            response.kind is MessageKind.ACTION_STATUS
+            and payload.get("guard_state") == GuardState.NORMAL.value
+            and payload.get("code") == "RECOVERY_COMPLETED"
+        ):
+            self._observe_action_payload(payload, action_id)
+            return json.dumps(
+                {
+                    "status": "RECOVERED",
+                    "authority_available": False,
+                    "action_id": action_id,
+                    "code": "RECOVERY_COMPLETED",
+                    "message": "The interrupted transfer is invalid. Start a new transfer if needed.",
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        return json.dumps(
+            {
+                "status": "REFUSED",
+                "authority_available": False,
+                "action_id": action_id,
+                "code": payload.get("code", "RECOVERY_UNAVAILABLE"),
+                "message": payload.get("message", "Transfer recovery is unavailable."),
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+    def _observe_action_payload(
+        self, payload: dict[str, Any], action_id: str,
+    ) -> None:
+        try:
+            state = GuardState(payload["guard_state"])
+        except (KeyError, TypeError, ValueError):
+            return
+        if state in PROTECTED_STATES:
+            self._protected_latch = True
+            if self._protected_action_id is None:
+                self._protected_action_id = action_id
+            return
+        if state is GuardState.NORMAL and self._protected_action_id in {None, action_id}:
+            self._protected_latch = False
+            self._protected_action_id = None
+
     def on_session_start(self, **kwargs: Any) -> None:
         del kwargs
         try:
@@ -269,9 +335,7 @@ class PluginRuntime:
         **kwargs: Any,
     ) -> Optional[dict[str, str]]:
         del args, kwargs
-        if tool_name == HEALTH_TOOL:
-            return None
-        if tool_name != PILOT_BLOCKED_TOOL:
+        if tool_name in PROTECTED_TOOL_ALLOWLIST:
             return None
         try:
             health = self._connector.probe()
@@ -283,7 +347,7 @@ class PluginRuntime:
             return None
         return {
             "action": "block",
-            "message": "[Holon] The terminal is blocked while a protected Wallet flow may be active.",
+            "message": "[Holon] Tools are blocked while a protected Wallet transfer may be active. Use Holon status, cancel, or recovery.",
         }
 
 
@@ -312,6 +376,10 @@ def _handle_transfer_status(params: Optional[dict] = None, **kwargs: Any) -> str
 
 def _handle_cancel_transfer(params: Optional[dict] = None, **kwargs: Any) -> str:
     return _runtime.handle_cancel_transfer(params, **kwargs)
+
+
+def _handle_recover_transfer(params: Optional[dict] = None, **kwargs: Any) -> str:
+    return _runtime.handle_recover_transfer(params, **kwargs)
 
 
 def _on_session_start(**kwargs: Any) -> None:
@@ -414,6 +482,20 @@ def register(ctx: Any) -> None:
         },
         handler=_handle_cancel_transfer,
         description="Cancel a prepared transfer.",
+    )
+    ctx.register_tool(
+        name=RECOVER_TRANSFER_TOOL,
+        toolset="holon",
+        schema={
+            "name": RECOVER_TRANSFER_TOOL,
+            "description": (
+                "Invalidate an interrupted transfer after Guard reports recovery required. "
+                "Recovery never resumes or retries the transfer."
+            ),
+            "parameters": action_parameters,
+        },
+        handler=_handle_recover_transfer,
+        description="Finish safe recovery for an interrupted transfer.",
     )
     ctx.register_hook("on_session_start", _on_session_start)
     ctx.register_hook("pre_tool_call", _on_pre_tool_call)

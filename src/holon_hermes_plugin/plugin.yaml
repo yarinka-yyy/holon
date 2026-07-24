@@ -8,6 +8,7 @@ provides_tools:
   - holon_prepare_transfer
   - holon_transfer_status
   - holon_cancel_transfer
+  - holon_recover_transfer
 provides_hooks:
   - on_session_start
   - pre_tool_call
