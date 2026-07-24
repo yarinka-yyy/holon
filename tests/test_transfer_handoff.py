@@ -107,10 +107,35 @@ def test_exact_intent_waits_for_wallet_preflight_and_completes_status():
 def test_disabled_policy_and_amount_cap_refuse_before_wallet():
     with tempfile.TemporaryDirectory() as temporary:
         wallet = AuthorityWallet()
-        disabled = PolicyEngine(Policy("1", "1", False, ()))
+        disabled = PolicyEngine(Policy("2", "1", False, ()))
         lifecycle, authority = service(Path(temporary), wallet, disabled)
         result = authority.handle(intent(), owner_pid=123)
         assert result.payload["code"] == "POLICY_AUTHORITY_DISABLED"
+        assert wallet.prepares == []
+        assert lifecycle.snapshot.state.value == "NORMAL"
+
+
+def test_unknown_recipient_is_refused_before_wallet_or_protected_flow():
+    with tempfile.TemporaryDirectory() as temporary:
+        wallet = AuthorityWallet()
+        lifecycle, authority = service(Path(temporary), wallet)
+        result = authority.handle(
+            intent(recipient="0x3333333333333333333333333333333333333333"),
+            owner_pid=123,
+        )
+        assert result.kind is MessageKind.REFUSAL
+        assert result.payload["code"] == "RECIPIENT_NOT_ALLOWED"
+        assert wallet.prepares == []
+        assert lifecycle.snapshot.state.value == "NORMAL"
+
+
+def test_recipient_amount_cap_is_refused_before_wallet_or_protected_flow():
+    with tempfile.TemporaryDirectory() as temporary:
+        wallet = AuthorityWallet()
+        lifecycle, authority = service(Path(temporary), wallet)
+        result = authority.handle(intent(amount="1.000001"), owner_pid=123)
+        assert result.kind is MessageKind.REFUSAL
+        assert result.payload["code"] == "AMOUNT_LIMIT_EXCEEDED"
         assert wallet.prepares == []
         assert lifecycle.snapshot.state.value == "NORMAL"
 

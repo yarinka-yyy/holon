@@ -50,7 +50,7 @@ def prepare_intent(service, request, owner_pid: int):
             "Transfer intent is invalid.",
         )
     decision, rule = service.policy.evaluate_intent(
-        route.network_id, route.asset_id, amount_atomic,
+        route.network_id, route.asset_id, amount_atomic, recipient,
     )
     fee_cap = "1" if rule is None else rule.max_total_fee_wei
     fingerprint = intent_fingerprint(

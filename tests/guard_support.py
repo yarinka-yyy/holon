@@ -36,7 +36,7 @@ def enabled_policy() -> PolicyEngine:
     return PolicyEngine(
         Policy.from_dict(
             {
-                "schema_version": "1",
+                "schema_version": "2",
                 "policy_version": "1",
                 "authority_enabled": True,
                 "transfer_rules": [
@@ -46,6 +46,10 @@ def enabled_policy() -> PolicyEngine:
                         "chain_id": 8453,
                         "max_amount_atomic": "1000000",
                         "max_total_fee_wei": "500",
+                        "recipients": [{
+                            "address": RECIPIENT,
+                            "max_amount_atomic": "1000000",
+                        }],
                     }
                 ],
             }

@@ -19,13 +19,17 @@ TRANSFER = {
 
 def policy_value(enabled: bool = True) -> dict:
     return {
-        "schema_version": "1",
+        "schema_version": "2",
         "policy_version": "1",
         "authority_enabled": enabled,
         "transfer_rules": [
             {
                 "network": "base", "asset": "usdc", "chain_id": 8453,
                 "max_amount_atomic": "1000000", "max_total_fee_wei": "500",
+                "recipients": [{
+                    "address": TRANSFER["recipient"],
+                    "max_amount_atomic": "750000",
+                }],
             }
         ] if enabled else [],
     }
@@ -42,18 +46,20 @@ class PolicyTests(unittest.TestCase):
 
     def test_enabled_policy_allows_only_bounded_network_asset_amount_and_fee(self) -> None:
         engine = PolicyEngine(Policy.from_dict(policy_value()))
-        self.assertTrue(engine.evaluate_transfer(TRANSFER).allowed)
+        allowed = dict(TRANSFER, amount_atomic="750000")
+        self.assertTrue(engine.evaluate_transfer(allowed).allowed)
         cases = (
             ("action_type", "revoke", RefusalCode.ACTION_NOT_ALLOWED.value),
             ("network", "ethereum", RefusalCode.NETWORK_NOT_ALLOWED.value),
             ("asset", "eth", RefusalCode.ASSET_NOT_ALLOWED.value),
-            ("amount_atomic", "1000001", RefusalCode.AMOUNT_LIMIT_EXCEEDED.value),
+            ("recipient", "0x2222222222222222222222222222222222222222", RefusalCode.RECIPIENT_NOT_ALLOWED.value),
+            ("amount_atomic", "750001", RefusalCode.AMOUNT_LIMIT_EXCEEDED.value),
             ("max_total_fee_wei", "501", RefusalCode.MAX_FEE_EXCEEDED.value),
             ("policy_version", "2", RefusalCode.POLICY_VERSION_MISMATCH.value),
         )
         for field, value, code in cases:
             with self.subTest(field=field):
-                payload = dict(TRANSFER)
+                payload = dict(allowed)
                 payload[field] = value
                 self.assertEqual(engine.evaluate_transfer(payload).code, code)
 
@@ -72,11 +78,31 @@ class PolicyTests(unittest.TestCase):
                 load_policy(path, "0" * 64)
             self.assertEqual(changed.exception.code, "POLICY_INTEGRITY_FAILED")
             self.assertEqual(load_policy(path, policy_digest(value)), Policy.from_dict(value))
-            incompatible = dict(value, schema_version="2")
+            incompatible = dict(value, schema_version="3")
             path.write_text(json.dumps(incompatible), encoding="utf-8")
             with self.assertRaises(PolicyLoadError) as rejected:
                 load_policy(path, policy_digest(incompatible))
             self.assertEqual(rejected.exception.code, "POLICY_STATE_INVALID")
+
+    def test_recipient_rules_are_strict_bounded_and_unique(self) -> None:
+        value = policy_value()
+        rule = value["transfer_rules"][0]
+        invalid_values = (
+            dict(rule, recipients=[]),
+            dict(rule, recipients=[{"address": "not-an-address", "max_amount_atomic": "1"}]),
+            dict(rule, recipients=[
+                {"address": TRANSFER["recipient"], "max_amount_atomic": "1"},
+                {"address": TRANSFER["recipient"].upper().replace("0X", "0x"), "max_amount_atomic": "1"},
+            ]),
+            dict(rule, recipients=[{
+                "address": TRANSFER["recipient"], "max_amount_atomic": "1000001",
+            }]),
+        )
+        for candidate in invalid_values:
+            with self.subTest(candidate=candidate):
+                changed = dict(value, transfer_rules=[candidate])
+                with self.assertRaises(ValueError):
+                    Policy.from_dict(changed)
 
 
 if __name__ == "__main__":

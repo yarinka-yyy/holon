@@ -94,7 +94,7 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 policy = load_baseline_policy()
             except PolicyLoadError as exc:
-                policy = Policy("1", "1", False, ())
+                policy = Policy("2", "1", False, ())
                 policy_failure = exc.code
             install_failure = _integrity_failure(args)
             ledger = ActionLedger(action_store, action_snapshot)

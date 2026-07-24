@@ -31,10 +31,14 @@ class CrossRuntimeContractTests(unittest.TestCase):
 
     def _server_code(self) -> str:
         policy = {
-            "schema_version": "1", "policy_version": "1", "authority_enabled": True,
+            "schema_version": "2", "policy_version": "1", "authority_enabled": True,
             "transfer_rules": [{
                 "network": "base", "asset": "usdc", "chain_id": 8453,
                 "max_amount_atomic": "1000000", "max_total_fee_wei": "500",
+                "recipients": [{
+                    "address": "0x1111111111111111111111111111111111111111",
+                    "max_amount_atomic": "1000000",
+                }],
             }],
         }
         return (

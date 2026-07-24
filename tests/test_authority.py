@@ -133,7 +133,7 @@ class AuthorityTests(unittest.TestCase):
         self.assertEqual(replay.payload["code"], "ACTION_REPLAYED")
 
     def test_disabled_policy_is_a_refusal_not_a_technical_error(self) -> None:
-        disabled = Policy("1", "1", False, ())
+        disabled = Policy("2", "1", False, ())
         service = AuthorityService(self.lifecycle, PolicyEngine(disabled), self.audit)
         response = service.handle(transfer_request(), owner_pid=101)
         self.assertEqual(response.kind, MessageKind.REFUSAL)

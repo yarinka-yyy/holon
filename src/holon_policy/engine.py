@@ -7,7 +7,7 @@ from typing import Any, Mapping
 
 from holon_contracts import RefusalCode
 
-from .model import Policy, TransferRule
+from .model import Policy, RecipientRule, TransferRule
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,19 +50,19 @@ class PolicyEngine:
         rule = next((item for item in network_rules if item.asset == asset), None)
         if rule is None:
             return PolicyDecision.refuse(RefusalCode.ASSET_NOT_ALLOWED, "Asset is not allowed.")
-        if int(payload["amount_atomic"]) > int(rule.max_amount_atomic):
-            return PolicyDecision.refuse(
-                RefusalCode.AMOUNT_LIMIT_EXCEEDED, "Amount exceeds the policy limit."
-            )
+        limits = self._evaluate_limits(
+            rule, int(payload["amount_atomic"]), payload.get("recipient")
+        )
+        if not limits.allowed:
+            return limits
         if int(payload["max_total_fee_wei"]) > int(rule.max_total_fee_wei):
             return PolicyDecision.refuse(
                 RefusalCode.MAX_FEE_EXCEEDED, "Maximum fee exceeds the policy limit."
             )
         return PolicyDecision.allow()
 
-    def evaluate_intent(
-        self, network: object, asset: object, amount_atomic: int,
-    ) -> tuple[PolicyDecision, TransferRule | None]:
+    def evaluate_intent(self, network: object, asset: object, amount_atomic: int,
+                        recipient: object) -> tuple[PolicyDecision, TransferRule | None]:
         if not self.policy.authority_enabled:
             return PolicyDecision.refuse(
                 RefusalCode.POLICY_AUTHORITY_DISABLED,
@@ -80,21 +80,36 @@ class PolicyEngine:
             return PolicyDecision.refuse(
                 RefusalCode.ASSET_NOT_ALLOWED, "Asset is not allowed."
             ), None
-        if type(amount_atomic) is not int or amount_atomic <= 0:
+        limits = self._evaluate_limits(rule, amount_atomic, recipient)
+        return limits, rule if limits.allowed else None
+
+    @classmethod
+    def _evaluate_limits(cls, rule: TransferRule, amount: object,
+                         recipient: object) -> PolicyDecision:
+        if type(amount) is not int or amount <= 0:
+            return PolicyDecision.refuse(RefusalCode.AMOUNT_INVALID, "Amount is invalid.")
+        recipient_rule = cls._recipient(rule, recipient)
+        if recipient_rule is None:
             return PolicyDecision.refuse(
-                RefusalCode.AMOUNT_INVALID, "Amount is invalid."
-            ), None
-        if amount_atomic > int(rule.max_amount_atomic):
+                RefusalCode.RECIPIENT_NOT_ALLOWED, "Recipient is not allowed."
+            )
+        limit = min(int(rule.max_amount_atomic), int(recipient_rule.max_amount_atomic))
+        if amount > limit:
             return PolicyDecision.refuse(
-                RefusalCode.AMOUNT_LIMIT_EXCEEDED,
-                "Amount exceeds the policy limit.",
-            ), None
-        return PolicyDecision.allow(), rule
+                RefusalCode.AMOUNT_LIMIT_EXCEEDED, "Amount exceeds the policy limit."
+            )
+        return PolicyDecision.allow()
 
     @staticmethod
-    def evaluate_prepared_fee(
-        max_total_fee_wei: int, rule: TransferRule,
-    ) -> PolicyDecision:
+    def _recipient(rule: TransferRule, value: object) -> RecipientRule | None:
+        if not isinstance(value, str):
+            return None
+        normalized = value.lower()
+        return next((item for item in rule.recipients if item.address == normalized), None)
+
+    @staticmethod
+    def evaluate_prepared_fee(max_total_fee_wei: int,
+                              rule: TransferRule) -> PolicyDecision:
         if type(max_total_fee_wei) is not int or max_total_fee_wei <= 0:
             return PolicyDecision.refuse(
                 RefusalCode.MAX_FEE_REQUIRED, "Maximum fee is required."
