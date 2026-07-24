@@ -10,7 +10,10 @@ from holon_guard_ipc import PIPE_NAME
 from holon_guard_ipc.wallet_status import WalletStatusServer
 from holon_contracts import RefusalCode, SecurityCode
 from holon_policy import Policy, PolicyEngine, PolicyLoadError
-from holon_policy.baseline import load_baseline_policy
+from holon_policy.baseline import (
+    INSTALLED_POLICY_RELATIVE_PATH,
+    load_baseline_policy,
+)
 from holon_journal import EventType
 from holon_installation import verify_installed
 
@@ -62,6 +65,12 @@ def _integrity_failure(args: argparse.Namespace) -> str | None:
     return None if result.ok else result.code
 
 
+def _policy_path(args: argparse.Namespace) -> Path | None:
+    if args.require_install_integrity and args.app_root is not None:
+        return args.app_root / INSTALLED_POLICY_RELATIVE_PATH
+    return None
+
+
 def _wallet_controller(
     args: argparse.Namespace,
     install_failure: str | None,
@@ -92,7 +101,7 @@ def main(argv: list[str] | None = None) -> int:
                 action_failure = SecurityCode.ACTION_STATE_INVALID.value
             policy_failure: str | None = None
             try:
-                policy = load_baseline_policy()
+                policy = load_baseline_policy(_policy_path(args))
             except PolicyLoadError as exc:
                 policy = Policy("2", "1", False, ())
                 policy_failure = exc.code

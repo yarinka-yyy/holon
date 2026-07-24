@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from web3 import Web3
+from holon_policy import Policy, RecipientRule, TransferRule
 
 from holon_wallet.broadcast import (
     BASE_RPC_ENV,
@@ -180,6 +181,86 @@ def executor(repository, history, rpc, **changes):
         changes.pop("clock", lambda: NOW),
         **changes,
     )
+
+
+def shared_policy(
+    recipient: str,
+    amount_cap: int,
+    recipient_cap: int,
+    fee_cap: int,
+) -> MainnetBroadcastPolicy:
+    return MainnetBroadcastPolicy.from_policy(Policy(
+        "2",
+        "1",
+        True,
+        (TransferRule(
+            "base",
+            "usdc",
+            8453,
+            str(amount_cap),
+            str(fee_cap),
+            (RecipientRule(recipient.lower(), str(recipient_cap)),),
+        ),),
+    ))
+
+
+def test_shared_policy_enforces_recipient_caps_fee_and_version(tmp_path) -> None:
+    repository, _history, action, _password, _secret, _rpc = prepared_fixture(
+        tmp_path, amount_atomic=750_000,
+    )
+    del repository
+    policy = shared_policy(
+        RECIPIENT, 1_000_000, 750_000, action.max_total_fee_wei,
+    )
+
+    assert policy.draft_amount_code(
+        "base", "usdc", 750_000, RECIPIENT, "1",
+    ) is None
+    assert policy.maximum_draft_amount(
+        "base", "usdc", 2_000_000, RECIPIENT,
+    ) == 750_000
+    assert policy.draft_amount_code(
+        "base", "usdc", 750_001, RECIPIENT,
+    ) is MainnetTransferCode.AMOUNT_LIMIT_EXCEEDED
+    assert policy.draft_amount_code(
+        "base", "usdc", 1, "0x" + "55" * 20,
+    ) is MainnetTransferCode.RECIPIENT_NOT_ALLOWED
+    assert policy.draft_amount_code(
+        "base", "usdc", 1, RECIPIENT, "2",
+    ) is MainnetTransferCode.POLICY_VERSION_MISMATCH
+    assert policy.evaluate(action) is None
+    assert policy.evaluate(replace(
+        action, max_total_fee_wei=action.max_total_fee_wei + 1,
+    )) is MainnetTransferCode.FEE_LIMIT_EXCEEDED
+    assert policy.evaluate(replace(
+        action, recipient="0x" + "55" * 20,
+    )) is MainnetTransferCode.RECIPIENT_NOT_ALLOWED
+
+
+def test_transfer_environment_cannot_enable_default_executor(tmp_path) -> None:
+    repository, history, action, password, _secret, rpc = prepared_fixture(tmp_path)
+    route = transfer_route(action.network_id, action.asset_id)
+    configured = {
+        BROADCAST_ENABLED_ENV: "1",
+        FEE_LIMIT_ENV: str(10**18),
+        route.amount_cap_env: str(10**18),
+        BASE_RPC_ENV: "fixture://base",
+    }
+    item = MainnetTransferExecutor(
+        repository,
+        history,
+        rpc_factory=lambda _endpoint: rpc,
+        environ=configured,
+        clock=lambda: NOW,
+    )
+    chain_calls_before = rpc.chain_calls
+
+    result = item.execute(action, action.digest, password, SigningPermit())
+
+    assert result.code is MainnetTransferCode.POLICY_UNAVAILABLE
+    assert not result.broadcast_attempted
+    assert rpc.chain_calls == chain_calls_before
+    assert rpc.send_calls == 0
 
 
 @pytest.mark.parametrize("profile_type", ["mnemonic", "raw_private_key"])

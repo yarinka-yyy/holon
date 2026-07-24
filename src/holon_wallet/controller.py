@@ -28,6 +28,7 @@ from .approval import (
 )
 from .broadcast import (
     BroadcastReceiptTracker,
+    MainnetBroadcastPolicy,
     MainnetTransferCode,
     MainnetTransferExecutor,
     MainnetTransferResult,
@@ -172,6 +173,7 @@ class WalletController(QObject):
         price_service: PriceService | None = None,
         allowance_service: AllowanceReadService | None = None,
         revoke_preflight_service: RevokePreflightService | None = None,
+        transfer_policy: MainnetBroadcastPolicy | None = None,
     ) -> None:
         super().__init__()
         self._repository = repository or VaultRepository()
@@ -193,6 +195,7 @@ class WalletController(QObject):
         self._mainnet_executor = mainnet_executor or MainnetTransferExecutor(
             self._repository,
             self._history_store,
+            policy=transfer_policy,
         )
         revoke_policy = getattr(
             self._mainnet_executor, "revoke_policy", RevokePolicy.from_environment(),
@@ -416,10 +419,16 @@ class WalletController(QObject):
         key = "ethValue" if self._transfer_asset == "eth" else "usdcValue"
         return str(snapshot.get(key) or "Data unavailable")
 
-    @Slot(str, str, result=str)
-    def maximumTransferAmount(self, network_id: str, asset_id: str) -> str:
+    @Slot(str, str, str, result=str)
+    def maximumTransferAmount(
+        self, network_id: str, asset_id: str, recipient: str,
+    ) -> str:
         try:
             route = transfer_route(network_id, asset_id)
+            active = self._state.active_profile
+            if active is None:
+                return ""
+            normalized = normalize_recipient(recipient, active.address)
         except TransferPreflightError:
             return ""
         if asset_id == "eth":
@@ -431,7 +440,7 @@ class WalletController(QObject):
         if balance is None or balance.decimals != route.decimals:
             return ""
         maximum = self._mainnet_executor.policy.maximum_draft_amount(
-            network_id, asset_id, balance.atomic_units,
+            network_id, asset_id, balance.atomic_units, normalized,
         )
         return (
             format_atomic_amount(maximum, route.decimals)
@@ -473,12 +482,17 @@ class WalletController(QObject):
             return ""
         code = self._mainnet_executor.policy.evaluate(action)
         if code is MainnetTransferCode.POLICY_UNAVAILABLE:
-            route = transfer_route(action.network_id, action.asset_id)
-            prefix = action.network_id.upper()
-            return (
-                f"Configure HOLON_{prefix}_BROADCAST_ENABLED, "
-                f"HOLON_{prefix}_MAX_TOTAL_FEE_WEI and {route.amount_cap_env}"
-            )
+            return "Transfer policy is unavailable"
+        if code is MainnetTransferCode.POLICY_AUTHORITY_DISABLED:
+            return "Transfers are disabled by local policy"
+        if code is MainnetTransferCode.POLICY_VERSION_MISMATCH:
+            return "Transfer policy version does not match"
+        if code is MainnetTransferCode.NETWORK_NOT_ALLOWED:
+            return "Network is not allowed by local policy"
+        if code is MainnetTransferCode.ASSET_NOT_ALLOWED:
+            return "Asset is not allowed by local policy"
+        if code is MainnetTransferCode.RECIPIENT_NOT_ALLOWED:
+            return "Recipient is not allowed by local policy"
         if code is MainnetTransferCode.FEE_LIMIT_EXCEEDED:
             return "Maximum fee exceeds the local mainnet limit"
         if code is MainnetTransferCode.AMOUNT_LIMIT_EXCEEDED:
@@ -800,12 +814,11 @@ class WalletController(QObject):
             )
             normalized = normalize_recipient(recipient, active.address)
             amount_code = self._mainnet_executor.policy.draft_amount_code(
-                network_id, asset_id, amount_atomic,
+                network_id, asset_id, amount_atomic, normalized,
             )
-            if amount_code is MainnetTransferCode.AMOUNT_LIMIT_EXCEEDED:
-                raise TransferPreflightError(
-                    TransferPreflightCode.AMOUNT_LIMIT_EXCEEDED,
-                )
+            if amount_code is not None:
+                self._set_transfer_error(_mainnet_policy_error_message(amount_code))
+                return False
             request = self._transfer_flow.begin(
                 active.profile_id, network_id, asset_id, amount_atomic,
             )
@@ -874,10 +887,16 @@ class WalletController(QObject):
             normalized = normalize_recipient(str(request["recipient"]), active.address)
             created_at = datetime.fromisoformat(str(request["created_at"]).replace("Z", "+00:00"))
             expires_at = datetime.fromisoformat(str(request["expires_at"]).replace("Z", "+00:00"))
-            if self._mainnet_executor.policy.draft_amount_code(
-                network_id, asset_id, amount_atomic,
-            ) is MainnetTransferCode.AMOUNT_LIMIT_EXCEEDED:
-                raise TransferPreflightError(TransferPreflightCode.AMOUNT_LIMIT_EXCEEDED)
+            policy_code = self._mainnet_executor.policy.draft_amount_code(
+                network_id,
+                asset_id,
+                amount_atomic,
+                normalized,
+                str(request["policy_version"]),
+            )
+            if policy_code is not None:
+                completion(self._external_refusal(request, policy_code.value))
+                return
             pending = self._transfer_flow.begin_external(
                 str(request["action_id"]), active.profile_id, created_at, expires_at,
                 network_id, asset_id, amount_atomic,
@@ -953,17 +972,31 @@ class WalletController(QObject):
         self._set_transfer_error("")
         try:
             route = transfer_route(network_id, asset_id)
+            normalized = normalize_recipient(recipient, active.address)
             if asset_id == "usdc":
-                amount = self.maximumTransferAmount(network_id, asset_id)
+                amount = self.maximumTransferAmount(
+                    network_id, asset_id, normalized,
+                )
                 if not amount:
+                    code = self._mainnet_executor.policy.draft_amount_code(
+                        network_id, asset_id, 1, normalized,
+                    )
+                    if code is not None:
+                        self._set_transfer_error(_mainnet_policy_error_message(code))
+                        return False
                     raise TransferPreflightError(
                         TransferPreflightCode.INSUFFICIENT_USDC,
                     )
                 self.transferMaximumReady.emit(
-                    network_id, asset_id, recipient, amount,
+                    network_id, asset_id, normalized, amount,
                 )
                 return True
-            normalized = normalize_recipient(recipient, active.address)
+            code = self._mainnet_executor.policy.draft_amount_code(
+                network_id, asset_id, 1, normalized,
+            )
+            if code is not None:
+                self._set_transfer_error(_mainnet_policy_error_message(code))
+                return False
         except TransferPreflightError as error:
             self._set_transfer_error(_transfer_error_message(error.code))
             return False
@@ -983,7 +1016,7 @@ class WalletController(QObject):
                 completed,
                 network_id,
                 asset_id,
-                recipient,
+                normalized,
             ),
         )
         return True
@@ -2244,7 +2277,7 @@ class WalletController(QObject):
         try:
             route = transfer_route(network_id, asset_id)
             maximum = self._mainnet_executor.policy.maximum_draft_amount(
-                network_id, asset_id, result,
+                network_id, asset_id, result, recipient,
             )
         except TransferPreflightError:
             maximum = None
@@ -2727,6 +2760,26 @@ def _transfer_error_message(code: TransferPreflightCode) -> str:
         TransferPreflightCode.DATA_INVALID: "Selected network returned invalid transaction data",
         TransferPreflightCode.RPC_UNAVAILABLE: "Selected network data is unavailable",
     }[code]
+
+
+def _mainnet_policy_error_message(code: MainnetTransferCode) -> str:
+    return {
+        MainnetTransferCode.POLICY_UNAVAILABLE: "Transfer policy is unavailable",
+        MainnetTransferCode.POLICY_AUTHORITY_DISABLED:
+            "Transfers are disabled by local policy",
+        MainnetTransferCode.POLICY_VERSION_MISMATCH:
+            "Transfer policy version does not match",
+        MainnetTransferCode.NETWORK_NOT_ALLOWED:
+            "Network is not allowed by local policy",
+        MainnetTransferCode.ASSET_NOT_ALLOWED:
+            "Asset is not allowed by local policy",
+        MainnetTransferCode.RECIPIENT_NOT_ALLOWED:
+            "Recipient is not allowed by local policy",
+        MainnetTransferCode.AMOUNT_LIMIT_EXCEEDED:
+            "Amount exceeds the local recipient or route limit",
+        MainnetTransferCode.FEE_LIMIT_EXCEEDED:
+            "Maximum fee exceeds the local mainnet limit",
+    }.get(code, "Transfer is not allowed by local policy")
 
 
 def _revoke_error_message(code: RevokePreflightCode) -> str:

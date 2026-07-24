@@ -6,7 +6,7 @@ from pathlib import Path
 
 from holon_contracts import MessageKind, SecurityCode, make_envelope
 from holon_guard import GuardLifecycle, SnapshotStore
-from holon_guard.__main__ import _integrity_failure
+from holon_guard.__main__ import _integrity_failure, _policy_path
 from holon_guard.authority import AuthorityService
 from holon_policy import PolicyEngine
 from guard_support import enabled_policy, make_audit, make_ledger, transfer_request
@@ -50,6 +50,9 @@ def test_guard_entry_integrity_gate_recovers_after_clean_reinstall(tmp_path: Pat
         "HERMES_VERSION_UNSUPPORTED"
     )
     assert _integrity_failure(_args(manifest, app, plugin, "")) == "HERMES_VERSION_UNSUPPORTED"
+    assert _policy_path(_args(manifest, app, plugin)) == (
+        app / "holon_policy" / "baseline-policy.json"
+    )
 
 
 def test_integrity_failure_keeps_health_readable_and_blocks_authority(tmp_path: Path) -> None:

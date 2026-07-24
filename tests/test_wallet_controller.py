@@ -5,6 +5,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 from PySide6.QtCore import QLocale, QTime
+from holon_policy import Policy, RecipientRule, TransferRule
 
 from holon_wallet.broadcast import (
     TRANSFER_EVENT_TOPIC,
@@ -114,6 +115,25 @@ def controller(tmp_path) -> WalletController:
     )
     item._test_mainnet_rpc = rpc
     return item
+
+
+def recipient_policy(
+    recipient: str,
+    recipient_cap: int = 1_000_000,
+) -> MainnetBroadcastPolicy:
+    return MainnetBroadcastPolicy.from_policy(Policy(
+        "2",
+        "1",
+        True,
+        (TransferRule(
+            "base",
+            "usdc",
+            8453,
+            "2000000",
+            str(10**18),
+            (RecipientRule(recipient.lower(), str(recipient_cap)),),
+        ),),
+    ))
 
 
 class RecoveryDisplayStub:
@@ -411,8 +431,58 @@ def test_configured_amount_cap_refuses_before_rpc(tmp_path) -> None:
 
     item.showSend()
     assert not item.prepareTransfer("base", "usdc", "0x" + "44" * 20, "1")
-    assert item.transferError == "Amount exceeds the local route limit"
+    assert item.transferError == "Amount exceeds the local recipient or route limit"
     assert item._transfer_preflight_service.calls == []
+
+
+def test_shared_policy_refuses_unknown_recipient_before_direct_preflight(
+    tmp_path,
+) -> None:
+    item = controller(tmp_path)
+    secret = password()
+    item.beginCreate()
+    assert item.submitPassword(secret, secret)
+    assert item.finishBackup()
+    allowed = "0x" + "44" * 20
+    item._mainnet_executor.policy = recipient_policy(allowed, 750_000)
+
+    item.showSend()
+    assert not item.prepareTransfer("base", "usdc", "0x" + "55" * 20, "0.5")
+    assert item.transferError == "Recipient is not allowed by local policy"
+    assert item._transfer_preflight_service.calls == []
+    assert item.maximumTransferAmount("base", "usdc", allowed) == "0.75"
+    assert item.prepareTransfer("base", "usdc", allowed, "0.5")
+    assert len(item._transfer_preflight_service.calls) == 1
+
+
+def test_wallet_rechecks_guard_policy_version_before_external_preflight(
+    tmp_path,
+) -> None:
+    item = controller(tmp_path)
+    secret = password()
+    item.beginCreate()
+    assert item.submitPassword(secret, secret)
+    assert item.finishBackup()
+    recipient = "0x" + "44" * 20
+    item._mainnet_executor.policy = recipient_policy(recipient)
+    responses = []
+    item.prepareExternalTransfer({
+        "authority_version": "1",
+        "kind": "prepare_transfer",
+        "flow_id": "11111111-1111-4111-8111-111111111111",
+        "action_id": "act-22222222-2222-4222-8222-222222222222",
+        "policy_version": "2",
+        "network": "base",
+        "asset": "usdc",
+        "amount_atomic": "500000",
+        "recipient": recipient,
+        "created_at": "2026-07-24T10:00:00Z",
+        "expires_at": "2026-07-24T10:05:00Z",
+    }, responses.append)
+
+    assert responses[0]["code"] == "POLICY_VERSION_MISMATCH"
+    assert item._transfer_preflight_service.calls == []
+    assert item.currentScreen == "main"
 
 
 def test_maximum_amount_uses_token_cap_and_live_native_fee_quote(tmp_path) -> None:
@@ -433,10 +503,10 @@ def test_maximum_amount_uses_token_cap_and_live_native_fee_quote(tmp_path) -> No
         },
     )
 
-    assert item.maximumTransferAmount("base", "usdc") == "2"
-    assert item.maximumTransferAmount("base", "eth") == ""
-    assert item.requestMaximumTransfer("base", "usdc", "")
-    assert ready[-1] == ("base", "usdc", "", "2")
+    assert item.maximumTransferAmount("base", "usdc", recipient) == "2"
+    assert item.maximumTransferAmount("base", "eth", recipient) == ""
+    assert item.requestMaximumTransfer("base", "usdc", recipient)
+    assert ready[-1] == ("base", "usdc", recipient, "2")
 
     assert item.requestMaximumTransfer("base", "eth", recipient)
     max_fee_per_gas = 2 * 10_000_000 + 1_000_000
@@ -591,7 +661,7 @@ def test_missing_or_exceeded_local_fee_limit_disables_password_flow(tmp_path) ->
     assert item.prepareTransfer("0x" + "44" * 20)
     assert not item.mainnetExecutionAvailable
     assert item.mainnetFeeLimit == "Not configured"
-    assert "HOLON_BASE_BROADCAST_ENABLED" in item.mainnetGateMessage
+    assert item.mainnetGateMessage == "Transfer policy is unavailable"
     assert not item.beginMainnetExecution()
     assert item.currentScreen == "transfer_review"
 
@@ -717,6 +787,9 @@ def test_transfer_failure_is_safe_and_writes_no_history(tmp_path) -> None:
         transfer_preflight_service=service,
         transfer_executor=ImmediateExecutor(),
         price_service=StubPriceService(),
+        transfer_policy=MainnetBroadcastPolicy(
+            True, OfflineSigningPolicy(10**18),
+        ),
     )
     secret = password()
     item.beginCreate()
@@ -741,6 +814,9 @@ def test_cancelled_preflight_ignores_late_response(tmp_path) -> None:
         transfer_preflight_service=StubTransferPreflightService(),
         transfer_executor=executor,
         price_service=StubPriceService(),
+        transfer_policy=MainnetBroadcastPolicy(
+            True, OfflineSigningPolicy(10**18),
+        ),
     )
     secret = password()
     item.beginCreate()
@@ -883,6 +959,9 @@ def test_public_startup_and_refresh_never_authenticate_or_decrypt_vault(
         transfer_preflight_service=StubTransferPreflightService(),
         transfer_executor=ImmediateExecutor(),
         price_service=StubPriceService(),
+        transfer_policy=MainnetBroadcastPolicy(
+            True, OfflineSigningPolicy(10**18),
+        ),
     )
     assert item.currentScreen == "main"
     assert service.calls[-1][2] == ("ethereum", "base")

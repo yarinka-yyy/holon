@@ -7,7 +7,11 @@ from pathlib import Path
 
 from holon_contracts import RefusalCode
 from holon_policy import Policy, PolicyEngine, PolicyLoadError, load_policy, policy_digest
-from holon_policy.baseline import BASELINE_POLICY_DIGEST, load_baseline_policy
+from holon_policy.baseline import (
+    BASELINE_POLICY_DIGEST,
+    BASELINE_POLICY_PATH,
+    load_baseline_policy,
+)
 
 TRANSFER = {
     "policy_version": "1", "action_type": "transfer", "network": "base",
@@ -43,6 +47,16 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(policy_digest(policy.to_dict()), BASELINE_POLICY_DIGEST)
         decision = PolicyEngine(policy).evaluate_transfer(TRANSFER)
         self.assertEqual(decision.code, RefusalCode.POLICY_AUTHORITY_DISABLED.value)
+
+    def test_explicit_runtime_baseline_path_is_pinned_and_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "baseline-policy.json"
+            path.write_bytes(BASELINE_POLICY_PATH.read_bytes())
+            self.assertEqual(load_baseline_policy(path), load_baseline_policy())
+            path.write_text("{}", encoding="utf-8")
+            with self.assertRaises(PolicyLoadError) as changed:
+                load_baseline_policy(path)
+            self.assertEqual(changed.exception.code, "POLICY_STATE_INVALID")
 
     def test_enabled_policy_allows_only_bounded_network_asset_amount_and_fee(self) -> None:
         engine = PolicyEngine(Policy.from_dict(policy_value()))

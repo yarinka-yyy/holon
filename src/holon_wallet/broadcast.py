@@ -23,6 +23,8 @@ from web3.exceptions import (
     TransactionNotFound,
     Web3Exception,
 )
+from holon_contracts import RefusalCode
+from holon_policy import Policy, PolicyEngine
 
 from .approval import (
     REVOKE_ACTION_TYPE,
@@ -84,6 +86,11 @@ class MainnetTransferCode(str, Enum):
     FAILED = "FAILED"
     AUTHENTICATION_FAILED = "AUTHENTICATION_FAILED"
     POLICY_UNAVAILABLE = "POLICY_UNAVAILABLE"
+    POLICY_AUTHORITY_DISABLED = "POLICY_AUTHORITY_DISABLED"
+    POLICY_VERSION_MISMATCH = "POLICY_VERSION_MISMATCH"
+    NETWORK_NOT_ALLOWED = "NETWORK_NOT_ALLOWED"
+    ASSET_NOT_ALLOWED = "ASSET_NOT_ALLOWED"
+    RECIPIENT_NOT_ALLOWED = "RECIPIENT_NOT_ALLOWED"
     FEE_LIMIT_EXCEEDED = "FEE_LIMIT_EXCEEDED"
     AMOUNT_LIMIT_EXCEEDED = "AMOUNT_LIMIT_EXCEEDED"
     ACTION_INVALID = "ACTION_INVALID"
@@ -101,6 +108,20 @@ class MainnetBroadcastPolicy:
     network_enabled: Mapping[str, bool] | None = None
     fee_policies: Mapping[str, OfflineSigningPolicy] | None = None
     amount_limits: Mapping[tuple[str, str], int | None] | None = None
+    shared_engine: PolicyEngine | None = None
+    load_failure: str | None = None
+
+    @classmethod
+    def from_policy(cls, policy: Policy) -> MainnetBroadcastPolicy:
+        return cls(
+            False,
+            OfflineSigningPolicy(None),
+            shared_engine=PolicyEngine(policy),
+        )
+
+    @classmethod
+    def unavailable(cls, code: str = "POLICY_UNAVAILABLE") -> MainnetBroadcastPolicy:
+        return cls(False, OfflineSigningPolicy(None), load_failure=code)
 
     @classmethod
     def from_environment(
@@ -129,6 +150,12 @@ class MainnetBroadcastPolicy:
 
     @property
     def available(self) -> bool:
+        if self.shared_engine is not None:
+            return (
+                self.load_failure is None
+                and self.shared_engine.policy.authority_enabled
+                and bool(self.shared_engine.policy.transfer_rules)
+            )
         return (
             self._network_enabled(BASE_NETWORK_ID)
             and self._fee_policy(BASE_NETWORK_ID).available
@@ -140,9 +167,21 @@ class MainnetBroadcastPolicy:
         return self.fee_policy.display
 
     def display_for(self, action: PreparedTransferAction) -> str:
+        if self.shared_engine is not None:
+            rule = self._shared_rule(action.network_id, action.asset_id)
+            return (
+                OfflineSigningPolicy(int(rule.max_total_fee_wei)).display
+                if rule is not None else "Not configured"
+            )
         return self._fee_policy(action.network_id).display
 
     def amount_display_for(self, action: PreparedTransferAction) -> str:
+        if self.shared_engine is not None:
+            rule = self._shared_rule(action.network_id, action.asset_id)
+            recipient = self._shared_recipient_limit(rule, action.recipient)
+            if rule is None or recipient is None:
+                return "Not configured"
+            return str(min(int(rule.max_amount_atomic), recipient))
         limit = self._amount_limit(action.network_id, action.asset_id)
         if limit is None:
             return "Not configured"
@@ -150,7 +189,21 @@ class MainnetBroadcastPolicy:
 
     def draft_amount_code(
         self, network_id: str, asset_id: str, amount_atomic: int,
+        recipient: str | None = None,
+        policy_version: str | None = None,
     ) -> MainnetTransferCode | None:
+        if self.shared_engine is not None:
+            if (
+                policy_version is not None
+                and policy_version != self.shared_engine.policy.policy_version
+            ):
+                return MainnetTransferCode.POLICY_VERSION_MISMATCH
+            decision, _ = self.shared_engine.evaluate_intent(
+                network_id, asset_id, amount_atomic, recipient,
+            )
+            return self._shared_code(decision.code) if not decision.allowed else None
+        if self.load_failure is not None:
+            return MainnetTransferCode.POLICY_UNAVAILABLE
         limit = self._amount_limit(network_id, asset_id)
         if limit is not None and amount_atomic > limit:
             return MainnetTransferCode.AMOUNT_LIMIT_EXCEEDED
@@ -161,16 +214,42 @@ class MainnetBroadcastPolicy:
         network_id: str,
         asset_id: str,
         available_atomic: int,
+        recipient: str | None = None,
     ) -> int | None:
         if type(available_atomic) is not int or available_atomic <= 0:
             return None
         candidate = available_atomic
+        if self.shared_engine is not None:
+            decision, rule = self.shared_engine.evaluate_intent(
+                network_id, asset_id, 1, recipient,
+            )
+            if not decision.allowed or rule is None:
+                return None
+            recipient_limit = self._shared_recipient_limit(rule, recipient)
+            if recipient_limit is None:
+                return None
+            return min(candidate, int(rule.max_amount_atomic), recipient_limit)
+        if self.load_failure is not None:
+            return None
         amount_limit = self._amount_limit(network_id, asset_id)
         if amount_limit is not None:
             candidate = min(candidate, amount_limit)
         return candidate if candidate > 0 else None
 
     def evaluate(self, action: PreparedTransferAction) -> MainnetTransferCode | None:
+        if self.shared_engine is not None:
+            decision = self.shared_engine.evaluate_transfer({
+                "policy_version": self.shared_engine.policy.policy_version,
+                "action_type": "transfer",
+                "network": action.network_id,
+                "asset": action.asset_id,
+                "amount_atomic": str(action.amount_atomic),
+                "recipient": action.recipient,
+                "max_total_fee_wei": str(action.max_total_fee_wei),
+            })
+            return self._shared_code(decision.code) if not decision.allowed else None
+        if self.load_failure is not None:
+            return MainnetTransferCode.POLICY_UNAVAILABLE
         if not self._network_enabled(action.network_id):
             return MainnetTransferCode.POLICY_UNAVAILABLE
         code = self._fee_policy(action.network_id).evaluate(action)
@@ -199,6 +278,42 @@ class MainnetBroadcastPolicy:
         if self.amount_limits is None:
             return 2**256 - 1
         return self.amount_limits.get((network_id, asset_id))
+
+    def _shared_rule(self, network_id: str, asset_id: str):
+        if self.shared_engine is None:
+            return None
+        return next((
+            rule for rule in self.shared_engine.policy.transfer_rules
+            if rule.network == network_id and rule.asset == asset_id
+        ), None)
+
+    @staticmethod
+    def _shared_recipient_limit(rule, recipient: str | None) -> int | None:
+        if rule is None or not isinstance(recipient, str):
+            return None
+        normalized = recipient.lower()
+        item = next((entry for entry in rule.recipients if entry.address == normalized), None)
+        return int(item.max_amount_atomic) if item is not None else None
+
+    @staticmethod
+    def _shared_code(code: str) -> MainnetTransferCode:
+        mapping = {
+            RefusalCode.POLICY_AUTHORITY_DISABLED.value:
+                MainnetTransferCode.POLICY_AUTHORITY_DISABLED,
+            RefusalCode.POLICY_VERSION_MISMATCH.value:
+                MainnetTransferCode.POLICY_VERSION_MISMATCH,
+            RefusalCode.NETWORK_NOT_ALLOWED.value:
+                MainnetTransferCode.NETWORK_NOT_ALLOWED,
+            RefusalCode.ASSET_NOT_ALLOWED.value:
+                MainnetTransferCode.ASSET_NOT_ALLOWED,
+            RefusalCode.RECIPIENT_NOT_ALLOWED.value:
+                MainnetTransferCode.RECIPIENT_NOT_ALLOWED,
+            RefusalCode.AMOUNT_LIMIT_EXCEEDED.value:
+                MainnetTransferCode.AMOUNT_LIMIT_EXCEEDED,
+            RefusalCode.MAX_FEE_EXCEEDED.value:
+                MainnetTransferCode.FEE_LIMIT_EXCEEDED,
+        }
+        return mapping.get(code, MainnetTransferCode.POLICY_UNAVAILABLE)
 
 
 @dataclass(frozen=True, slots=True)
@@ -350,7 +465,7 @@ class MainnetTransferExecutor:
     ) -> None:
         self.repository = repository
         self.history_store = history_store
-        self.policy = policy or MainnetBroadcastPolicy.from_environment(environ)
+        self.policy = policy or MainnetBroadcastPolicy.unavailable()
         self._rpc_factory = rpc_factory or (lambda endpoint: Web3MainnetRpc(endpoint))
         self._environ = os.environ if environ is None else environ
         self._clock = clock or (lambda: datetime.now(UTC))
@@ -1038,7 +1153,27 @@ def _result_text(
         ),
         MainnetTransferCode.POLICY_UNAVAILABLE: (
             "Mainnet sending disabled",
-            "The route requires local broadcast, amount, and fee limits.",
+            "The verified local transfer policy is unavailable.",
+        ),
+        MainnetTransferCode.POLICY_AUTHORITY_DISABLED: (
+            "Mainnet sending disabled",
+            "Transfers are disabled by the verified local policy.",
+        ),
+        MainnetTransferCode.POLICY_VERSION_MISMATCH: (
+            "Policy version changed",
+            "Nothing was sent. Prepare a new action under the current policy.",
+        ),
+        MainnetTransferCode.NETWORK_NOT_ALLOWED: (
+            "Network not allowed",
+            "Nothing was sent. The selected network is not allowed by policy.",
+        ),
+        MainnetTransferCode.ASSET_NOT_ALLOWED: (
+            "Asset not allowed",
+            "Nothing was sent. The selected asset is not allowed by policy.",
+        ),
+        MainnetTransferCode.RECIPIENT_NOT_ALLOWED: (
+            "Recipient not allowed",
+            "Nothing was sent. The recipient is not allowed by policy.",
         ),
         MainnetTransferCode.FEE_LIMIT_EXCEEDED: (
             "Fee limit exceeded",
@@ -1046,7 +1181,7 @@ def _result_text(
         ),
         MainnetTransferCode.AMOUNT_LIMIT_EXCEEDED: (
             "Amount limit exceeded",
-            "Nothing was sent. The transfer exceeds the local route limit.",
+            "Nothing was sent. The transfer exceeds its recipient or route limit.",
         ),
         MainnetTransferCode.ACTION_INVALID: (
             "Transaction changed",

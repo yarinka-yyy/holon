@@ -6,7 +6,9 @@ PageState {
     property string selectedNetwork: ""
     property string selectedAsset: ""
     property string maximumAmount: selectedNetwork && selectedAsset
-        ? walletController.maximumTransferAmount(selectedNetwork, selectedAsset) : ""
+        && recipientInput.text.length > 0
+        ? walletController.maximumTransferAmount(
+            selectedNetwork, selectedAsset, recipientInput.text) : ""
 
     function restoreDraft() {
         selectedNetwork = walletController.transferNetwork
@@ -305,9 +307,9 @@ PageState {
                 x: 370; y: 118; width: 74; height: 38
                 property bool controlEnabled: !walletController.transferPreparing
                     && !walletController.transferMaximumQuoting
+                    && recipientInput.text.length > 0
                     && ((root.selectedAsset === "usdc" && root.maximumAmount.length > 0)
-                        || (root.selectedAsset === "eth"
-                            && recipientInput.text.length > 0))
+                        || root.selectedAsset === "eth")
                 enabled: controlEnabled; opacity: controlEnabled ? 1 : 0.44
                 function trigger() { if (controlEnabled) root.applyMaximum() }
                 Text {

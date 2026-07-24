@@ -105,6 +105,7 @@ def prepare_intent(service, request, owner_pid: int):
             "amount_atomic": str(amount_atomic),
             "recipient": recipient,
         },
+        service.policy.policy.policy_version,
         rule.max_total_fee_wei,
     )
     if not result.ok:

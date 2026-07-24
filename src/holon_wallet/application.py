@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 from concurrent.futures import Executor
 from importlib.resources import as_file, files
+from pathlib import Path
 from threading import Event
 
 from PySide6.QtCore import QObject, QSize, Qt, QUrl, Signal, Slot
@@ -12,6 +13,11 @@ from PySide6.QtGui import QColor, QCloseEvent, QFont, QFontDatabase, QGuiApplica
 from PySide6.QtQml import qmlRegisterType
 from PySide6.QtQuick import QQuickView
 from holon_guard_ipc.wallet_status import WalletStatusClient
+from holon_policy import PolicyLoadError
+from holon_policy.baseline import (
+    INSTALLED_POLICY_RELATIVE_PATH,
+    load_baseline_policy,
+)
 from holon_wallet_control import (
     AUTHORITY_PIPE_NAME, CONTROL_PIPE_NAME, WalletAuthorityServer,
     WalletControlServer,
@@ -20,6 +26,7 @@ from holon_wallet_control import (
 from .approval import AllowanceReadService, RevokePreflightService
 from .broadcast import (
     BroadcastReceiptTracker,
+    MainnetBroadcastPolicy,
     MainnetTransferExecutor,
 )
 from .controller import WalletController
@@ -35,6 +42,21 @@ from .vault import VaultRepository
 WINDOW_TITLE = "Holon Wallet"
 MUTEX_NAME = r"Local\HolonWallet.M3.01"
 _RECOVERY_TYPE_REGISTERED = False
+
+
+def _wallet_policy_path() -> Path | None:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent / INSTALLED_POLICY_RELATIVE_PATH
+    return None
+
+
+def _load_wallet_transfer_policy() -> MainnetBroadcastPolicy:
+    try:
+        return MainnetBroadcastPolicy.from_policy(
+            load_baseline_policy(_wallet_policy_path()),
+        )
+    except PolicyLoadError as exc:
+        return MainnetBroadcastPolicy.unavailable(exc.code)
 
 
 class WalletQuickView(QQuickView):
@@ -158,6 +180,10 @@ class WalletApplication:
             price_service,
             allowance_service,
             revoke_preflight_service,
+            transfer_policy=(
+                _load_wallet_transfer_policy()
+                if mainnet_executor is None else None
+            ),
         )
         self.window = WalletQuickView(self.controller)
         global _RECOVERY_TYPE_REGISTERED

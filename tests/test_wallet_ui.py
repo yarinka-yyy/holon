@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 import secrets
+import sys
 from datetime import UTC, datetime, timedelta
 
 os.environ.setdefault("QT_PREFERRED_PHYSICAL_DEVICE", "cpu")
@@ -14,7 +15,12 @@ from PySide6.QtCore import QObject, QMetaObject, Qt
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtTest import QTest
 
-from holon_wallet.application import WalletApplication
+from holon_wallet.application import (
+    WalletApplication,
+    _load_wallet_transfer_policy,
+    _wallet_policy_path,
+)
+from holon_wallet.broadcast import MainnetTransferCode
 from holon_wallet.approval import UINT256_MAX
 from holon_wallet.history import HistoryStatus, HistoryStore, WalletHistoryRecord
 from holon_wallet.storage import WalletPaths, atomic_write_json
@@ -29,6 +35,26 @@ from wallet_public_support import (
     StubTransferPreflightService,
     mainnet_services,
 )
+
+
+def test_wallet_runtime_policy_uses_packaged_file_and_source_baseline(
+    tmp_path, monkeypatch,
+) -> None:
+    assert _wallet_policy_path() is None
+    source_policy = _load_wallet_transfer_policy()
+    assert source_policy.draft_amount_code(
+        "base", "usdc", 1, "0x" + "44" * 20,
+    ) is MainnetTransferCode.POLICY_AUTHORITY_DISABLED
+
+    executable = tmp_path / "HolonWallet.exe"
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(executable))
+    assert _wallet_policy_path() == (
+        tmp_path / "holon_policy" / "baseline-policy.json"
+    )
+    assert _load_wallet_transfer_policy().draft_amount_code(
+        "base", "usdc", 1, "0x" + "44" * 20,
+    ) is MainnetTransferCode.POLICY_UNAVAILABLE
 
 
 @pytest.fixture(scope="module")
