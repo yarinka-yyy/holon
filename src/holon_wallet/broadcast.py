@@ -24,7 +24,10 @@ from web3.exceptions import (
     Web3Exception,
 )
 from holon_contracts import RefusalCode
-from holon_policy import Policy, PolicyEngine
+from holon_policy import (
+    Policy, PolicyEngine, PolicyRevisionStore, PolicyRevisionUnavailable,
+    PolicySnapshot, policy_digest,
+)
 
 from .approval import (
     REVOKE_ACTION_TYPE,
@@ -101,7 +104,7 @@ class MainnetTransferCode(str, Enum):
     SIGNING_FAILED = "SIGNING_FAILED"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class MainnetBroadcastPolicy:
     enabled: bool
     fee_policy: OfflineSigningPolicy
@@ -110,6 +113,9 @@ class MainnetBroadcastPolicy:
     amount_limits: Mapping[tuple[str, str], int | None] | None = None
     shared_engine: PolicyEngine | None = None
     load_failure: str | None = None
+    policy_revision: int = 0
+    policy_digest_value: str = ""
+    revision_store: PolicyRevisionStore | None = None
 
     @classmethod
     def from_policy(cls, policy: Policy) -> MainnetBroadcastPolicy:
@@ -117,11 +123,48 @@ class MainnetBroadcastPolicy:
             False,
             OfflineSigningPolicy(None),
             shared_engine=PolicyEngine(policy),
+            policy_digest_value=policy_digest(policy.to_dict()),
+        )
+
+    @classmethod
+    def from_snapshot(
+        cls, snapshot: PolicySnapshot,
+        store: PolicyRevisionStore | None = None,
+    ) -> MainnetBroadcastPolicy:
+        return cls(
+            False, OfflineSigningPolicy(None),
+            shared_engine=PolicyEngine(snapshot.policy),
+            policy_revision=snapshot.policy_revision,
+            policy_digest_value=snapshot.policy_digest,
+            revision_store=store,
         )
 
     @classmethod
     def unavailable(cls, code: str = "POLICY_UNAVAILABLE") -> MainnetBroadcastPolicy:
         return cls(False, OfflineSigningPolicy(None), load_failure=code)
+
+    def refresh(self) -> bool:
+        if self.revision_store is None:
+            return self.load_failure is None
+        try:
+            snapshot = self.revision_store.load()
+        except PolicyRevisionUnavailable:
+            self.load_failure = "POLICY_STATE_INVALID"
+            return False
+        self.shared_engine = PolicyEngine(snapshot.policy)
+        self.policy_revision = snapshot.policy_revision
+        self.policy_digest_value = snapshot.policy_digest
+        self.load_failure = None
+        return True
+
+    def matches(self, revision: int, digest: str) -> bool:
+        if self.revision_store is None and digest == "":
+            return True
+        return (
+            self.refresh()
+            and self.policy_revision == revision
+            and self.policy_digest_value == digest
+        )
 
     @classmethod
     def from_environment(
@@ -192,6 +235,8 @@ class MainnetBroadcastPolicy:
         recipient: str | None = None,
         policy_version: str | None = None,
     ) -> MainnetTransferCode | None:
+        if not self.refresh():
+            return MainnetTransferCode.POLICY_UNAVAILABLE
         if self.shared_engine is not None:
             if (
                 policy_version is not None
@@ -216,6 +261,8 @@ class MainnetBroadcastPolicy:
         available_atomic: int,
         recipient: str | None = None,
     ) -> int | None:
+        if not self.refresh():
+            return None
         if type(available_atomic) is not int or available_atomic <= 0:
             return None
         candidate = available_atomic
@@ -237,6 +284,8 @@ class MainnetBroadcastPolicy:
         return candidate if candidate > 0 else None
 
     def evaluate(self, action: PreparedTransferAction) -> MainnetTransferCode | None:
+        if not self.matches(action.policy_revision, action.policy_digest):
+            return MainnetTransferCode.REVALIDATION_FAILED
         if self.shared_engine is not None:
             decision = self.shared_engine.evaluate_transfer({
                 "policy_version": self.shared_engine.policy.policy_version,
@@ -530,6 +579,10 @@ class MainnetTransferExecutor:
             ):
                 return self._failure(action, MainnetTransferCode.ACTION_INVALID)
 
+            policy_code = _evaluate_policy(self.policy, self.revoke_policy, action)
+            if policy_code is not None:
+                return self._failure(action, policy_code)
+
             private_key = bytearray(private_key_bytes(record.secret))
             signed = Account.sign_transaction(transaction_dict(action), bytes(private_key))
             recovered = Web3.to_checksum_address(
@@ -567,6 +620,13 @@ class MainnetTransferExecutor:
                     recovered,
                     history_status,
                     False,
+                )
+
+            policy_code = _evaluate_policy(self.policy, self.revoke_policy, action)
+            if policy_code is not None:
+                return self._result(
+                    action, policy_code, transaction_hash, recovered,
+                    history_status, False,
                 )
 
             broadcast_attempted = True

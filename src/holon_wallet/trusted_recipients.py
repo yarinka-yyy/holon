@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping
@@ -42,6 +44,13 @@ class TrustedDraftError(ValueError):
 
 class TrustedDraftUnavailable(RuntimeError):
     """Persisted draft cannot be safely loaded or replaced implicitly."""
+
+
+def trusted_draft_digest(value: Mapping[str, Any]) -> str:
+    raw = json.dumps(
+        dict(value), ensure_ascii=False, separators=(",", ":"), sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
 
 
 def _decimals(asset: str) -> int:
@@ -218,6 +227,9 @@ class TrustedPolicyDraft:
             "policy_digest": policy_digest(policy_value),
             "recipient_labels": labels,
         }
+
+    def to_policy(self) -> Policy:
+        return Policy.from_dict(self.to_envelope()["policy"])
 
     @classmethod
     def from_envelope(cls, value: Mapping[str, Any]) -> "TrustedPolicyDraft":

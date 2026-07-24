@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from holon_wallet_control import (
+    AUTHORITY_VERSION,
     ControlProtocolError,
     WalletControlClient,
     WalletControlServer,
@@ -219,10 +220,11 @@ def test_real_control_pipe_activates_and_stops_cleanly() -> None:
 
 def test_authority_protocol_is_exact_correlated_and_fee_bounded() -> None:
     request = {
-        "authority_version": "1", "kind": "prepare_transfer",
+        "authority_version": AUTHORITY_VERSION, "kind": "prepare_transfer",
         "flow_id": "11111111-1111-4111-8111-111111111111",
         "action_id": "act-22222222-2222-4222-8222-222222222222",
         "policy_version": "1", "network": "base", "asset": "usdc",
+        "policy_revision": 3, "policy_digest": "c" * 64,
         "amount_atomic": "1000000",
         "recipient": "0x4444444444444444444444444444444444444444",
         "created_at": "2026-07-23T12:00:00Z",
@@ -230,12 +232,14 @@ def test_authority_protocol_is_exact_correlated_and_fee_bounded() -> None:
     }
     checked = validate_authority_request(request)
     response = {
-        "authority_version": "1", "kind": "transfer_prepared",
+        "authority_version": AUTHORITY_VERSION, "kind": "transfer_prepared",
         "flow_id": request["flow_id"], "action_id": request["action_id"],
         "wallet_pid": 202, "profile_id": "profile-one",
         "sender": "0x2222222222222222222222222222222222222222",
         "recipient": request["recipient"], "network": "base", "asset": "usdc",
         "amount_atomic": "1000000", "max_total_fee_wei": "500",
+        "policy_revision": request["policy_revision"],
+        "policy_digest": request["policy_digest"],
         "prepared_digest": "a" * 64, "created_at": request["created_at"],
         "expires_at": request["expires_at"], "code": "TRANSFER_PREPARED",
     }

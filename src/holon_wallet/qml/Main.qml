@@ -27,8 +27,8 @@ Item {
         TrustedRecipientsPage { objectName: "trustedRecipientsPage"; anchors.fill: parent; active: walletController.currentScreen === "trusted_recipients" }
         TrustedRoutePage { objectName: "trustedRoutePage"; anchors.fill: parent; active: walletController.currentScreen === "trusted_route" }
         TrustedRecipientPage { objectName: "trustedRecipientPage"; anchors.fill: parent; active: walletController.currentScreen === "trusted_recipient" }
-        TrustedPolicyReviewPage { objectName: "trustedReviewPage"; anchors.fill: parent; active: walletController.currentScreen === "trusted_review" }
-        TrustedPolicyPasswordPage { objectName: "trustedPasswordPage"; anchors.fill: parent; active: walletController.currentScreen === "trusted_password" }
+        TrustedPolicyReviewPage { objectName: "trustedReviewPage"; anchors.fill: parent; active: walletController.currentScreen === "trusted_review" || walletController.currentScreen === "trusted_apply_review" }
+        TrustedPolicyPasswordPage { objectName: "trustedPasswordPage"; anchors.fill: parent; active: walletController.currentScreen === "trusted_password" || walletController.currentScreen === "trusted_apply_password" }
         RecoveryReviewPage { objectName: "recoveryReviewPage"; anchors.fill: parent; active: walletController.currentScreen === "recovery_review" }
         RecoveryConfirmPage { objectName: "recoveryConfirmPage"; anchors.fill: parent; active: walletController.currentScreen === "recovery_confirm" }
         RecoveryRevealPage { objectName: "recoveryRevealPage"; anchors.fill: parent; active: walletController.currentScreen === "recovery_reveal" }

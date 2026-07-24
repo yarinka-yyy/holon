@@ -60,6 +60,8 @@ def prepare_intent(service, request, owner_pid: int):
         amount_atomic=str(amount_atomic),
         recipient=recipient,
         max_total_fee_wei=fee_cap,
+        policy_revision=service.policy_snapshot.policy_revision,
+        policy_digest=service.policy_snapshot.policy_digest,
     )
     audit_fields = {
         "canonical_amount_atomic": str(amount_atomic),
@@ -107,6 +109,8 @@ def prepare_intent(service, request, owner_pid: int):
         },
         service.policy.policy.policy_version,
         rule.max_total_fee_wei,
+        service.policy_snapshot.policy_revision,
+        service.policy_snapshot.policy_digest,
     )
     if not result.ok:
         if result.state is GuardState.RECOVERY_REQUIRED:

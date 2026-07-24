@@ -266,6 +266,8 @@ def test_digest_is_deterministic_and_every_mutation_changes_it() -> None:
         replace(first, max_total_fee_wei=first.max_total_fee_wei + 1),
         replace(first, transaction=replace(first.transaction, nonce=8)),
         replace(first, expires_at=first.expires_at + timedelta(seconds=1)),
+        replace(first, policy_revision=first.policy_revision + 1),
+        replace(first, policy_digest="f" * 64),
     )
     assert all(item.digest != first.digest for item in mutations)
 

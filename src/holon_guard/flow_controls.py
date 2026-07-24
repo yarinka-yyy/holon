@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from holon_contracts import ActionState, SecurityCode
 from holon_guard_ipc import GuardState
+from holon_wallet_control import AUTHORITY_VERSION
 
 from .actions import ActionLedgerFailure
 from .model import GuardResult, GuardSnapshot
@@ -55,7 +56,7 @@ def interrupt_for_security_block(guard, code: str) -> GuardResult:
                     and guard.snapshot.action_id is not None
                 ):
                     guard.wallet.cancel_transfer({
-                        "authority_version": "1",
+                        "authority_version": AUTHORITY_VERSION,
                         "kind": "cancel_transfer",
                         "flow_id": guard.snapshot.flow_id,
                         "action_id": guard.snapshot.action_id,

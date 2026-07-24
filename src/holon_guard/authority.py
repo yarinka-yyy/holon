@@ -1,10 +1,13 @@
 """Contract, policy, journal, request control, and Guard lifecycle boundary."""
 from __future__ import annotations
 
-from holon_contracts import ContractEnvelope, MessageKind
+from holon_contracts import ContractEnvelope, MessageKind, SecurityCode
 from holon_guard_ipc import GuardState
 from holon_journal import EventType, JournalFailure
-from holon_policy import PolicyEngine
+from holon_policy import (
+    PolicyEngine, PolicyRevisionStore, PolicyRevisionUnavailable, PolicySnapshot,
+    policy_digest,
+)
 
 from .authority_audit import AuthorityAudit
 from .authority_prepare import prepare
@@ -19,11 +22,37 @@ class AuthorityService(ResponseMixin):
     def __init__(
         self, lifecycle: GuardLifecycle, policy: PolicyEngine, audit: AuthorityAudit,
         security_failure: str | None = None,
+        policy_snapshot: PolicySnapshot | None = None,
+        revision_store: PolicyRevisionStore | None = None,
     ) -> None:
         self.lifecycle = lifecycle
         self.policy = policy
         self.audit = audit
         self.security_failure = security_failure
+        self.policy_snapshot = policy_snapshot or PolicySnapshot(
+            0, policy_digest(policy.policy.to_dict()), policy.policy,
+        )
+        self.revision_store = revision_store
+
+    def replace_policy_snapshot(self, snapshot: PolicySnapshot) -> None:
+        self.policy_snapshot = snapshot
+        self.policy = PolicyEngine(snapshot.policy)
+
+    def revalidate_policy(self) -> bool:
+        if self.revision_store is None or self.policy_snapshot is None:
+            return True
+        try:
+            current = self.revision_store.load()
+        except PolicyRevisionUnavailable:
+            self.fail_closed(SecurityCode.POLICY_STATE_INVALID.value)
+            return False
+        if (
+            current.policy_revision != self.policy_snapshot.policy_revision
+            or current.policy_digest != self.policy_snapshot.policy_digest
+        ):
+            self.fail_closed(SecurityCode.POLICY_REVISION_CHANGED.value)
+            return False
+        return True
 
     def fail_closed(self, code: str, record_event: bool = True) -> None:
         self.security_failure = code
@@ -149,6 +178,8 @@ class AuthorityService(ResponseMixin):
             assert owner_pid is not None
             return prepare(self, request, owner_pid)
         if request.kind is MessageKind.TRANSFER_INTENT:
+            if not self.revalidate_policy():
+                return self.security_response(request)
             if self.security_failure is not None:
                 return self.security_response(request)
             if self.lifecycle.snapshot.state is GuardState.SIGNING_DISABLED:

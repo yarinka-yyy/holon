@@ -7,7 +7,7 @@ from holon_contracts import MessageKind, make_envelope
 from holon_guard import GuardLifecycle, SnapshotStore
 from holon_guard.authority import AuthorityService
 from holon_guard.wallet import WalletPreparedResult
-from holon_policy import Policy, PolicyEngine
+from holon_policy import Policy, PolicyEngine, PolicySnapshot
 from guard_support import ACTION_ID, RECIPIENT, enabled_policy, make_audit, make_ledger
 
 
@@ -36,12 +36,14 @@ class AuthorityWallet:
         if self.refusal:
             return WalletPreparedResult(False, self.refusal, None, self.handle)
         return WalletPreparedResult(True, "TRANSFER_PREPARED", {
-            "authority_version": "1", "kind": "transfer_prepared",
+            "authority_version": request["authority_version"], "kind": "transfer_prepared",
             "flow_id": request["flow_id"], "action_id": request["action_id"],
             "wallet_pid": self.handle.pid, "profile_id": "profile-one",
             "sender": "0x2222222222222222222222222222222222222222",
             "recipient": request["recipient"], "network": request["network"],
             "asset": request["asset"], "amount_atomic": request["amount_atomic"],
+            "policy_revision": request["policy_revision"],
+            "policy_digest": request["policy_digest"],
             "max_total_fee_wei": self.fee, "prepared_digest": "a" * 64,
             "created_at": request["created_at"], "expires_at": request["expires_at"],
             "code": "TRANSFER_PREPARED",
@@ -90,6 +92,9 @@ def test_exact_intent_waits_for_wallet_preflight_and_completes_status():
         assert lifecycle.snapshot.state.value == "ACTIVE"
         request = wallet.prepares[0]
         assert request["amount_atomic"] == "1000000"
+        assert request["authority_version"] == "2"
+        assert request["policy_revision"] == 0
+        assert len(request["policy_digest"]) == 64
         assert "max_total_fee_wei" not in intent().payload
         assert lifecycle.accept_wallet_status({
             "flow_id": lifecycle.snapshot.flow_id,
@@ -102,6 +107,27 @@ def test_exact_intent_waits_for_wallet_preflight_and_completes_status():
         })
         assert lifecycle.snapshot.state.value == "NORMAL"
         assert lifecycle.ledger.find(ACTION_ID).state.value == "COMPLETED"
+
+
+def test_guard_revision_change_interrupts_active_flow_without_retry():
+    with tempfile.TemporaryDirectory() as temporary:
+        wallet = AuthorityWallet()
+        lifecycle, authority = service(Path(temporary), wallet)
+        assert authority.handle(intent(), owner_pid=123).kind is MessageKind.PROTECTED_FLOW_STARTED
+        current = authority.policy_snapshot
+
+        class ChangedStore:
+            def load(self):
+                return PolicySnapshot(
+                    current.policy_revision + 1, "f" * 64, current.policy,
+                )
+
+        authority.revision_store = ChangedStore()
+        assert not authority.revalidate_policy()
+        assert lifecycle.snapshot.state.value == "RECOVERY_REQUIRED"
+        assert lifecycle.snapshot.reason == "POLICY_REVISION_CHANGED"
+        assert len(wallet.cancels) == 1
+        assert lifecycle.ledger.find(ACTION_ID).state.value == "RECOVERY_REQUIRED"
 
 
 def test_disabled_policy_and_amount_cap_refuse_before_wallet():

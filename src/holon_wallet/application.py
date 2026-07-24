@@ -13,7 +13,8 @@ from PySide6.QtGui import QColor, QCloseEvent, QFont, QFontDatabase, QGuiApplica
 from PySide6.QtQml import qmlRegisterType
 from PySide6.QtQuick import QQuickView
 from holon_guard_ipc.wallet_status import WalletStatusClient
-from holon_policy import PolicyLoadError
+from holon_guard_ipc.policy_control import PolicyControlClient
+from holon_policy import PolicyLoadError, PolicyRevisionStore, PolicyRevisionUnavailable
 from holon_policy.baseline import (
     INSTALLED_POLICY_RELATIVE_PATH,
     load_baseline_policy,
@@ -50,13 +51,16 @@ def _wallet_policy_path() -> Path | None:
     return None
 
 
-def _load_wallet_transfer_policy() -> MainnetBroadcastPolicy:
+def _load_wallet_transfer_policy(data_dir: Path | None = None) -> MainnetBroadcastPolicy:
     try:
-        return MainnetBroadcastPolicy.from_policy(
-            load_baseline_policy(_wallet_policy_path()),
-        )
-    except PolicyLoadError as exc:
-        return MainnetBroadcastPolicy.unavailable(exc.code)
+        baseline = load_baseline_policy(_wallet_policy_path())
+        if data_dir is None:
+            return MainnetBroadcastPolicy.from_policy(baseline)
+        store = PolicyRevisionStore(data_dir, baseline)
+        return MainnetBroadcastPolicy.from_snapshot(store.load(), store)
+    except (PolicyLoadError, PolicyRevisionUnavailable) as exc:
+        code = getattr(exc, "code", "POLICY_STATE_INVALID")
+        return MainnetBroadcastPolicy.unavailable(code)
 
 
 class WalletQuickView(QQuickView):
@@ -149,6 +153,7 @@ class WalletApplication:
         authority_pipe_name: str | None = None,
         authority_server_factory=WalletAuthorityServer,
         status_client: WalletStatusClient | None = None,
+        policy_control_client=None,
     ) -> None:
         self.qt_app = qt_app or QGuiApplication.instance()
         if self.qt_app is None:
@@ -167,6 +172,11 @@ class WalletApplication:
         with as_file(qml_package.joinpath("assets/holon.svg")) as icon_path:
             self.qt_app.setWindowIcon(QIcon(str(icon_path)))
 
+        repository = repository or VaultRepository()
+        if policy_control_client is None and getattr(sys, "frozen", False):
+            policy_control_client = PolicyControlClient(
+                Path(sys.executable).resolve().parent / "HolonGuard.exe",
+            )
         self.controller = WalletController(
             repository,
             public_data_service,
@@ -181,9 +191,10 @@ class WalletApplication:
             allowance_service,
             revoke_preflight_service,
             transfer_policy=(
-                _load_wallet_transfer_policy()
+                _load_wallet_transfer_policy(repository.paths.data_dir)
                 if mainnet_executor is None else None
             ),
+            policy_control_client=policy_control_client,
         )
         self.window = WalletQuickView(self.controller)
         global _RECOVERY_TYPE_REGISTERED

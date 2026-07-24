@@ -39,12 +39,14 @@ class GuardServer:
         monitor_interval: float = MONITOR_INTERVAL,
         client_pid_probe=_named_pipe_client_pid,
         status_server=None,
+        policy_server=None,
     ) -> None:
         self.pipe_name = pipe_name
         self.authority = authority
         self.monitor_interval = monitor_interval
         self._client_pid_probe = client_pid_probe
         self._status_server = status_server
+        self._policy_server = policy_server
         self._stop = threading.Event()
         self._listener: Listener | None = None
         self._connections: queue.Queue[Connection] = queue.Queue()
@@ -105,6 +107,8 @@ class GuardServer:
         self._listener = Listener(self.pipe_name, family="AF_PIPE", authkey=None)
         if self._status_server is not None:
             self._status_server.start()
+        if self._policy_server is not None:
+            self._policy_server.start()
         accept_thread = threading.Thread(target=self._accept_loop, daemon=True)
         accept_thread.start()
         try:
@@ -115,6 +119,7 @@ class GuardServer:
                     connection = None
                 if connection is not None:
                     self._handle_connection(connection)
+                self.authority.revalidate_policy()
                 snapshot = self.authority.lifecycle.snapshot
                 result = self.authority.lifecycle.monitor_once()
                 if result.state is not snapshot.state or result.code not in {"OK", snapshot.reason}:
@@ -123,6 +128,8 @@ class GuardServer:
             self._stop.set()
             if self._status_server is not None:
                 self._status_server.stop()
+            if self._policy_server is not None:
+                self._policy_server.stop()
             self._listener.close()
             accept_thread.join(timeout=1.0)
 

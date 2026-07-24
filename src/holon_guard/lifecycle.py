@@ -85,6 +85,7 @@ class GuardLifecycle(GuardCore):
     def start_transfer_intent(
         self, owner_pid: int, action_id: str, fingerprint: str,
         intent: dict[str, str], policy_version: str, fee_cap_wei: str,
+        policy_revision: int = 0, policy_digest: str = "",
     ) -> tuple[GuardResult, dict[str, object] | None]:
         with self._lock:
             try:
@@ -118,6 +119,8 @@ class GuardLifecycle(GuardCore):
                 "flow_id": flow_id,
                 "action_id": action_id,
                 "policy_version": policy_version,
+                "policy_revision": policy_revision,
+                "policy_digest": policy_digest,
                 **intent,
                 "created_at": created.isoformat().replace("+00:00", "Z"),
                 "expires_at": expires.isoformat().replace("+00:00", "Z"),

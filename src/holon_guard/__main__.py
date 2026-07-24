@@ -8,8 +8,12 @@ from pathlib import Path
 
 from holon_guard_ipc import PIPE_NAME
 from holon_guard_ipc.wallet_status import WalletStatusServer
+from holon_guard_ipc.policy_control import PolicyControlServer
 from holon_contracts import RefusalCode, SecurityCode
-from holon_policy import Policy, PolicyEngine, PolicyLoadError
+from holon_policy import (
+    Policy, PolicyEngine, PolicyLoadError, PolicyRevisionStore,
+    PolicyRevisionUnavailable,
+)
 from holon_policy.baseline import (
     INSTALLED_POLICY_RELATIVE_PATH,
     load_baseline_policy,
@@ -22,6 +26,7 @@ from .action_store import ActionStateStore, InvalidActionState, MissingActionSta
 from .actions import ActionLedger
 from .authority import AuthorityService
 from .lifecycle import GuardLifecycle
+from .policy_control import GuardPolicyControl
 from .lock import GuardAlreadyRunning, SingleInstanceLock
 from .runtime_security import load_authority_audit
 from .server import GuardServer
@@ -32,6 +37,8 @@ from .wallet import (
     WalletController,
     WindowsOwnerProbe,
 )
+from holon_wallet.storage import WalletPaths
+from holon_wallet.trusted_recipients import TrustedPolicyDraftStore
 
 
 def _default_data_dir() -> Path:
@@ -101,10 +108,17 @@ def main(argv: list[str] | None = None) -> int:
                 action_failure = SecurityCode.ACTION_STATE_INVALID.value
             policy_failure: str | None = None
             try:
-                policy = load_baseline_policy(_policy_path(args))
+                baseline_policy = load_baseline_policy(_policy_path(args))
             except PolicyLoadError as exc:
-                policy = Policy("2", "1", False, ())
+                baseline_policy = Policy("2", "1", False, ())
                 policy_failure = exc.code
+            revision_store = PolicyRevisionStore(data_dir, baseline_policy)
+            revision_invalid = False
+            try:
+                policy_snapshot = revision_store.load()
+            except PolicyRevisionUnavailable:
+                policy_snapshot = revision_store.recoverable_snapshot()
+                revision_invalid = True
             install_failure = _integrity_failure(args)
             ledger = ActionLedger(action_store, action_snapshot)
             wallet = _wallet_controller(args, install_failure)
@@ -115,13 +129,20 @@ def main(argv: list[str] | None = None) -> int:
                 ledger,
             )
             audit, audit_failure = load_authority_audit(data_dir)
-            failure = install_failure or audit_failure or policy_failure or action_failure
+            promotion_blocker = (
+                install_failure or audit_failure or policy_failure or action_failure
+            )
+            failure = promotion_blocker or (
+                SecurityCode.POLICY_STATE_INVALID.value if revision_invalid else None
+            )
             if failure is not None:
                 lifecycle.disable_signing(failure)
-            elif not policy.authority_enabled:
+            elif not policy_snapshot.policy.authority_enabled:
                 lifecycle.disable_signing(RefusalCode.POLICY_AUTHORITY_DISABLED.value)
             authority = AuthorityService(
-                lifecycle, PolicyEngine(policy), audit, security_failure=failure
+                lifecycle, PolicyEngine(policy_snapshot.policy), audit,
+                security_failure=failure, policy_snapshot=policy_snapshot,
+                revision_store=revision_store,
             )
             if lifecycle.snapshot.state.value == "SIGNING_DISABLED":
                 authority.audit_system(
@@ -134,8 +155,20 @@ def main(argv: list[str] | None = None) -> int:
                 lambda: (lifecycle.snapshot.wallet_pid, wallet_path),
                 invalid_handler=lifecycle.wallet_status_mismatch,
             )
+            policy_handler = GuardPolicyControl(
+                revision_store,
+                TrustedPolicyDraftStore(WalletPaths(data_dir)),
+                authority,
+                promotion_blocker=promotion_blocker,
+                revision_invalid=revision_invalid,
+            )
+            policy_server = (
+                PolicyControlServer(policy_handler.handle, wallet_path)
+                if wallet_path is not None else None
+            )
             GuardServer(
                 args.pipe_name, authority, status_server=status_server,
+                policy_server=policy_server,
             ).serve_forever()
     except GuardAlreadyRunning:
         return 3

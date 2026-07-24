@@ -16,8 +16,8 @@ from .protocol import (
     _server_pid, _wait_pipe,
 )
 
-AUTHORITY_VERSION = "1"
-AUTHORITY_PIPE_NAME = r"\\.\pipe\Holon.Wallet.Authority.v1"
+AUTHORITY_VERSION = "2"
+AUTHORITY_PIPE_NAME = r"\\.\pipe\Holon.Wallet.Authority.v2"
 MAX_AUTHORITY_BYTES = 8 * 1024
 ACTION_RE = re.compile(r"^act-[0-9a-f-]{36}$")
 HEX_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -26,6 +26,7 @@ DECIMAL_RE = re.compile(r"^[1-9][0-9]{0,77}$")
 CODE_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
 PREPARE_FIELDS = frozenset({
     "authority_version", "kind", "flow_id", "action_id", "policy_version",
+    "policy_revision", "policy_digest",
     "network", "asset", "amount_atomic", "recipient", "created_at", "expires_at",
 })
 CANCEL_FIELDS = frozenset({
@@ -35,6 +36,7 @@ PREPARED_FIELDS = frozenset({
     "authority_version", "kind", "flow_id", "action_id", "wallet_pid",
     "profile_id", "sender", "recipient", "network", "asset", "amount_atomic",
     "max_total_fee_wei", "prepared_digest", "created_at", "expires_at", "code",
+    "policy_revision", "policy_digest",
 })
 REFUSED_FIELDS = frozenset({
     "authority_version", "kind", "flow_id", "action_id", "wallet_pid", "code",
@@ -96,6 +98,10 @@ def validate_request(value: Mapping[str, object]) -> dict[str, object]:
         return dict(value)
     if (
         value.get("policy_version") != "1"
+        or type(value.get("policy_revision")) is not int
+        or value["policy_revision"] < 0
+        or not isinstance(value.get("policy_digest"), str)
+        or HEX_RE.fullmatch(value["policy_digest"]) is None
         or value.get("network") not in {"ethereum", "base"}
         or value.get("asset") not in {"eth", "usdc"}
         or not isinstance(value.get("amount_atomic"), str)
@@ -127,7 +133,10 @@ def validate_response(
         raise ControlProtocolError("Invalid authority response")
     if kind != "transfer_prepared":
         return dict(value)
-    for field in ("network", "asset", "amount_atomic", "recipient", "created_at", "expires_at"):
+    for field in (
+        "network", "asset", "amount_atomic", "recipient", "created_at", "expires_at",
+        "policy_revision", "policy_digest",
+    ):
         if value.get(field) != request.get(field):
             raise ControlProtocolError("Authority response mismatch")
     if (

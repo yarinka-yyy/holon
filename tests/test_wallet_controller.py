@@ -5,7 +5,10 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 from PySide6.QtCore import QLocale, QTime
-from holon_policy import Policy, RecipientRule, TransferRule
+from holon_policy import (
+    Policy, PolicyRevisionStore, RecipientRule, TransferRule, policy_digest,
+)
+from holon_policy.baseline import BASELINE_POLICY_DIGEST
 from holon_policy.baseline import load_baseline_policy
 
 from holon_wallet.broadcast import (
@@ -32,6 +35,7 @@ from holon_wallet.trusted_recipients import (
 )
 from holon_wallet.vault import VaultRepository
 from holon_wallet.wallet_crypto import generate_mnemonic, import_private_key
+from holon_guard_ipc.policy_control import ControlUnavailable
 from wallet_public_support import (
     DeferredExecutor,
     ImmediateExecutor,
@@ -104,7 +108,7 @@ def raw_private_key() -> str:
             continue
 
 
-def controller(tmp_path) -> WalletController:
+def controller(tmp_path, policy_control_client=None) -> WalletController:
     repository = VaultRepository(WalletPaths(tmp_path))
     history = HistoryStore(repository.paths)
     mainnet, tracker, rpc = mainnet_services(repository, history)
@@ -119,9 +123,39 @@ def controller(tmp_path) -> WalletController:
         receipt_tracker=tracker,
         receipt_executor=ImmediateExecutor(),
         price_service=StubPriceService(),
+        policy_control_client=policy_control_client,
     )
     item._test_mainnet_rpc = rpc
     return item
+
+
+class StubPolicyControl:
+    def __init__(self, available: bool = True) -> None:
+        self.available = available
+        self.revision = 0
+        self.digest = policy_digest(Policy("2", "1", False, ()).to_dict())
+        self.applies = []
+
+    def status(self):
+        if not self.available:
+            raise ControlUnavailable("fixture unavailable")
+        return {
+            "kind": "policy_status", "code": "POLICY_STATUS",
+            "policy_revision": self.revision, "policy_digest": self.digest,
+        }
+
+    def apply(self, expected_revision, expected_digest, draft_digest, candidate_digest):
+        if not self.available:
+            raise ControlUnavailable("fixture unavailable")
+        self.applies.append((
+            expected_revision, expected_digest, draft_digest, candidate_digest,
+        ))
+        self.revision += 1
+        self.digest = candidate_digest
+        return {
+            "kind": "policy_applied", "code": "POLICY_REVISION_APPLIED",
+            "policy_revision": self.revision, "policy_digest": self.digest,
+        }
 
 
 def recipient_policy(
@@ -265,6 +299,67 @@ def test_trusted_recipients_draft_review_password_restart_and_cancel(tmp_path) -
     assert restarted.trustedDraftRoutes == []
 
 
+def test_trusted_draft_apply_has_separate_review_password_and_guard_gate(tmp_path) -> None:
+    policy_control = StubPolicyControl()
+    item = controller(tmp_path, policy_control)
+    secret = password()
+    item.beginCreate()
+    assert item.submitPassword(secret, secret)
+    assert item.finishBackup()
+    draft = TrustedPolicyDraft((TrustedRouteDraft(
+        "base", "usdc", 8453, "100000000", "5000000000000000",
+        (TrustedRecipientDraft(
+            "Savings", "0x4444444444444444444444444444444444444444", "50000000",
+        ),),
+    ),))
+    TrustedPolicyDraftStore(item._repository.paths).save(draft)
+
+    item.showTrustedRecipients()
+    assert item.trustedActiveRevision == "Baseline revision 0"
+    assert item.trustedCanApply
+    assert item.showTrustedApplyReview()
+    assert item.currentScreen == "trusted_apply_review"
+    item.beginTrustedApplyPassword()
+    assert item.currentScreen == "trusted_apply_password"
+    assert not item.submitTrustedApply(secret + "-wrong")
+    assert policy_control.applies == []
+    assert item.submitTrustedApply(secret)
+    assert item.currentScreen == "trusted_recipients"
+    assert item.trustedActiveRevision == "Active revision 1"
+    assert item.trustedDraftMatchesActive
+    assert len(policy_control.applies) == 1
+    assert "Transfers remain disabled" in item.trustedDraftStatus
+
+
+def test_trusted_apply_rejects_post_review_change_and_unavailable_guard(tmp_path) -> None:
+    policy_control = StubPolicyControl()
+    item = controller(tmp_path, policy_control)
+    secret = password()
+    item.beginCreate()
+    assert item.submitPassword(secret, secret)
+    assert item.finishBackup()
+    store = TrustedPolicyDraftStore(item._repository.paths)
+    store.save(TrustedPolicyDraft())
+    item.showTrustedRecipients()
+    assert item.showTrustedApplyReview()
+    item.beginTrustedApplyPassword()
+    changed = TrustedPolicyDraft((TrustedRouteDraft(
+        "base", "usdc", 8453, "1000000", "1000000000000000",
+        (TrustedRecipientDraft(
+            "Changed", "0x4444444444444444444444444444444444444444", "1000000",
+        ),),
+    ),))
+    store.save(changed)
+    assert not item.submitTrustedApply(secret)
+    assert item.errorMessage == "Draft changed; review it again"
+    assert policy_control.applies == []
+
+    policy_control.available = False
+    item.showTrustedRecipients()
+    assert not item.showTrustedApplyReview()
+    assert "Guard is unavailable" in item.errorMessage
+
+
 def test_corrupt_trusted_draft_does_not_block_public_wallet(tmp_path) -> None:
     item = controller(tmp_path)
     secret = password()
@@ -308,10 +403,12 @@ def test_trusted_draft_cannot_enable_direct_or_guard_transfer(tmp_path) -> None:
 
     now = datetime.now(UTC)
     request = {
-        "authority_version": "1", "kind": "prepare_transfer",
+        "authority_version": "2", "kind": "prepare_transfer",
         "flow_id": "11111111-1111-4111-8111-111111111111",
         "action_id": "act-22222222-2222-4222-8222-222222222222",
         "policy_version": "1", "network": "base", "asset": "usdc",
+        "policy_revision": item._mainnet_executor.policy.policy_revision,
+        "policy_digest": item._mainnet_executor.policy.policy_digest_value,
         "amount_atomic": "1000000", "recipient": recipient,
         "created_at": now.isoformat().replace("+00:00", "Z"),
         "expires_at": (now + timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),
@@ -322,6 +419,29 @@ def test_trusted_draft_cannot_enable_direct_or_guard_transfer(tmp_path) -> None:
     assert responses[0]["code"] == "POLICY_AUTHORITY_DISABLED"
     assert item._transfer_preflight_service.calls == []
     assert item._test_mainnet_rpc.send_calls == 0
+
+
+def test_applied_disabled_revision_still_blocks_before_rpc(tmp_path) -> None:
+    item = controller(tmp_path)
+    secret = password()
+    item.beginCreate()
+    assert item.submitPassword(secret, secret)
+    assert item.finishBackup()
+    recipient = "0x" + "44" * 20
+    baseline = load_baseline_policy()
+    store = PolicyRevisionStore(tmp_path, baseline)
+    disabled = Policy("2", "1", False, (TransferRule(
+        "base", "usdc", 8453, "1000000", str(10**18),
+        (RecipientRule(recipient, "1000000"),),
+    ),))
+    snapshot, _ = store.apply(
+        disabled, "a" * 64, 0, BASELINE_POLICY_DIGEST,
+    )
+    item._mainnet_executor.policy = MainnetBroadcastPolicy.from_snapshot(snapshot, store)
+    item.showSend()
+    assert not item.prepareTransfer("base", "usdc", recipient, "1")
+    assert item.transferError == "Transfers are disabled by local policy"
+    assert item._transfer_preflight_service.calls == []
 
 
 def test_public_restart_opens_main_without_password_session(tmp_path) -> None:
@@ -355,11 +475,13 @@ def test_guard_handoff_lands_on_exact_review_and_edit_rejects(tmp_path) -> None:
     assert item.finishBackup()
     now = datetime.now(UTC)
     request = {
-        "authority_version": "1",
+        "authority_version": "2",
         "kind": "prepare_transfer",
         "flow_id": "11111111-1111-4111-8111-111111111111",
         "action_id": "act-22222222-2222-4222-8222-222222222222",
         "policy_version": "1",
+        "policy_revision": item._mainnet_executor.policy.policy_revision,
+        "policy_digest": item._mainnet_executor.policy.policy_digest_value,
         "network": "base",
         "asset": "usdc",
         "amount_atomic": "1000000",
@@ -392,11 +514,13 @@ def test_guard_handoff_refuses_busy_and_reserved_sender(tmp_path) -> None:
     assert item.finishBackup()
     now = datetime.now(UTC)
     request = {
-        "authority_version": "1",
+        "authority_version": "2",
         "kind": "prepare_transfer",
         "flow_id": "11111111-1111-4111-8111-111111111111",
         "action_id": "act-22222222-2222-4222-8222-222222222222",
         "policy_version": "1",
+        "policy_revision": item._mainnet_executor.policy.policy_revision,
+        "policy_digest": item._mainnet_executor.policy.policy_digest_value,
         "network": "base", "asset": "usdc", "amount_atomic": "1000000",
         "recipient": item.activeProfile["address"],
         "created_at": now.isoformat().replace("+00:00", "Z"),
@@ -618,11 +742,13 @@ def test_wallet_rechecks_guard_policy_version_before_external_preflight(
     item._mainnet_executor.policy = recipient_policy(recipient)
     responses = []
     item.prepareExternalTransfer({
-        "authority_version": "1",
+        "authority_version": "2",
         "kind": "prepare_transfer",
         "flow_id": "11111111-1111-4111-8111-111111111111",
         "action_id": "act-22222222-2222-4222-8222-222222222222",
         "policy_version": "2",
+        "policy_revision": item._mainnet_executor.policy.policy_revision,
+        "policy_digest": item._mainnet_executor.policy.policy_digest_value,
         "network": "base",
         "asset": "usdc",
         "amount_atomic": "500000",
@@ -634,6 +760,30 @@ def test_wallet_rechecks_guard_policy_version_before_external_preflight(
     assert responses[0]["code"] == "POLICY_VERSION_MISMATCH"
     assert item._transfer_preflight_service.calls == []
     assert item.currentScreen == "main"
+
+
+def test_wallet_rejects_guard_revision_digest_before_external_preflight(tmp_path) -> None:
+    item = controller(tmp_path)
+    secret = password()
+    item.beginCreate()
+    assert item.submitPassword(secret, secret)
+    assert item.finishBackup()
+    recipient = "0x" + "44" * 20
+    item._mainnet_executor.policy = recipient_policy(recipient)
+    responses = []
+    item.prepareExternalTransfer({
+        "authority_version": "2", "kind": "prepare_transfer",
+        "flow_id": "11111111-1111-4111-8111-111111111111",
+        "action_id": "act-22222222-2222-4222-8222-222222222222",
+        "policy_version": "1", "policy_revision": 1,
+        "policy_digest": "f" * 64,
+        "network": "base", "asset": "usdc", "amount_atomic": "500000",
+        "recipient": recipient,
+        "created_at": "2026-07-24T10:00:00Z",
+        "expires_at": "2026-07-24T10:05:00Z",
+    }, responses.append)
+    assert responses[0]["code"] == "POLICY_REVISION_CHANGED"
+    assert item._transfer_preflight_service.calls == []
 
 
 def test_maximum_amount_uses_token_cap_and_live_native_fee_quote(tmp_path) -> None:

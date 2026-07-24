@@ -177,6 +177,8 @@ class PendingTransferRequest:
     network_id: str = BASE_NETWORK_ID
     asset_id: str = USDC_ASSET_ID
     amount_atomic: int = USDC_AMOUNT_ATOMIC
+    policy_revision: int = 0
+    policy_digest: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,6 +241,8 @@ class PreparedTransferAction:
     created_at: datetime
     expires_at: datetime
     simulation: bool = False
+    policy_revision: int = 0
+    policy_digest: str = ""
 
     def material_fields(self) -> dict[str, object]:
         return {
@@ -262,6 +266,8 @@ class PreparedTransferAction:
             "created_at": _timestamp(self.created_at),
             "expires_at": _timestamp(self.expires_at),
             "simulation": self.simulation,
+            "policy_revision": self.policy_revision,
+            "policy_digest": self.policy_digest,
         }
 
     @property
@@ -632,6 +638,8 @@ class TransferFlowCoordinator:
         network_id: str = BASE_NETWORK_ID,
         asset_id: str = USDC_ASSET_ID,
         amount_atomic: int = USDC_AMOUNT_ATOMIC,
+        policy_revision: int = 0,
+        policy_digest: str = "",
     ) -> PendingTransferRequest:
         if self._state is not TransferFlowState.LOCKED:
             raise TransferFlowError("A transfer flow is already active")
@@ -650,6 +658,8 @@ class TransferFlowCoordinator:
             network_id,
             asset_id,
             amount_atomic,
+            policy_revision,
+            policy_digest,
         )
         self._pending = request
         self._state = TransferFlowState.PREPARING
@@ -658,6 +668,7 @@ class TransferFlowCoordinator:
     def begin_external(
         self, action_id: str, profile_id: str, created_at: datetime,
         expires_at: datetime, network_id: str, asset_id: str, amount_atomic: int,
+        policy_revision: int = 0, policy_digest: str = "",
     ) -> PendingTransferRequest:
         if self._state is not TransferFlowState.LOCKED:
             raise TransferFlowError("A transfer flow is already active")
@@ -685,6 +696,8 @@ class TransferFlowCoordinator:
             network_id,
             asset_id,
             amount_atomic,
+            policy_revision,
+            policy_digest,
         )
         self._pending = request
         self._state = TransferFlowState.PREPARING
@@ -703,6 +716,8 @@ class TransferFlowCoordinator:
             or pending.amount_atomic != action.amount_atomic
             or pending.created_at != action.created_at
             or pending.expires_at != action.expires_at
+            or pending.policy_revision != action.policy_revision
+            or pending.policy_digest != action.policy_digest
             or self._clock().astimezone(UTC) >= action.expires_at
         ):
             self.close()
@@ -939,6 +954,9 @@ def _action_from_snapshot(
         snapshot.gas_estimate * max_fee,
         request.created_at,
         request.expires_at,
+        False,
+        request.policy_revision,
+        request.policy_digest,
     )
 
 

@@ -3,13 +3,22 @@ import "."
 
 PageState {
     id: root
-    function submit() { walletController.submitTrustedDraft(passwordField.text) }
+    property bool applyMode: walletController.trustedApplyMode
+    function submit() {
+        if (root.applyMode)
+            walletController.submitTrustedApply(passwordField.text)
+        else
+            walletController.submitTrustedDraft(passwordField.text)
+    }
     onEnabledChanged: if (!enabled) passwordField.clear()
 
     ScreenHeader {
         objectName: "trustedPasswordHeader"; x: 28; y: 54; width: 458
-        title: "Confirm Draft"; subtitle: "Fresh local authentication"
-        onBackRequested: walletController.closeTrustedDraftPassword()
+        title: root.applyMode ? "Confirm Apply" : "Confirm Draft"
+        subtitle: "Fresh local authentication"
+        onBackRequested: root.applyMode
+            ? walletController.closeTrustedApplyPassword()
+            : walletController.closeTrustedDraftPassword()
     }
     SurfaceCard {
         x: 86; y: 170; width: 342; height: 174
@@ -21,7 +30,9 @@ PageState {
     }
     Text {
         x: 72; y: 382; width: 370; horizontalAlignment: Text.AlignHCenter
-        text: "Authenticate this complete draft. This does not activate transfer authority."
+        text: root.applyMode
+            ? "Authenticate applying this exact saved draft. Transfer authority remains disabled."
+            : "Authenticate this complete draft. This does not activate transfer authority."
         color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 14; wrapMode: Text.Wrap
     }
     PasswordInput {
@@ -38,12 +49,15 @@ PageState {
     }
     FormButton {
         objectName: "trustedPasswordSubmitButton"; x: 72; y: 600; width: 370; height: 56
-        label: "Save Disabled Draft"; controlEnabled: passwordField.text.length >= 4
+        label: root.applyMode ? "Apply Disabled Draft" : "Save Disabled Draft"
+        controlEnabled: passwordField.text.length >= 4
         onTriggered: root.submit()
     }
     Text {
         x: 72; y: 682; width: 370; horizontalAlignment: Text.AlignHCenter
-        text: "Password stays inside Wallet and authorizes this save only"
+        text: root.applyMode
+            ? "Password stays inside Wallet and is never sent to Guard"
+            : "Password stays inside Wallet and authorizes this save only"
         color: Design.textFaint; font.family: Design.fontFamily; font.pixelSize: 11
     }
 }

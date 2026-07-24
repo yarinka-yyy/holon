@@ -13,6 +13,8 @@ from typing import Callable
 
 from PySide6.QtCore import Property, QLocale, QObject, QTime, QTimer, Signal, Slot
 from PySide6.QtGui import QGuiApplication
+from holon_wallet_control import AUTHORITY_VERSION
+from holon_guard_ipc.policy_control import ControlProtocolError, ControlUnavailable
 
 from .approval import (
     AllowanceReadService,
@@ -100,6 +102,7 @@ from .trusted_recipients import (
     parse_fee_cap,
     validate_draft_address,
     validate_label,
+    trusted_draft_digest,
 )
 from .vault import (
     MIN_PASSWORD_LENGTH,
@@ -191,11 +194,13 @@ class WalletController(QObject):
         allowance_service: AllowanceReadService | None = None,
         revoke_preflight_service: RevokePreflightService | None = None,
         transfer_policy: MainnetBroadcastPolicy | None = None,
+        policy_control_client=None,
     ) -> None:
         super().__init__()
         self._repository = repository or VaultRepository()
         self._settings = SettingsStore(self._repository.paths)
         self._trusted_store = TrustedPolicyDraftStore(self._repository.paths)
+        self._policy_control_client = policy_control_client
         self._public_data_service = public_data_service or PublicDataService()
         self._price_service = price_service or PriceService()
         self._history_store = history_store or HistoryStore(self._repository.paths)
@@ -286,6 +291,12 @@ class WalletController(QObject):
         self._trusted_route_key: tuple[str, str] | None = None
         self._trusted_recipient_address: str | None = None
         self._trusted_review_digest = ""
+        self._trusted_apply_review_digest = ""
+        self._trusted_apply_policy_digest = ""
+        self._trusted_active_revision = 0
+        self._trusted_active_digest = ""
+        self._trusted_apply_expected_revision = 0
+        self._trusted_apply_expected_digest = ""
         self._wallets_return_screen = "settings"
         self._recovery_flow = RecoveryFlowCoordinator()
         self._recovery_selection = ""
@@ -723,6 +734,37 @@ class WalletController(QObject):
     def trustedDraftStatus(self) -> str:
         return self._trusted_status
 
+    @Property(str, notify=trustedDraftChanged)
+    def trustedActiveRevision(self) -> str:
+        return (
+            "Baseline revision 0"
+            if self._trusted_active_revision == 0
+            else f"Active revision {self._trusted_active_revision}"
+        )
+
+    @Property(bool, notify=trustedDraftChanged)
+    def trustedDraftMatchesActive(self) -> bool:
+        if not self._trusted_available:
+            return False
+        try:
+            candidate = self._trusted_saved.to_envelope()["policy_digest"]
+        except TrustedDraftError:
+            return False
+        return candidate == self._trusted_active_digest
+
+    @Property(bool, notify=trustedDraftChanged)
+    def trustedCanApply(self) -> bool:
+        return (
+            self._trusted_available
+            and not self.trustedDraftDirty
+            and self._policy_control_client is not None
+            and not self._critical_flow_active()
+        )
+
+    @Property(bool, notify=currentScreenChanged)
+    def trustedApplyMode(self) -> bool:
+        return self._current_screen in {"trusted_apply_review", "trusted_apply_password"}
+
     @Slot(str, str, result=str)
     def trustedAmountUsd(self, asset: str, amount_input: str) -> str:
         try:
@@ -917,6 +959,8 @@ class WalletController(QObject):
                 return False
             request = self._transfer_flow.begin(
                 active.profile_id, network_id, asset_id, amount_atomic,
+                self._mainnet_executor.policy.policy_revision,
+                self._mainnet_executor.policy.policy_digest_value,
             )
         except TransferPreflightError as error:
             self._set_transfer_error(_transfer_error_message(error.code))
@@ -983,6 +1027,11 @@ class WalletController(QObject):
             normalized = normalize_recipient(str(request["recipient"]), active.address)
             created_at = datetime.fromisoformat(str(request["created_at"]).replace("Z", "+00:00"))
             expires_at = datetime.fromisoformat(str(request["expires_at"]).replace("Z", "+00:00"))
+            if not self._mainnet_executor.policy.matches(
+                int(request["policy_revision"]), str(request["policy_digest"]),
+            ):
+                completion(self._external_refusal(request, "POLICY_REVISION_CHANGED"))
+                return
             policy_code = self._mainnet_executor.policy.draft_amount_code(
                 network_id,
                 asset_id,
@@ -996,6 +1045,7 @@ class WalletController(QObject):
             pending = self._transfer_flow.begin_external(
                 str(request["action_id"]), active.profile_id, created_at, expires_at,
                 network_id, asset_id, amount_atomic,
+                int(request["policy_revision"]), str(request["policy_digest"]),
             )
         except (KeyError, TypeError, ValueError, RuntimeError, TransferPreflightError) as error:
             code = error.code.value if isinstance(error, TransferPreflightError) else "TRANSFER_INTENT_INVALID"
@@ -1038,7 +1088,7 @@ class WalletController(QObject):
         self._guard_notice_timer.start()
         self._set_screen("main")
         return {
-            "authority_version": "1", "kind": "transfer_cancelled",
+            "authority_version": AUTHORITY_VERSION, "kind": "transfer_cancelled",
             "flow_id": request["flow_id"], "action_id": request["action_id"],
             "code": "ACTION_CANCELLED",
         }
@@ -1048,7 +1098,7 @@ class WalletController(QObject):
         request: dict[str, object], code: str,
     ) -> dict[str, object]:
         return {
-            "authority_version": "1", "kind": "transfer_refused",
+            "authority_version": AUTHORITY_VERSION, "kind": "transfer_refused",
             "flow_id": request.get("flow_id"), "action_id": request.get("action_id"),
             "code": code,
         }
@@ -1559,6 +1609,7 @@ class WalletController(QObject):
         self._trusted_route_key = None
         self._trusted_recipient_address = None
         self._trusted_review_digest = ""
+        self._trusted_apply_review_digest = ""
         try:
             loaded = self._trusted_store.load()
             self._trusted_saved = loaded
@@ -1570,6 +1621,7 @@ class WalletController(QObject):
             self._trusted_working = TrustedPolicyDraft()
             self._trusted_available = False
             self._trusted_status = "Trusted recipients draft is unavailable"
+        self._refresh_trusted_policy_status()
         self.trustedDraftChanged.emit()
         self._set_screen("trusted_recipients")
 
@@ -1579,10 +1631,38 @@ class WalletController(QObject):
         self._trusted_route_key = None
         self._trusted_recipient_address = None
         self._trusted_review_digest = ""
+        self._trusted_apply_review_digest = ""
         self._settings_section = "security"
         self.settingsSectionChanged.emit()
         self.trustedDraftChanged.emit()
         self._set_screen("settings_info")
+
+    def _critical_flow_active(self) -> bool:
+        return (
+            self._transfer_preparing
+            or self._mainnet_in_progress
+            or self._transfer_flow.pending is not None
+            or self._transfer_flow.current is not None
+            or self._revoke_flow.pending is not None
+            or self._revoke_flow.current is not None
+            or self._recovery_flow.current is not None
+            or self._flow != "none"
+        )
+
+    def _refresh_trusted_policy_status(self) -> bool:
+        policy = self._mainnet_executor.policy
+        policy.refresh()
+        self._trusted_active_revision = policy.policy_revision
+        self._trusted_active_digest = policy.policy_digest_value
+        if self._policy_control_client is None:
+            return False
+        try:
+            response = self._policy_control_client.status()
+        except (ControlUnavailable, ControlProtocolError, OSError):
+            return False
+        self._trusted_active_revision = int(response["policy_revision"])
+        self._trusted_active_digest = str(response["policy_digest"])
+        return True
 
     @Slot()
     def beginTrustedRoute(self) -> None:
@@ -1848,6 +1928,130 @@ class WalletController(QObject):
             except UnboundLocalError:
                 pass
         return False
+
+    @Slot(result=bool)
+    def showTrustedApplyReview(self) -> bool:
+        self._set_error("")
+        if (
+            not self.trustedCanApply
+            or self._current_screen != "trusted_recipients"
+            or not self._refresh_trusted_policy_status()
+        ):
+            self._set_error("Guard is unavailable. Draft remains saved.")
+            return False
+        try:
+            saved = self._trusted_store.load()
+            envelope = saved.to_envelope()
+        except (TrustedDraftUnavailable, TrustedDraftError):
+            self._set_error("Trusted recipients draft is unavailable")
+            return False
+        self._trusted_saved = saved
+        self._trusted_working = saved
+        self._trusted_apply_review_digest = trusted_draft_digest(envelope)
+        self._trusted_apply_policy_digest = str(envelope["policy_digest"])
+        self._trusted_apply_expected_revision = self._trusted_active_revision
+        self._trusted_apply_expected_digest = self._trusted_active_digest
+        self.trustedDraftChanged.emit()
+        self._set_screen("trusted_apply_review")
+        return True
+
+    @Slot()
+    def closeTrustedApplyReview(self) -> None:
+        self._clear_trusted_apply_review()
+        self._set_error("")
+        self._set_screen("trusted_recipients")
+
+    @Slot()
+    def beginTrustedApplyPassword(self) -> None:
+        if (
+            self._current_screen == "trusted_apply_review"
+            and self._trusted_apply_review_digest
+            and not self._critical_flow_active()
+        ):
+            self._set_error("")
+            self._set_screen("trusted_apply_password")
+
+    @Slot()
+    def closeTrustedApplyPassword(self) -> None:
+        self._set_error("")
+        self._set_screen("trusted_apply_review")
+
+    @Slot(str, result=bool)
+    def submitTrustedApply(self, password: str) -> bool:
+        self._set_error("")
+        if (
+            len(password) < MIN_PASSWORD_LENGTH
+            or self._current_screen != "trusted_apply_password"
+            or not self._trusted_apply_review_digest
+            or self._policy_control_client is None
+            or self._critical_flow_active()
+        ):
+            self._set_error("Policy application is unavailable")
+            return False
+        try:
+            saved = self._trusted_store.load()
+            envelope = saved.to_envelope()
+            if (
+                not hmac.compare_digest(
+                    trusted_draft_digest(envelope), self._trusted_apply_review_digest,
+                )
+                or not hmac.compare_digest(
+                    str(envelope["policy_digest"]), self._trusted_apply_policy_digest,
+                )
+            ):
+                self._clear_trusted_apply_review()
+                self._set_error("Draft changed; review it again")
+                self._set_screen("trusted_recipients")
+                return False
+            self._repository.authenticate(password)
+            del password
+            response = self._policy_control_client.apply(
+                self._trusted_apply_expected_revision,
+                self._trusted_apply_expected_digest,
+                self._trusted_apply_review_digest,
+                self._trusted_apply_policy_digest,
+            )
+            if response.get("kind") != "policy_applied":
+                self._clear_trusted_apply_review()
+                self._set_error(_policy_apply_error(str(response.get("code", ""))))
+                self._set_screen("trusted_recipients")
+                return False
+            self._trusted_active_revision = int(response["policy_revision"])
+            self._trusted_active_digest = str(response["policy_digest"])
+            self._mainnet_executor.policy.refresh()
+            self._transfer_flow.close()
+            code = str(response.get("code", ""))
+            self._trusted_status = (
+                f"Draft applied as revision {self._trusted_active_revision}. "
+                "Transfers remain disabled until authority activation."
+                if code == "POLICY_REVISION_APPLIED"
+                else f"Draft is already active as revision {self._trusted_active_revision}. "
+                "Transfers remain disabled until authority activation."
+            )
+            self._clear_trusted_apply_review()
+            self.trustedDraftChanged.emit()
+            self._set_screen("trusted_recipients")
+            return True
+        except AuthenticationFailedError:
+            self._set_error("Authentication failed")
+        except (TrustedDraftUnavailable, TrustedDraftError):
+            self._set_error("Trusted recipients draft is unavailable")
+        except (ControlUnavailable, ControlProtocolError, OSError):
+            self._set_error("Guard is unavailable. Draft remains saved.")
+        except VaultUnavailableError:
+            self._set_error("Wallet vault is unavailable")
+        finally:
+            try:
+                del password
+            except UnboundLocalError:
+                pass
+        return False
+
+    def _clear_trusted_apply_review(self) -> None:
+        self._trusted_apply_review_digest = ""
+        self._trusted_apply_policy_digest = ""
+        self._trusted_apply_expected_revision = 0
+        self._trusted_apply_expected_digest = ""
 
     @Slot()
     def showApprovals(self) -> None:
@@ -2689,7 +2893,7 @@ class WalletController(QObject):
             return
         self._external_transfer["prepared_digest"] = action.digest
         completion({
-            "authority_version": "1", "kind": "transfer_prepared",
+            "authority_version": AUTHORITY_VERSION, "kind": "transfer_prepared",
             "flow_id": context["flow_id"], "action_id": action.action_id,
             "profile_id": action.profile_id, "sender": action.sender,
             "recipient": action.recipient, "network": action.network_id,
@@ -2697,6 +2901,8 @@ class WalletController(QObject):
             "max_total_fee_wei": str(action.max_total_fee_wei),
             "prepared_digest": action.digest,
             "created_at": context["created_at"], "expires_at": context["expires_at"],
+            "policy_revision": action.policy_revision,
+            "policy_digest": action.policy_digest,
             "code": code,
         })
 
@@ -3140,6 +3346,17 @@ def _trusted_envelope_digest(value: dict[str, object]) -> str:
         value, ensure_ascii=False, separators=(",", ":"), sort_keys=True,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _policy_apply_error(code: str) -> str:
+    return {
+        "POLICY_FLOW_ACTIVE": "Finish or cancel the current protected action first",
+        "POLICY_DRAFT_CHANGED": "Draft changed; review it again",
+        "POLICY_DRAFT_UNAVAILABLE": "Trusted recipients draft is unavailable",
+        "POLICY_REVISION_STALE": "Active policy changed; review it again",
+        "POLICY_REVISION_WRITE_FAILED": "Policy revision could not be saved",
+        "POLICY_REVISION_INVALID": "Active policy requires revalidation",
+    }.get(code, "Policy application was refused")
 
 def _display_local_time(timestamp: str) -> str:
     parsed = datetime.fromisoformat(timestamp.removesuffix("Z") + "+00:00")

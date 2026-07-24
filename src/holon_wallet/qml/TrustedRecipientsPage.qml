@@ -11,20 +11,22 @@ PageState {
         onBackRequested: walletController.closeTrustedRecipients()
     }
     Rectangle {
-        x: 28; y: 136; width: 458; height: 62; radius: Design.controlRadius
+        x: 28; y: 136; width: 458; height: 78; radius: Design.controlRadius
         color: walletController.trustedDraftAvailable ? Design.accentSoft : "#33D65C5C"
         border.width: 1
         border.color: walletController.trustedDraftAvailable ? Design.accent : Design.danger
         Text {
             objectName: "trustedDraftStatus"; x: 16; width: 426
             anchors.verticalCenter: parent.verticalCenter; wrapMode: Text.Wrap
-            text: walletController.trustedDraftStatus
+            text: walletController.trustedDraftStatus + "\n"
+                + walletController.trustedActiveRevision
+                + (walletController.trustedDraftMatchesActive ? " · draft matches" : " · draft differs")
             color: walletController.trustedDraftAvailable ? Design.text : Design.danger
             font.family: Design.fontFamily; font.pixelSize: 12
         }
     }
     Text {
-        x: 28; y: 220; text: "TRANSFER ROUTES"; color: Design.textFaint
+        x: 28; y: 232; text: "TRANSFER ROUTES"; color: Design.textFaint
         font.family: Design.fontFamily; font.pixelSize: 11; font.weight: Font.Medium
     }
     Text {
@@ -37,7 +39,7 @@ PageState {
     }
     ListView {
         id: routeList; objectName: "trustedRouteList"
-        x: 28; y: 246; width: 458; height: 354; clip: true; spacing: 10
+        x: 28; y: 258; width: 458; height: 336; clip: true; spacing: 10
         model: root.routes; boundsBehavior: Flickable.StopAtBounds
         delegate: SurfaceCard {
             required property var modelData
@@ -67,16 +69,22 @@ PageState {
         }
     }
     FormButton {
-        objectName: "trustedAddRouteButton"; x: 28; y: 620; width: 218; height: 52
+        objectName: "trustedAddRouteButton"; x: 28; y: 620; width: 140; height: 52
         label: "Add Route"; primary: false
         controlEnabled: walletController.trustedDraftAvailable && root.routes.length < 4
         onTriggered: walletController.beginTrustedRoute()
     }
     FormButton {
-        objectName: "trustedReviewButton"; x: 266; y: 620; width: 220; height: 52
-        label: "Review & Save"
+        objectName: "trustedReviewButton"; x: 178; y: 620; width: 140; height: 52
+        label: "Save Draft"
         controlEnabled: walletController.trustedDraftAvailable
         onTriggered: walletController.showTrustedDraftReview()
+    }
+    FormButton {
+        objectName: "trustedApplyButton"; x: 328; y: 620; width: 158; height: 52
+        label: "Apply Draft"
+        controlEnabled: walletController.trustedCanApply
+        onTriggered: walletController.showTrustedApplyReview()
     }
     Text {
         objectName: "trustedDraftError"; x: 48; y: 694; width: 418

@@ -4,18 +4,24 @@ import "."
 PageState {
     id: root
     property var routes: walletController.trustedDraftRoutes
+    property bool applyMode: walletController.trustedApplyMode
 
     ScreenHeader {
         objectName: "trustedReviewHeader"; x: 28; y: 54; width: 458
-        title: "Review Policy Draft"; subtitle: "Authority remains disabled"
-        onBackRequested: walletController.closeTrustedDraftReview()
+        title: root.applyMode ? "Apply Policy Draft" : "Review Policy Draft"
+        subtitle: root.applyMode ? walletController.trustedActiveRevision : "Authority remains disabled"
+        onBackRequested: root.applyMode
+            ? walletController.closeTrustedApplyReview()
+            : walletController.closeTrustedDraftReview()
     }
     Rectangle {
         x: 28; y: 136; width: 458; height: 72; radius: Design.controlRadius
         color: "#332C261B"; border.width: 1; border.color: "#66D5AA64"
         Text {
             x: 16; width: 426; anchors.verticalCenter: parent.verticalCenter
-            text: "Saving records this draft only. Guard and Send will continue using the disabled production baseline."
+            text: root.applyMode
+                ? "Guard will independently verify and pin this exact saved draft. Transfer authority will remain disabled."
+                : "Saving records this draft only. Guard and Send will continue using the current disabled policy."
             wrapMode: Text.Wrap; color: Design.warning
             font.family: Design.fontFamily; font.pixelSize: 12
         }
@@ -23,7 +29,9 @@ PageState {
     Text {
         visible: root.routes.length === 0; x: 52; y: 350; width: 410
         horizontalAlignment: Text.AlignHCenter; wrapMode: Text.Wrap
-        text: "This will save an empty draft with no trusted recipients."
+        text: root.applyMode
+            ? "This will apply an empty disabled policy with no trusted recipients."
+            : "This will save an empty draft with no trusted recipients."
         color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 14
     }
     ListView {
@@ -42,11 +50,15 @@ PageState {
     FormButton {
         objectName: "trustedReviewContinueButton"; x: 72; y: 666; width: 370; height: 56
         label: "Confirm with Wallet Password"
-        onTriggered: walletController.beginTrustedDraftPassword()
+        onTriggered: root.applyMode
+            ? walletController.beginTrustedApplyPassword()
+            : walletController.beginTrustedDraftPassword()
     }
     Text {
         x: 72; y: 742; width: 370; horizontalAlignment: Text.AlignHCenter
-        text: "No address, cap or price is sent to Hermes"
+        text: root.applyMode
+            ? "Only revision and digest metadata is sent to Guard"
+            : "No address, cap or price is sent to Hermes"
         color: Design.textFaint; font.family: Design.fontFamily; font.pixelSize: 11
     }
 }

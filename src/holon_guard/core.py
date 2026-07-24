@@ -7,6 +7,7 @@ from typing import Callable
 
 from holon_contracts import ActionState, SecurityCode
 from holon_guard_ipc import GuardState
+from holon_wallet_control import AUTHORITY_VERSION
 
 from .actions import ActionLedger, ActionLedgerFailure
 from .model import GuardResult, GuardSnapshot
@@ -105,7 +106,7 @@ class GuardCore:
                     or self.snapshot.action_id is None
                     or self.prepared_digest is None
                     or not self.wallet.cancel_transfer({
-                        "authority_version": "1",
+                        "authority_version": AUTHORITY_VERSION,
                         "kind": "cancel_transfer",
                         "flow_id": self.snapshot.flow_id,
                         "action_id": self.snapshot.action_id,
@@ -132,7 +133,7 @@ class GuardCore:
                 ):
                     try:
                         self.wallet.cancel_transfer({
-                            "authority_version": "1",
+                            "authority_version": AUTHORITY_VERSION,
                             "kind": "cancel_transfer",
                             "flow_id": self.snapshot.flow_id,
                             "action_id": self.snapshot.action_id,

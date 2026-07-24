@@ -20,11 +20,13 @@ from holon_wallet.application import (
     _load_wallet_transfer_policy,
     _wallet_policy_path,
 )
+from holon_policy import Policy, policy_digest
 from holon_wallet.broadcast import MainnetTransferCode
 from holon_wallet.approval import UINT256_MAX
 from holon_wallet.history import HistoryStatus, HistoryStore, WalletHistoryRecord
 from holon_wallet.storage import WalletPaths, atomic_write_json
 from holon_wallet.transfer import TransferPreflightCode, TransferPreflightError
+from holon_wallet.trusted_recipients import TrustedPolicyDraft, TrustedPolicyDraftStore
 from holon_wallet.vault import VaultRepository
 from holon_wallet.wallet_crypto import generate_mnemonic, import_private_key
 from wallet_public_support import (
@@ -113,6 +115,7 @@ def make_app(
     transfer_executor=None,
     mainnet_enabled: bool = True,
     revoke_enabled: bool = True,
+    policy_control_client=None,
 ) -> WalletApplication:
     history = HistoryStore(repository.paths)
     mainnet, tracker, rpc = mainnet_services(
@@ -133,9 +136,32 @@ def make_app(
         receipt_tracker=tracker,
         receipt_executor=ImmediateExecutor(),
         price_service=StubPriceService(),
+        policy_control_client=policy_control_client,
     )
     app._test_mainnet_rpc = rpc
     return app
+
+
+class UiPolicyControl:
+    def __init__(self) -> None:
+        self.revision = 0
+        self.digest = policy_digest(Policy("2", "1", False, ()).to_dict())
+        self.calls = 0
+
+    def status(self):
+        return {
+            "kind": "policy_status", "code": "POLICY_STATUS",
+            "policy_revision": self.revision, "policy_digest": self.digest,
+        }
+
+    def apply(self, _revision, _active_digest, _draft_digest, policy_value):
+        self.calls += 1
+        self.revision += 1
+        self.digest = policy_value
+        return {
+            "kind": "policy_applied", "code": "POLICY_REVISION_APPLIED",
+            "policy_revision": self.revision, "policy_digest": self.digest,
+        }
 
 
 def test_token_approvals_v2_review_confirm_submit_and_policy_gate(tmp_path, qt_app) -> None:
@@ -550,10 +576,12 @@ def test_guard_transfer_handoff_opens_existing_review_qml(tmp_path, qt_app) -> N
     now = datetime.now(UTC)
     responses, statuses = [], []
     request = {
-        "authority_version": "1", "kind": "prepare_transfer",
+        "authority_version": "2", "kind": "prepare_transfer",
         "flow_id": "11111111-1111-4111-8111-111111111111",
         "action_id": "act-22222222-2222-4222-8222-222222222222",
         "policy_version": "1", "network": "ethereum", "asset": "eth",
+        "policy_revision": app.controller._mainnet_executor.policy.policy_revision,
+        "policy_digest": app.controller._mainnet_executor.policy.policy_digest_value,
         "amount_atomic": "1000000000000000",
         "recipient": "0x4444444444444444444444444444444444444444",
         "created_at": now.isoformat().replace("+00:00", "Z"),
@@ -594,9 +622,8 @@ def test_trusted_recipients_qml_review_and_password_save(tmp_path, qt_app) -> No
         invoke(child(app, "settingsTrustedRecipients"), "trigger")
         QTest.qWait(220)
         assert app.controller.currentScreen == "trusted_recipients"
-        assert child(app, "trustedDraftStatus").property("text") == (
-            "Draft only · transfers remain disabled"
-        )
+        assert "Draft only" in child(app, "trustedDraftStatus").property("text")
+        assert not child(app, "trustedApplyButton").property("enabled")
 
         invoke(child(app, "trustedAddRouteButton"), "trigger")
         QTest.qWait(220)
@@ -629,11 +656,44 @@ def test_trusted_recipients_qml_review_and_password_save(tmp_path, qt_app) -> No
         set_text(app, "trustedPasswordInput", password)
         invoke(child(app, "trustedPasswordSubmitButton"), "trigger")
         assert app.controller.currentScreen == "trusted_recipients"
-        assert child(app, "trustedDraftStatus").property("text") == (
-            "Draft saved. Transfers remain disabled until policy activation."
-        )
+        assert "Draft saved" in child(app, "trustedDraftStatus").property("text")
         assert repository.paths.transfer_policy_draft.is_file()
         assert not app.controller.trustedDraftDirty
+        assert app._test_mainnet_rpc.send_calls == 0
+    finally:
+        app.close()
+
+
+def test_trusted_recipients_qml_apply_uses_separate_review_and_password(
+    tmp_path, qt_app,
+) -> None:
+    repository = VaultRepository(WalletPaths(tmp_path))
+    password = fresh_password()
+    repository.create_new(
+        password, repository.new_record(generate_mnemonic(), "Main Account"),
+    )
+    TrustedPolicyDraftStore(repository.paths).save(TrustedPolicyDraft())
+    policy_control = UiPolicyControl()
+    app = make_app(
+        qt_app, repository, policy_control_client=policy_control,
+    )
+    try:
+        app.controller.showTrustedRecipients()
+        qt_app.processEvents()
+        assert child(app, "trustedApplyButton").property("enabled")
+        invoke(child(app, "trustedApplyButton"), "trigger")
+        qt_app.processEvents()
+        assert app.controller.currentScreen == "trusted_apply_review"
+        assert child(app, "trustedReviewHeader").property("title") == "Apply Policy Draft"
+        invoke(child(app, "trustedReviewContinueButton"), "trigger")
+        qt_app.processEvents()
+        assert app.controller.currentScreen == "trusted_apply_password"
+        set_text(app, "trustedPasswordInput", password)
+        invoke(child(app, "trustedPasswordSubmitButton"), "trigger")
+        qt_app.processEvents()
+        assert app.controller.currentScreen == "trusted_recipients"
+        assert policy_control.calls == 1
+        assert "Draft applied as revision 1" in app.controller.trustedDraftStatus
         assert app._test_mainnet_rpc.send_calls == 0
     finally:
         app.close()
