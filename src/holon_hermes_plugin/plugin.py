@@ -22,6 +22,7 @@ OPEN_WALLET_TOOL = "holon_open_wallet"
 WALLET_BALANCES_TOOL = "holon_wallet_balances"
 LENDING_COMPARE_TOOL = "holon_lending_compare"
 LENDING_POSITIONS_TOOL = "holon_lending_positions"
+LENDING_PREPARE_TOOL = "holon_lending_prepare"
 PREPARE_TRANSFER_TOOL = "holon_prepare_transfer"
 TRANSFER_STATUS_TOOL = "holon_transfer_status"
 CANCEL_TRANSFER_TOOL = "holon_cancel_transfer"
@@ -29,7 +30,7 @@ RECOVER_TRANSFER_TOOL = "holon_recover_transfer"
 CAPABILITIES = [
     "health", "open_wallet", "wallet_balances", "prepare_transfer",
     "transfer_status", "cancel_transfer", "recover_transfer", "lending_compare",
-    "lending_positions",
+    "lending_positions", "lending_prepare",
 ]
 PROTECTED_TOOL_ALLOWLIST = frozenset({
     HEALTH_TOOL, TRANSFER_STATUS_TOOL, CANCEL_TRANSFER_TOOL, RECOVER_TRANSFER_TOOL,
@@ -97,6 +98,28 @@ def _unavailable_lending_markets() -> dict[str, Any]:
         "message": "Lending data is unavailable.",
     })
     return value
+
+
+def _unavailable_lending_preview() -> dict[str, Any]:
+    return {
+        "status": "UNAVAILABLE", "authority_available": False,
+        "execution_available": False, "account": None,
+        "requested_action": None, "next_action": None,
+        "protocol": "aave-v3", "profile_id": "aave-v3-base-usdc",
+        "profile_version": "1", "profile_digest": None,
+        "network": {"network": "base", "chain_id": 8453},
+        "asset": {
+            "asset": "USDC", "address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "decimals": 6,
+        },
+        "amount_mode": None, "amount_atomic": None, "display_amount": None,
+        "target": None, "method": None, "calldata_hash": None,
+        "native_value_wei": "0", "nonce": None, "gas": None,
+        "max_total_fee_wei": None, "block_number": None, "observed_at": None,
+        "expires_at": None, "preview_digest": None, "checks": [],
+        "caveats": ["WALLET_UNAVAILABLE"], "code": "LENDING_ACTION_UNAVAILABLE",
+        "message": "Lending action preview is unavailable.",
+    }
 
 
 def _unavailable_lending_positions() -> dict[str, Any]:
@@ -239,6 +262,34 @@ class PluginRuntime:
         return json.dumps(
             _unavailable_lending_positions(), ensure_ascii=False, separators=(",", ":"),
         )
+
+    def handle_lending_prepare(
+        self, params: Optional[dict] = None, **kwargs: Any,
+    ) -> str:
+        del kwargs
+        if not isinstance(params, dict) or set(params) != {"action", "amount_mode", "amount"}:
+            return json.dumps(_unavailable_lending_preview(), separators=(",", ":"))
+        action, mode, amount = params.get("action"), params.get("amount_mode"), params.get("amount")
+        if (
+            action not in {"supply", "withdraw"} or mode not in {"exact", "all"}
+            or mode == "all" and (action != "withdraw" or amount is not None)
+            or mode == "exact" and not isinstance(amount, str)
+        ):
+            return json.dumps(_unavailable_lending_preview(), separators=(",", ":"))
+        intent = {
+            "module_id": "lending", "module_version": "1",
+            "protocol_profile_id": "aave-v3-base-usdc",
+            "protocol_profile_version": "1", "network": "base", "asset": "usdc",
+            "beneficiary_mode": "active_wallet_account", "action": action,
+            "amount_mode": mode, "amount": amount,
+        }
+        try:
+            response = self._connector.lending_action_preview(intent)
+            if response.kind is MessageKind.LENDING_ACTION_PREVIEW:
+                return json.dumps(response.payload, ensure_ascii=False, separators=(",", ":"))
+        except Exception:
+            pass
+        return json.dumps(_unavailable_lending_preview(), separators=(",", ":"))
 
     @staticmethod
     def _safe_transfer_failure(action_id: str | None = None) -> str:
@@ -463,6 +514,10 @@ def _handle_lending_positions(params: Optional[dict] = None, **kwargs: Any) -> s
     return _runtime.handle_lending_positions(params, **kwargs)
 
 
+def _handle_lending_prepare(params: Optional[dict] = None, **kwargs: Any) -> str:
+    return _runtime.handle_lending_prepare(params, **kwargs)
+
+
 def _handle_prepare_transfer(params: Optional[dict] = None, **kwargs: Any) -> str:
     return _runtime.handle_prepare_transfer(params, **kwargs)
 
@@ -563,6 +618,29 @@ def register(ctx: Any) -> None:
         },
         handler=_handle_lending_positions,
         description="Read supported public Lending positions.",
+    )
+    ctx.register_tool(
+        name=LENDING_PREPARE_TOOL,
+        toolset="holon",
+        schema={
+            "name": LENDING_PREPARE_TOOL,
+            "description": (
+                "Prepare a non-executable Aave V3 Base USDC action preview. "
+                "This never signs, broadcasts, or unlocks Wallet authority."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["supply", "withdraw"]},
+                    "amount_mode": {"type": "string", "enum": ["exact", "all"]},
+                    "amount": {"type": ["string", "null"]},
+                },
+                "required": ["action", "amount_mode", "amount"],
+                "additionalProperties": False,
+            },
+        },
+        handler=_handle_lending_prepare,
+        description="Prepare a read-only Aave action preview.",
     )
     transfer_properties = {
         "network": {"type": "string", "enum": ["ethereum", "base"]},

@@ -1,4 +1,15 @@
-"""Internal read-only Lending profiles; never an authority boundary."""
+"""Optional Lending reads and non-authoritative action previews."""
+
+from .action_profiles import (
+    ACTION_PROFILES_DIGEST,
+    ACTION_PROFILES_PATH,
+    ActionProfilesLoadError,
+    ActionProfilesState,
+    AaveActionProfile,
+    action_profiles_digest,
+    canonical_action_profiles_bytes,
+    load_action_profile,
+)
 
 from .model import (
     AAVE_CONTRACTS,
@@ -27,13 +38,33 @@ from .profiles import (
     read_profiles_digest,
 )
 from .runtime import LendingReadError, LendingReader, LendingReadService
+from .preflight import (
+    LendingIntent,
+    LendingPreflightCode,
+    LendingPreflightError,
+    LendingPreflightService,
+    Web3AavePreflightRpc,
+    encode_approve,
+    encode_supply,
+    encode_withdraw,
+    parse_lending_intent,
+)
 
 __all__ = [
     "AAVE_CONTRACTS",
+    "ACTION_PROFILES_DIGEST",
+    "ACTION_PROFILES_PATH",
+    "ActionProfilesLoadError",
+    "ActionProfilesState",
+    "AaveActionProfile",
     "BASE_CHAIN_ID",
     "BASE_USDC",
     "COMPOUND_CONTRACTS",
     "LendingReadProfiles",
+    "LendingIntent",
+    "LendingPreflightCode",
+    "LendingPreflightError",
+    "LendingPreflightService",
     "LendingReadError",
     "LendingReader",
     "LendingReadService",
@@ -50,6 +81,14 @@ __all__ = [
     "ReadProfilesState",
     "ReadProfilesValidationError",
     "canonical_read_profiles_bytes",
+    "canonical_action_profiles_bytes",
+    "action_profiles_digest",
+    "encode_approve",
+    "encode_supply",
+    "encode_withdraw",
+    "load_action_profile",
     "load_read_profiles",
     "read_profiles_digest",
+    "parse_lending_intent",
+    "Web3AavePreflightRpc",
 ]

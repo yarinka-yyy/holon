@@ -140,6 +140,18 @@ def _server_pid(handle: int) -> int:
     return int(process_id.value)
 
 
+def _client_pid(handle: int) -> int:
+    if sys.platform != "win32":
+        raise ControlProtocolError("Guard process verification is unavailable")
+    process_id = wintypes.ULONG()
+    call = ctypes.WinDLL("kernel32", use_last_error=True).GetNamedPipeClientProcessId
+    call.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.ULONG)]
+    call.restype = wintypes.BOOL
+    if not call(handle, ctypes.byref(process_id)) or process_id.value <= 0:
+        raise ControlProtocolError("Guard process verification failed")
+    return int(process_id.value)
+
+
 def _process_image(pid: int) -> Path:
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]

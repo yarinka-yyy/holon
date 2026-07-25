@@ -8,7 +8,9 @@ from pathlib import Path
 from holon_contracts import MessageKind, make_envelope
 from holon_guard import GuardLifecycle, SnapshotStore
 from holon_guard.authority import AuthorityService
-from holon_guard.wallet import WalletBalancesResult, WalletOpenResult
+from holon_guard.wallet import (
+    WalletBalancesResult, WalletLendingPreviewResult, WalletOpenResult,
+)
 from holon_policy import Policy, PolicyEngine
 from guard_support import (
     ACTION_ID, ACTION_ID_2, enabled_policy, make_audit, make_ledger, transfer_request,
@@ -30,6 +32,7 @@ class Wallet:
         self.calls = 0
         self.open_calls = 0
         self.balance_calls = 0
+        self.preview_calls = 0
         self.handle = Handle()
 
     def open_or_activate(self, flow_id: str) -> Handle:
@@ -68,6 +71,18 @@ class Wallet:
                 "networks": networks, "code": "BALANCES_UNAVAILABLE",
                 "message": "Wallet balances are unavailable.",
             },
+        )
+
+    def preview_lending(self, intent, profile_digest) -> WalletLendingPreviewResult:
+        from holon_lending.preflight import unavailable_preview
+
+        self.preview_calls += 1
+        return WalletLendingPreviewResult(
+            True,
+            unavailable_preview(
+                "BASE_RPC_UNAVAILABLE", requested_action=intent["action"],
+                amount_mode=intent["amount_mode"], profile_digest=profile_digest,
+            ),
         )
 
 
@@ -217,6 +232,25 @@ class AuthorityTests(unittest.TestCase):
         self.assertEqual(positions.payload["code"], "LENDING_POSITIONS_UNAVAILABLE")
         self.assertEqual(self.wallet.balance_calls, 1)
         self.assertIsNone(self.lifecycle.ledger.snapshot.current)
+
+    def test_lending_preview_works_when_signing_disabled_without_action_state(self) -> None:
+        request = make_envelope(
+            MessageKind.LENDING_ACTION_INTENT,
+            {
+                "module_id": "lending", "module_version": "1",
+                "protocol_profile_id": "aave-v3-base-usdc",
+                "protocol_profile_version": "1", "network": "base", "asset": "usdc",
+                "beneficiary_mode": "active_wallet_account", "action": "supply",
+                "amount_mode": "exact", "amount": "1",
+            },
+        )
+        self.lifecycle.disable_signing("POLICY_AUTHORITY_DISABLED")
+        response = self.service.handle(request, owner_pid=None)
+        self.assertEqual(response.kind, MessageKind.LENDING_ACTION_PREVIEW)
+        self.assertEqual(response.payload["status"], "UNAVAILABLE")
+        self.assertEqual(self.wallet.preview_calls, 1)
+        self.assertIsNone(self.lifecycle.ledger.snapshot.current)
+        self.assertNotIn("action_id", response.to_dict())
 
 
 if __name__ == "__main__":

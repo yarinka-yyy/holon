@@ -16,6 +16,7 @@ from holon_wallet_control import (
     ControlUnavailable,
     WalletAuthorityClient,
     WalletControlClient,
+    WalletLendingPreviewClient,
     WalletPublicClient,
 )
 
@@ -37,6 +38,10 @@ class WalletController(Protocol):
     def request_close(self, handle: WalletHandle) -> None: ...
 
     def prepare_transfer(self, request: dict[str, object]) -> "WalletPreparedResult": ...
+
+    def preview_lending(
+        self, intent: dict[str, object], profile_digest: str,
+    ) -> "WalletLendingPreviewResult": ...
 
     def cancel_transfer(self, request: dict[str, object]) -> bool: ...
 
@@ -67,6 +72,12 @@ class WalletPreparedResult:
     handle: WalletHandle | None
 
 
+@dataclass(frozen=True)
+class WalletLendingPreviewResult:
+    ok: bool
+    payload: dict[str, object] | None
+
+
 class UnavailableWalletController:
     def open_public(self) -> WalletOpenResult:
         return WalletOpenResult(
@@ -90,6 +101,12 @@ class UnavailableWalletController:
     def prepare_transfer(self, request: dict[str, object]) -> WalletPreparedResult:
         del request
         return WalletPreparedResult(False, "WALLET_UNAVAILABLE", None, None)
+
+    def preview_lending(
+        self, intent: dict[str, object], profile_digest: str,
+    ) -> WalletLendingPreviewResult:
+        del intent, profile_digest
+        return WalletLendingPreviewResult(False, None)
 
     def cancel_transfer(self, request: dict[str, object]) -> bool:
         del request
@@ -144,6 +161,8 @@ class VerifiedWalletController(UnavailableWalletController):
         public_response_timeout: float = 22.0,
         authority_control: WalletAuthorityClient | None = None,
         authority_timeout: float = 25.0,
+        lending_preview_control: WalletLendingPreviewClient | None = None,
+        lending_preview_timeout: float = 30.0,
     ) -> None:
         self._wallet_path = wallet_path.resolve(strict=False)
         self._control = control or WalletControlClient()
@@ -154,6 +173,8 @@ class VerifiedWalletController(UnavailableWalletController):
         self._public_response_timeout = public_response_timeout
         self._authority_control = authority_control or WalletAuthorityClient()
         self._authority_timeout = authority_timeout
+        self._lending_preview_control = lending_preview_control or WalletLendingPreviewClient()
+        self._lending_preview_timeout = lending_preview_timeout
 
     @property
     def wallet_path(self) -> Path:
@@ -279,6 +300,41 @@ class VerifiedWalletController(UnavailableWalletController):
                 response, handle,
             )
         return WalletPreparedResult(True, str(response["code"]), response, handle)
+
+    def preview_lending(
+        self, intent: dict[str, object], profile_digest: str,
+    ) -> WalletLendingPreviewResult:
+        if not self._wallet_path.is_file():
+            return WalletLendingPreviewResult(False, None)
+        request = {
+            "preview_version": "1", "kind": "prepare_lending_preview",
+            "correlation_id": str(uuid.uuid4()), "profile_digest": profile_digest,
+            "intent": dict(intent),
+        }
+        creationflags = 0x08000000 if sys.platform == "win32" else 0
+        worker: WalletHandle | None = None
+        try:
+            worker = self._process_factory(
+                [str(self._wallet_path), "--lending-preview-worker"],
+                shell=False, close_fds=True, creationflags=creationflags,
+            )
+            response = self._lending_preview_control.prepare(
+                request, self._wallet_path, self._readiness_timeout,
+                self._lending_preview_timeout,
+            )
+            preview = response.get("preview")
+            if not isinstance(preview, dict):
+                raise ControlProtocolError("Wallet preview is invalid")
+            return WalletLendingPreviewResult(True, preview)
+        except Exception:
+            if worker is not None and worker.poll() is None:
+                terminate = getattr(worker, "terminate", None)
+                if callable(terminate):
+                    try:
+                        terminate()
+                    except Exception:
+                        pass
+            return WalletLendingPreviewResult(False, None)
 
     def cancel_transfer(self, request: dict[str, object]) -> bool:
         try:

@@ -64,7 +64,10 @@ allowed = [
 ]
 blocked = [
     runtime.pre_tool_call(name)['action']
-    for name in ('terminal', 'browser', 'future_unknown_tool', 'holon_prepare_transfer')
+    for name in (
+        'terminal', 'browser', 'future_unknown_tool', 'holon_lending_prepare',
+        'holon_prepare_transfer',
+    )
 ]
 connector.health = GuardHealth.available(GuardState.NORMAL)
 restored = runtime.pre_tool_call('future_unknown_tool') is None
@@ -86,6 +89,7 @@ def test_vendored_plugin_registers_without_project_imports(tmp_path: Path, runti
     assert tools == [
         "holon_health", "holon_open_wallet", "holon_wallet_balances",
         "holon_lending_compare", "holon_lending_positions",
+        "holon_lending_prepare",
         "holon_prepare_transfer", "holon_transfer_status", "holon_cancel_transfer",
         "holon_recover_transfer",
     ]
@@ -106,5 +110,5 @@ def test_vendored_plugin_hook_default_blocks_and_restores(
     )
     allowed, blocked, restored = json.loads(completed.stdout)
     assert allowed == [True, True, True, True]
-    assert blocked == ["block", "block", "block", "block"]
+    assert blocked == ["block", "block", "block", "block", "block"]
     assert restored is True

@@ -21,6 +21,13 @@ from .authority_protocol import (
     WalletAuthorityClient,
     WalletAuthorityServer,
 )
+from .lending_preview import (
+    LENDING_PREVIEW_PIPE_NAME,
+    LENDING_PREVIEW_VERSION,
+    MAX_LENDING_PREVIEW_BYTES,
+    WalletLendingPreviewClient,
+    WalletLendingPreviewServer,
+)
 
 __all__ = [
     "CONTROL_PIPE_NAME",
@@ -38,4 +45,9 @@ __all__ = [
     "MAX_AUTHORITY_BYTES",
     "WalletAuthorityClient",
     "WalletAuthorityServer",
+    "LENDING_PREVIEW_PIPE_NAME",
+    "LENDING_PREVIEW_VERSION",
+    "MAX_LENDING_PREVIEW_BYTES",
+    "WalletLendingPreviewClient",
+    "WalletLendingPreviewServer",
 ]

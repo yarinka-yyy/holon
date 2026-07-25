@@ -29,6 +29,7 @@ REQUEST_KINDS = frozenset(
         MessageKind.READ_WALLET_BALANCES,
         MessageKind.READ_LENDING_MARKETS,
         MessageKind.READ_LENDING_POSITIONS,
+        MessageKind.LENDING_ACTION_INTENT,
         MessageKind.PREPARE_TRANSFER,
         MessageKind.TRANSFER_INTENT,
         MessageKind.ACTION_STATUS_REQUEST,
@@ -43,6 +44,13 @@ PAYLOAD_FIELDS = {
     MessageKind.READ_WALLET_BALANCES: frozenset(),
     MessageKind.READ_LENDING_MARKETS: frozenset(),
     MessageKind.READ_LENDING_POSITIONS: frozenset(),
+    MessageKind.LENDING_ACTION_INTENT: frozenset(
+        {
+            "module_id", "module_version", "protocol_profile_id",
+            "protocol_profile_version", "network", "asset",
+            "beneficiary_mode", "action", "amount_mode", "amount",
+        }
+    ),
     MessageKind.TRANSFER_INTENT: frozenset(
         {"network", "asset", "amount", "recipient"}
     ),
@@ -79,6 +87,17 @@ PAYLOAD_FIELDS = {
         {
             "status", "authority_available", "account", "network", "asset",
             "positions", "code", "message",
+        }
+    ),
+    MessageKind.LENDING_ACTION_PREVIEW: frozenset(
+        {
+            "status", "authority_available", "execution_available", "account",
+            "requested_action", "next_action", "protocol", "profile_id",
+            "profile_version", "profile_digest", "network", "asset",
+            "amount_mode", "amount_atomic", "display_amount", "target", "method",
+            "calldata_hash", "native_value_wei", "nonce", "gas",
+            "max_total_fee_wei", "block_number", "observed_at", "expires_at",
+            "preview_digest", "checks", "caveats", "code", "message",
         }
     ),
     MessageKind.PROTECTED_FLOW_STARTED: frozenset(

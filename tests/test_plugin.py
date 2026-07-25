@@ -79,6 +79,18 @@ class StaticConnector:
             LendingReadService.unavailable().positions(None),
         )
 
+    def lending_action_preview(self, payload):
+        from holon_lending.preflight import unavailable_preview
+
+        self.last_lending_action = payload
+        return make_envelope(
+            MessageKind.LENDING_ACTION_PREVIEW,
+            unavailable_preview(
+                "BASE_RPC_UNAVAILABLE", requested_action=payload["action"],
+                amount_mode=payload["amount_mode"],
+            ),
+        )
+
     def prepare_transfer(self, payload, action_id):
         self.last_transfer = (payload, action_id)
         return make_envelope(
@@ -147,7 +159,7 @@ class FakeContext:
 
 
 class PluginTests(unittest.TestCase):
-    def test_registers_nine_tools_and_two_hooks(self) -> None:
+    def test_registers_ten_tools_and_two_hooks(self) -> None:
         context = FakeContext()
         plugin.register(context)
         self.assertEqual(
@@ -155,6 +167,7 @@ class PluginTests(unittest.TestCase):
             [
                 "holon_health", "holon_open_wallet", "holon_wallet_balances",
                 "holon_lending_compare", "holon_lending_positions",
+                "holon_lending_prepare",
                 "holon_prepare_transfer", "holon_transfer_status",
                 "holon_cancel_transfer", "holon_recover_transfer",
             ],
@@ -170,6 +183,7 @@ class PluginTests(unittest.TestCase):
                 "health", "open_wallet", "wallet_balances", "prepare_transfer",
                 "transfer_status", "cancel_transfer", "recover_transfer",
                 "lending_compare", "lending_positions",
+                "lending_prepare",
             ],
         )
         self.assertFalse(payload["authority_available"])
@@ -239,6 +253,7 @@ class PluginTests(unittest.TestCase):
                     "terminal", "browser", "future_unknown_tool",
                     "holon_open_wallet", "holon_wallet_balances",
                     "holon_lending_compare", "holon_lending_positions",
+                    "holon_lending_prepare",
                     "holon_prepare_transfer",
                 ):
                     with self.subTest(tool_name=tool_name):
@@ -318,6 +333,36 @@ class PluginTests(unittest.TestCase):
         connector.health = GuardHealth.available(GuardState.ACTIVE)
         result = runtime.pre_tool_call("holon_prepare_transfer")
         self.assertEqual(result["action"], "block")
+
+    def test_lending_prepare_is_non_authoritative_and_injects_fixed_identity(self) -> None:
+        connector = StaticConnector(GuardHealth.available(GuardState.SIGNING_DISABLED))
+        runtime = plugin.PluginRuntime(connector)
+        result = json.loads(runtime.handle_lending_prepare({
+            "action": "withdraw", "amount_mode": "all", "amount": None,
+        }))
+        self.assertEqual(result["status"], "UNAVAILABLE")
+        self.assertFalse(result["authority_available"])
+        self.assertFalse(result["execution_available"])
+        self.assertEqual(connector.last_lending_action, {
+            "module_id": "lending", "module_version": "1",
+            "protocol_profile_id": "aave-v3-base-usdc",
+            "protocol_profile_version": "1", "network": "base", "asset": "usdc",
+            "beneficiary_mode": "active_wallet_account", "action": "withdraw",
+            "amount_mode": "all", "amount": None,
+        })
+        serialized = json.dumps(result).lower()
+        for forbidden in ("password", "private_key", "action_id"):
+            self.assertNotIn(forbidden, serialized)
+        self.assertNotIn('"calldata":', serialized)
+
+    def test_lending_prepare_rejects_invalid_combinations_without_guard_call(self) -> None:
+        connector = StaticConnector(GuardHealth.available(GuardState.NORMAL))
+        runtime = plugin.PluginRuntime(connector)
+        result = json.loads(runtime.handle_lending_prepare({
+            "action": "supply", "amount_mode": "all", "amount": None,
+        }))
+        self.assertEqual(result["code"], "LENDING_ACTION_UNAVAILABLE")
+        self.assertFalse(hasattr(connector, "last_lending_action"))
 
     def test_status_and_cancel_expose_no_internal_flow(self) -> None:
         runtime = plugin.PluginRuntime(

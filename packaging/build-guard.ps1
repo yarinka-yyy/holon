@@ -16,6 +16,7 @@ $distRoot = Join-Path $projectRoot "dist"
 $sourceRoot = Join-Path $projectRoot "src"
 $entryPoint = Join-Path $sourceRoot "holon_guard_app.py"
 $lendingProfile = Join-Path $sourceRoot "holon_lending\read-profiles.json"
+$lendingActionProfile = Join-Path $sourceRoot "holon_lending\action-profiles.json"
 New-Item -ItemType Directory -Force -Path $buildRoot | Out-Null
 $previousPythonPath = $env:PYTHONPATH
 
@@ -34,6 +35,7 @@ try {
         --name HolonGuard `
         --paths $sourceRoot `
         --add-data "$lendingProfile;holon_lending" `
+        --add-data "$lendingActionProfile;holon_lending" `
         --collect-data web3 `
         --distpath $distRoot `
         --workpath (Join-Path $buildRoot "work") `

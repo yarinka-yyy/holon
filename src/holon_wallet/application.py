@@ -293,6 +293,10 @@ def main(argv: list[str] | None = None) -> int:
         from .public_worker import run_public_balances_worker
 
         return run_public_balances_worker()
+    if arguments == ["--lending-preview-worker"]:
+        from .lending_worker import run_lending_preview_worker
+
+        return run_lending_preview_worker()
     if arguments:
         return 2
     instance = ProcessInstance(MUTEX_NAME, WINDOW_TITLE)

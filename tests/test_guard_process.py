@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import uuid
 from pathlib import Path
@@ -65,6 +66,8 @@ class GuardProcessTests(unittest.TestCase):
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=3)
+        # Windows may release the terminated process's lock handle just after wait().
+        time.sleep(0.1)
 
     def _cross_runtime_health(self) -> dict[str, object]:
         code = (

@@ -191,9 +191,11 @@ def test_schema_rejects_unknown_authority_or_changed_identity(mutate) -> None:
         LendingReadProfiles.from_dict(value)
 
 
-def test_lending_runtime_stays_out_of_hermes_and_wallet() -> None:
+def test_lending_runtime_stays_out_of_hermes_and_ordinary_wallet() -> None:
     source_root = Path(__file__).parents[1] / "src"
-    for package in ("holon_hermes_plugin", "holon_wallet"):
+    allowed = {"holon_hermes_plugin": set(), "holon_wallet": {"lending_worker.py"}}
+    for package, expected in allowed.items():
+        importing = set()
         for path in (source_root / package).glob("*.py"):
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
             imported: set[str] = set()
@@ -202,7 +204,9 @@ def test_lending_runtime_stays_out_of_hermes_and_wallet() -> None:
                     imported.update(alias.name.split(".")[0] for alias in node.names)
                 elif isinstance(node, ast.ImportFrom) and node.module:
                     imported.add(node.module.split(".")[0])
-            assert "holon_lending" not in imported
+            if "holon_lending" in imported:
+                importing.add(path.name)
+        assert importing == expected
 
 
 def test_only_guard_runtime_imports_lending() -> None:

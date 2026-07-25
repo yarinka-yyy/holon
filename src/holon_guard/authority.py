@@ -4,7 +4,8 @@ from __future__ import annotations
 from holon_contracts import ContractEnvelope, MessageKind, SecurityCode
 from holon_guard_ipc import GuardState
 from holon_journal import EventType, JournalFailure
-from holon_lending import LendingReader, LendingReadService
+from holon_lending import ActionProfilesState, LendingReader, LendingReadService
+from holon_lending.preflight import unavailable_preview
 from holon_policy import (
     PolicyEngine, PolicyRevisionStore, PolicyRevisionUnavailable, PolicySnapshot,
     policy_digest,
@@ -26,6 +27,7 @@ class AuthorityService(ResponseMixin):
         policy_snapshot: PolicySnapshot | None = None,
         revision_store: PolicyRevisionStore | None = None,
         lending: LendingReader | None = None,
+        lending_actions: ActionProfilesState | None = None,
     ) -> None:
         self.lifecycle = lifecycle
         self.policy = policy
@@ -36,6 +38,7 @@ class AuthorityService(ResponseMixin):
         )
         self.revision_store = revision_store
         self.lending = lending or LendingReadService.unavailable()
+        self.lending_actions = lending_actions or ActionProfilesState.load()
 
     def replace_policy_snapshot(self, snapshot: PolicySnapshot) -> None:
         self.policy_snapshot = snapshot
@@ -191,6 +194,42 @@ class AuthorityService(ResponseMixin):
             except Exception:
                 payload = LendingReadService.unavailable().positions(None)
             return self._response(request, MessageKind.LENDING_POSITIONS, payload)
+        if request.kind is MessageKind.LENDING_ACTION_INTENT:
+            action = request.payload.get("action")
+            mode = request.payload.get("amount_mode")
+            if self.lifecycle.snapshot.state in {
+                GuardState.ENTERING, GuardState.ACTIVE, GuardState.EXITING,
+                GuardState.RECOVERY_REQUIRED,
+            }:
+                payload = unavailable_preview(
+                    "PROTECTED_FLOW_ACTIVE", requested_action=str(action),
+                    amount_mode=str(mode),
+                )
+            elif self.lending_actions.profile is None:
+                payload = unavailable_preview(
+                    self.lending_actions.error_code or "ACTION_PROFILES_UNAVAILABLE",
+                    requested_action=str(action), amount_mode=str(mode),
+                )
+            else:
+                try:
+                    result = self.lifecycle.wallet.preview_lending(
+                        request.payload, self.lending_actions.profile.digest,
+                    )
+                    payload = (
+                        result.payload if result.ok and result.payload is not None
+                        else unavailable_preview(
+                            "WALLET_UNAVAILABLE", requested_action=str(action),
+                            amount_mode=str(mode),
+                            profile_digest=self.lending_actions.profile.digest,
+                        )
+                    )
+                except Exception:
+                    payload = unavailable_preview(
+                        "WALLET_UNAVAILABLE", requested_action=str(action),
+                        amount_mode=str(mode),
+                        profile_digest=self.lending_actions.profile.digest,
+                    )
+            return self._response(request, MessageKind.LENDING_ACTION_PREVIEW, payload)
         if request.kind is MessageKind.PREPARE_TRANSFER:
             if self.security_failure is not None:
                 return self.security_response(request)

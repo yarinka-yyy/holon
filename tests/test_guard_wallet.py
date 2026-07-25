@@ -255,6 +255,33 @@ class GuardWalletTests(unittest.TestCase):
         self.assertEqual(calls, 1)
         self.assertEqual(len(spawned), 1)
 
+    def test_lending_preview_spawns_one_hidden_worker_without_gui(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "HolonWallet.exe"
+            path.write_bytes(b"fixture")
+            calls: list[tuple[dict[str, object], Path, float, float]] = []
+
+            class PreviewControl:
+                def prepare(self, request, expected, readiness, response):
+                    calls.append((request, expected, readiness, response))
+                    return {"preview": {"status": "UNAVAILABLE"}}
+
+            spawned: list[tuple[object, object]] = []
+            controller = VerifiedWalletController(
+                path,
+                process_factory=lambda *args, **kwargs: spawned.append((args, kwargs)),
+                lending_preview_control=PreviewControl(),  # type: ignore[arg-type]
+            )
+            result = controller.preview_lending({"action": "supply"}, "a" * 64)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.payload, {"status": "UNAVAILABLE"})
+        self.assertEqual(len(spawned), 1)
+        self.assertEqual(
+            spawned[0][0][0], [str(path.resolve()), "--lending-preview-worker"],
+        )
+        self.assertFalse(spawned[0][1]["shell"])
+        self.assertEqual(len(calls), 1)
+
     def test_authority_existing_wallet_prepares_without_spawn(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "HolonWallet.exe"

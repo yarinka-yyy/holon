@@ -84,6 +84,31 @@ LENDING_CAVEATS = frozenset({
     "READ_PROFILES_MISSING", "READ_PROFILES_UNAVAILABLE",
     "WALLET_ACCOUNT_UNAVAILABLE",
 })
+LENDING_ACTION_CHECKS = frozenset({
+    "ACTION_PROFILE_VERIFIED", "AAVE_ACCOUNT_DEBT_ZERO", "AAVE_IDENTITY_VERIFIED",
+    "AAVE_LIQUIDITY_AVAILABLE", "AAVE_RESERVE_AVAILABLE",
+    "AAVE_SUPPLY_CAP_AVAILABLE", "ALLOWANCE_EXACT", "ALLOWANCE_ZERO",
+    "AUSDC_POSITION_AVAILABLE", "FEE_BALANCE_AVAILABLE",
+    "SIMULATION_SUCCEEDED", "USDC_BALANCE_AVAILABLE",
+})
+LENDING_ACTION_CAVEATS = frozenset({
+    "ACTION_PROFILES_CORRUPT", "ACTION_PROFILES_INCOMPATIBLE",
+    "ACTION_PROFILES_INTEGRITY_FAILED", "ACTION_PROFILES_MISSING",
+    "ACTION_PROFILE_MISMATCH",
+    "ACTION_PROFILES_UNAVAILABLE", "ACCOUNT_CHANGED", "AAVE_ACCOUNT_HAS_DEBT",
+    "AAVE_BLOCK_STALE", "AAVE_IDENTITY_MISMATCH", "AAVE_RESERVE_FROZEN",
+    "AAVE_RESERVE_INACTIVE", "AAVE_RESERVE_PAUSED", "AAVE_SUPPLY_CAP_REACHED",
+    "BASE_RPC_UNAVAILABLE", "FEE_NOT_POLICY_AUTHORIZED", "GAS_ESTIMATE_FAILED",
+    "INSUFFICIENT_AUSDC", "INSUFFICIENT_ETH", "INSUFFICIENT_PROTOCOL_LIQUIDITY",
+    "INSUFFICIENT_USDC", "LENDING_ACTION_INVALID", "PREVIEW_ONLY",
+    "PROTECTED_FLOW_ACTIVE", "SIMULATION_FAILED", "UNEXPECTED_ALLOWANCE",
+    "WALLET_ACCOUNT_UNAVAILABLE", "WALLET_UNAVAILABLE", "WRONG_CHAIN",
+})
+LENDING_ACTION_CODES = frozenset({
+    "LENDING_ACTION_PREVIEW_READY", "LENDING_ACTION_REFUSED",
+    "LENDING_ACTION_UNAVAILABLE",
+})
+HEX_64_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _transfer(payload: Mapping[str, Any]) -> None:
@@ -150,6 +175,44 @@ def _transfer_intent(payload: Mapping[str, Any]) -> None:
     recipient = payload.get("recipient")
     if not isinstance(recipient, str) or ADDRESS_RE.fullmatch(recipient) is None:
         raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid recipient.")
+
+
+def validate_lending_action_intent(payload: Mapping[str, Any]) -> None:
+    if DANGEROUS_FIELDS & set(payload):
+        raise ContractViolation(
+            RefusalCode.ARBITRARY_CALL_REFUSED.value, "Arbitrary calls are refused.",
+        )
+    if set(payload) != PAYLOAD_FIELDS[MessageKind.LENDING_ACTION_INTENT]:
+        code = (
+            RefusalCode.UNKNOWN_AUTHORITY_FIELD
+            if set(payload) - PAYLOAD_FIELDS[MessageKind.LENDING_ACTION_INTENT]
+            else RefusalCode.REQUEST_INVALID
+        )
+        raise ContractViolation(code.value, "Invalid Lending action fields.")
+    fixed = {
+        "module_id": "lending", "module_version": "1",
+        "protocol_profile_id": "aave-v3-base-usdc",
+        "protocol_profile_version": "1", "network": "base", "asset": "usdc",
+        "beneficiary_mode": "active_wallet_account",
+    }
+    if any(payload.get(field) != value for field, value in fixed.items()):
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending action.")
+    action, mode, amount = payload.get("action"), payload.get("amount_mode"), payload.get("amount")
+    if action not in {"supply", "withdraw"} or mode not in {"exact", "all"}:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending action.")
+    if mode == "all":
+        if action != "withdraw" or amount is not None:
+            raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending amount.")
+        return
+    if (
+        not isinstance(amount, str) or len(amount) > 80
+        or "." in amount and "," in amount or HUMAN_AMOUNT_RE.fullmatch(amount) is None
+    ):
+        raise ContractViolation(RefusalCode.AMOUNT_INVALID.value, "Invalid Lending amount.")
+    whole, separator, fraction = amount.replace(",", ".").partition(".")
+    atomic = int(whole) * 10**6 + (int(fraction.ljust(6, "0")) if separator and len(fraction) <= 6 else 0)
+    if len(fraction) > 6 or atomic <= 0 or atomic >= 2**256:
+        raise ContractViolation(RefusalCode.AMOUNT_INVALID.value, "Invalid Lending amount.")
 
 
 def _safe_text(payload: Mapping[str, Any]) -> None:
@@ -433,6 +496,107 @@ def validate_lending_positions(payload: Mapping[str, Any]) -> None:
         raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Inconsistent Lending status.")
 
 
+def _bounded_codes(value: object, allowed: frozenset[str], name: str) -> None:
+    if (
+        not isinstance(value, list) or len(value) > 16
+        or len(set(value)) != len(value)
+        or any(not isinstance(item, str) or item not in allowed for item in value)
+    ):
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, f"Invalid {name}.")
+
+
+def validate_lending_action_preview(payload: Mapping[str, Any]) -> None:
+    if set(payload) != PAYLOAD_FIELDS[MessageKind.LENDING_ACTION_PREVIEW]:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending preview.")
+    _safe_text(payload)
+    status = payload.get("status")
+    expected_code = {
+        "PREVIEW_READY": "LENDING_ACTION_PREVIEW_READY",
+        "REFUSED": "LENDING_ACTION_REFUSED",
+        "UNAVAILABLE": "LENDING_ACTION_UNAVAILABLE",
+    }.get(status)
+    if expected_code is None or payload.get("code") != expected_code:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending preview status.")
+    if payload.get("authority_available") is not False or payload.get("execution_available") is not False:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending authority status.")
+    if (
+        payload.get("protocol") != "aave-v3"
+        or payload.get("profile_id") != "aave-v3-base-usdc"
+        or payload.get("profile_version") != "1"
+        or payload.get("network") != {"network": "base", "chain_id": 8453}
+        or payload.get("asset") != LENDING_ASSET
+        or payload.get("native_value_wei") != "0"
+    ):
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending preview identity.")
+    requested = payload.get("requested_action")
+    mode = payload.get("amount_mode")
+    if requested is not None and requested not in {"supply", "withdraw"}:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending action.")
+    if mode is not None and mode not in {"exact", "all"}:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending amount mode.")
+    profile_digest = payload.get("profile_digest")
+    if profile_digest is not None and (
+        not isinstance(profile_digest, str) or HEX_64_RE.fullmatch(profile_digest) is None
+    ):
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending profile digest.")
+    account = payload.get("account")
+    if account is not None and (
+        not isinstance(account, Mapping) or set(account) != {"label", "address"}
+        or not isinstance(account.get("label"), str) or not account["label"] or len(account["label"]) > 64
+        or not isinstance(account.get("address"), str) or ADDRESS_RE.fullmatch(account["address"]) is None
+    ):
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending Account.")
+    _bounded_codes(payload.get("checks"), LENDING_ACTION_CHECKS, "Lending checks")
+    _bounded_codes(payload.get("caveats"), LENDING_ACTION_CAVEATS, "Lending caveats")
+    material = (
+        "next_action", "amount_atomic", "display_amount", "target", "method",
+        "calldata_hash", "nonce", "gas", "max_total_fee_wei", "block_number",
+        "observed_at", "expires_at", "preview_digest",
+    )
+    if status != "PREVIEW_READY":
+        if any(payload.get(field) is not None for field in material) or payload.get("checks") != []:
+            raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid unavailable Lending preview.")
+        if not payload.get("caveats"):
+            raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Missing Lending refusal reason.")
+        return
+    if account is None or requested is None or mode is None or profile_digest is None:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Incomplete Lending preview.")
+    next_action = payload.get("next_action")
+    if next_action not in {"approve", "supply", "withdraw"} or payload.get("method") != next_action:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending method.")
+    if requested == "withdraw" and next_action != "withdraw" or requested == "supply" and next_action not in {"approve", "supply"}:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending action transition.")
+    expected_target = (
+        LENDING_ASSET["address"] if next_action == "approve" else LENDING_CONTRACTS[0][2]
+    )
+    if payload.get("target") != expected_target:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending target.")
+    atomic = payload.get("amount_atomic")
+    if not isinstance(atomic, str) or DECIMAL_RE.fullmatch(atomic) is None:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending amount.")
+    if payload.get("display_amount") != _display_units(int(atomic), 6, "USDC"):
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending display amount.")
+    for field, pattern in (
+        ("nonce", NON_NEGATIVE_RE), ("gas", DECIMAL_RE),
+        ("max_total_fee_wei", DECIMAL_RE), ("block_number", DECIMAL_RE),
+    ):
+        value = payload.get(field)
+        if not isinstance(value, str) or pattern.fullmatch(value) is None:
+            raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending transaction field.")
+    for field in ("calldata_hash", "preview_digest"):
+        value = payload.get(field)
+        if not isinstance(value, str) or HEX_64_RE.fullmatch(value) is None:
+            raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending digest.")
+    for field in ("observed_at", "expires_at"):
+        value = payload.get(field)
+        if not isinstance(value, str) or UTC_TIMESTAMP_RE.fullmatch(value) is None:
+            raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending timestamp.")
+        try:
+            datetime.fromisoformat(value.removesuffix("Z") + "+00:00")
+        except ValueError as exc:
+            raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending timestamp.") from exc
+
+
 def _response(kind: MessageKind, payload: Mapping[str, Any]) -> None:
     _safe_text(payload)
     if kind in {MessageKind.REFUSAL, MessageKind.ERROR}:
@@ -469,6 +633,9 @@ def _response(kind: MessageKind, payload: Mapping[str, Any]) -> None:
 
 
 def validate_payload(kind: MessageKind, payload: Mapping[str, Any]) -> None:
+    if kind is MessageKind.LENDING_ACTION_INTENT:
+        validate_lending_action_intent(payload)
+        return
     if kind is MessageKind.TRANSFER_INTENT:
         _transfer_intent(payload)
         return
@@ -483,6 +650,9 @@ def validate_payload(kind: MessageKind, payload: Mapping[str, Any]) -> None:
         return
     if kind is MessageKind.LENDING_POSITIONS:
         validate_lending_positions(payload)
+        return
+    if kind is MessageKind.LENDING_ACTION_PREVIEW:
+        validate_lending_action_preview(payload)
         return
     if set(payload) != PAYLOAD_FIELDS[kind]:
         raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid message payload.")
