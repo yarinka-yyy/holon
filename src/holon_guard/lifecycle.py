@@ -155,7 +155,12 @@ class GuardLifecycle(GuardCore):
                 if not self.wallet.cancel_transfer(cancel_request):
                     self.wallet_handle = prepared.handle
                     return self._recover("WALLET_CALLBACK_FAILED"), None
-                self.ledger.terminalize(ActionState.FAILED, "MAX_FEE_EXCEEDED")
+                try:
+                    self.ledger.terminalize(ActionState.FAILED, "MAX_FEE_EXCEEDED")
+                except ActionLedgerFailure:
+                    return self.disable_signing(
+                        SecurityCode.ACTION_STATE_INVALID.value
+                    ), None
                 self._persist(idle_snapshot(GuardState.NORMAL, "MAX_FEE_EXCEEDED", self.clock()))
                 return self._result(False, "MAX_FEE_EXCEEDED", "Maximum fee exceeds policy."), None
             self.wallet_handle = prepared.handle

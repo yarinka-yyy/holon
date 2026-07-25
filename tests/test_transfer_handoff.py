@@ -3,8 +3,9 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-from holon_contracts import MessageKind, make_envelope
+from holon_contracts import MessageKind, SecurityCode, make_envelope
 from holon_guard import GuardLifecycle, SnapshotStore
+from holon_guard.actions import ActionLedgerFailure
 from holon_guard.authority import AuthorityService
 from holon_guard.wallet import WalletPreparedResult
 from holon_policy import Policy, PolicyEngine, PolicySnapshot
@@ -187,6 +188,35 @@ def test_prepared_fee_above_guard_cap_cancels_wallet_without_active_authority():
         assert len(wallet.cancels) == 1
         assert lifecycle.snapshot.state.value == "NORMAL"
         assert lifecycle.ledger.find(ACTION_ID).state.value == "FAILED"
+
+
+def test_fee_rejection_action_state_failure_disables_signing(monkeypatch):
+    with tempfile.TemporaryDirectory() as temporary:
+        wallet = AuthorityWallet(fee="501")
+        lifecycle, authority = service(Path(temporary), wallet)
+
+        def fail_terminalize(*_args):
+            raise ActionLedgerFailure(SecurityCode.ACTION_STATE_INVALID.value)
+
+        monkeypatch.setattr(lifecycle.ledger, "terminalize", fail_terminalize)
+        result = authority.handle(intent(), owner_pid=123)
+
+        assert result.kind is MessageKind.ERROR
+        assert len(wallet.prepares) == 1
+        assert len(wallet.cancels) == 1
+        assert lifecycle.snapshot.state.value == "SIGNING_DISABLED"
+        assert lifecycle.snapshot.reason == SecurityCode.ACTION_STATE_INVALID.value
+        assert lifecycle.wallet_handle is None
+        assert lifecycle.prepared_digest is None
+        assert lifecycle.monitor_once().state.value == "SIGNING_DISABLED"
+
+        retry = authority.handle(
+            intent(action_id="act-33333333-3333-4333-8333-333333333333"),
+            owner_pid=123,
+        )
+        assert retry.kind is MessageKind.SIGNING_DISABLED
+        assert len(wallet.prepares) == 1
+        assert len(wallet.cancels) == 1
 
 
 def test_hermes_cancel_keeps_wallet_process_and_rejects_action():
