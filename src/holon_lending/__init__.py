@@ -9,6 +9,14 @@ from .model import (
     ProtocolReadProfile,
     ReadProfilesValidationError,
 )
+from .morpho import (
+    MORPHO_BLUE_ADDRESS,
+    MORPHO_VAULT_ADDRESS,
+    MorphoAllocationEvidence,
+    MorphoProfileError,
+    MorphoSelectionEvidence,
+    MorphoVaultReadProfile,
+)
 from .profiles import (
     READ_PROFILES_DIGEST,
     READ_PROFILES_PATH,
@@ -25,6 +33,12 @@ __all__ = [
     "BASE_USDC",
     "COMPOUND_CONTRACTS",
     "LendingReadProfiles",
+    "MORPHO_BLUE_ADDRESS",
+    "MORPHO_VAULT_ADDRESS",
+    "MorphoAllocationEvidence",
+    "MorphoProfileError",
+    "MorphoSelectionEvidence",
+    "MorphoVaultReadProfile",
     "ProtocolReadProfile",
     "READ_PROFILES_DIGEST",
     "READ_PROFILES_PATH",

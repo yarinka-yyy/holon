@@ -12,7 +12,7 @@ from .model import LendingReadProfiles, ReadProfilesValidationError
 
 MAX_READ_PROFILES_BYTES = 64 * 1024
 READ_PROFILES_PATH = Path(__file__).with_name("read-profiles.json")
-READ_PROFILES_DIGEST = "cf09eb1ddd7c65703c88d92d8c7b8550ec1797aaa7c1b6fd308386793cf2624e"
+READ_PROFILES_DIGEST = "84570b299a61113be297816f4e2b9630c9e48c92dd3660d922e55f9647ff3502"
 
 
 class ReadProfilesLoadError(RuntimeError):

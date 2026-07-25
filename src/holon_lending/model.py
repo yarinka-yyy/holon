@@ -7,6 +7,8 @@ from typing import Any, Mapping
 
 from web3 import Web3
 
+from .morpho import MorphoProfileError, MorphoVaultReadProfile
+
 
 BASE_CHAIN_ID = 8453
 BASE_USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
@@ -147,6 +149,7 @@ class ProtocolReadProfile:
 class LendingReadProfiles:
     verified_at: str
     protocols: tuple[ProtocolReadProfile, ...]
+    selected_morpho_vault: MorphoVaultReadProfile
     sources: tuple[tuple[str, str, str], ...]
 
     @classmethod
@@ -169,22 +172,20 @@ class LendingReadProfiles:
         protocols = tuple(ProtocolReadProfile.from_dict(item) for item in raw_protocols)
         if tuple(item.protocol_id for item in protocols) != ("aave-v3", "compound-v3"):
             raise ReadProfilesValidationError("protocol ordering is invalid")
-        cls._validate_morpho(root["morpho_discovery"])
+        selected_morpho_vault = cls._validate_morpho(root["morpho_discovery"])
         sources = cls._validate_sources(root["sources"])
         _exact_type(root["verified_at"], str, "verified_at")
         if root["verified_at"] != "2026-07-25":
             raise ReadProfilesValidationError("verification date changed")
-        return cls(root["verified_at"], protocols, sources)
+        return cls(root["verified_at"], protocols, selected_morpho_vault, sources)
 
     @staticmethod
-    def _validate_morpho(value: Any) -> None:
+    def _validate_morpho(value: Any) -> MorphoVaultReadProfile:
         morpho = _object(value, MORPHO_FIELDS, "morpho discovery")
         if morpho["endpoint"] != "https://api.morpho.org/graphql":
             raise ReadProfilesValidationError("Morpho endpoint changed")
         if morpho["collections"] != ["vaults", "vaultV2s"]:
             raise ReadProfilesValidationError("Morpho collections changed")
-        if morpho["selected_vault"] is not None:
-            raise ReadProfilesValidationError("Morpho vault selection is deferred")
         filters = _object(morpho["filters"], MORPHO_FILTER_FIELDS, "Morpho filters")
         expected = {
             "asset_address": BASE_USDC,
@@ -195,6 +196,10 @@ class LendingReadProfiles:
         _address(filters["asset_address"], "Morpho asset address")
         if filters != expected:
             raise ReadProfilesValidationError("Morpho filters changed")
+        try:
+            return MorphoVaultReadProfile.from_dict(morpho["selected_vault"])
+        except MorphoProfileError as exc:
+            raise ReadProfilesValidationError("Morpho selected vault is invalid") from exc
 
     @staticmethod
     def _validate_sources(value: Any) -> tuple[tuple[str, str, str], ...]:
@@ -220,7 +225,7 @@ class LendingReadProfiles:
                     "asset_address": BASE_USDC, "asset_decimals": 6,
                     "chain_id": BASE_CHAIN_ID, "listed": True,
                 },
-                "selected_vault": None,
+                "selected_vault": self.selected_morpho_vault.to_dict(),
             },
             "network": {"chain_id": BASE_CHAIN_ID, "network_id": "base"},
             "profile_version": "1",
