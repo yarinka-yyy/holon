@@ -19,6 +19,7 @@ from holon_policy.baseline import (
     load_baseline_policy,
 )
 from holon_journal import EventType
+from holon_lending import LendingReadService
 from holon_installation import verify_installed
 
 from .action_model import ActionStateSnapshot
@@ -143,6 +144,7 @@ def main(argv: list[str] | None = None) -> int:
                 lifecycle, PolicyEngine(policy_snapshot.policy), audit,
                 security_failure=failure, policy_snapshot=policy_snapshot,
                 revision_store=revision_store,
+                lending=LendingReadService.default(),
             )
             if lifecycle.snapshot.state.value == "SIGNING_DISABLED":
                 authority.audit_system(

@@ -65,6 +65,15 @@ class ContractTests(unittest.TestCase):
         )
         self.assertEqual(parse_envelope(balances.to_dict()), balances)
         self.assertNotIn("action_id", balances.to_dict())
+        for kind in (
+            MessageKind.READ_LENDING_MARKETS,
+            MessageKind.READ_LENDING_POSITIONS,
+        ):
+            message = make_envelope(
+                kind, {}, request_id=REQUEST_ID, timestamp=TIMESTAMP,
+            )
+            self.assertEqual(parse_envelope(message.to_dict()), message)
+            self.assertNotIn("action_id", message.to_dict())
 
     def test_open_wallet_and_wallet_opened_are_strict_and_safe(self) -> None:
         request = make_envelope(

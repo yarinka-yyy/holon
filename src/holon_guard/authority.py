@@ -4,6 +4,7 @@ from __future__ import annotations
 from holon_contracts import ContractEnvelope, MessageKind, SecurityCode
 from holon_guard_ipc import GuardState
 from holon_journal import EventType, JournalFailure
+from holon_lending import LendingReader, LendingReadService
 from holon_policy import (
     PolicyEngine, PolicyRevisionStore, PolicyRevisionUnavailable, PolicySnapshot,
     policy_digest,
@@ -24,6 +25,7 @@ class AuthorityService(ResponseMixin):
         security_failure: str | None = None,
         policy_snapshot: PolicySnapshot | None = None,
         revision_store: PolicyRevisionStore | None = None,
+        lending: LendingReader | None = None,
     ) -> None:
         self.lifecycle = lifecycle
         self.policy = policy
@@ -33,6 +35,7 @@ class AuthorityService(ResponseMixin):
             0, policy_digest(policy.policy.to_dict()), policy.policy,
         )
         self.revision_store = revision_store
+        self.lending = lending or LendingReadService.unavailable()
 
     def replace_policy_snapshot(self, snapshot: PolicySnapshot) -> None:
         self.policy_snapshot = snapshot
@@ -172,6 +175,22 @@ class AuthorityService(ResponseMixin):
                 MessageKind.WALLET_BALANCES,
                 result.payload,
             )
+        if request.kind is MessageKind.READ_LENDING_MARKETS:
+            try:
+                payload = self.lending.compare()
+            except Exception:
+                payload = LendingReadService.unavailable().compare()
+            return self._response(request, MessageKind.LENDING_MARKETS, payload)
+        if request.kind is MessageKind.READ_LENDING_POSITIONS:
+            account = None
+            try:
+                result = self.lifecycle.wallet.read_public_balances()
+                if result.ok and result.payload is not None:
+                    account = result.payload.get("account")
+                payload = self.lending.positions(account)
+            except Exception:
+                payload = LendingReadService.unavailable().positions(None)
+            return self._response(request, MessageKind.LENDING_POSITIONS, payload)
         if request.kind is MessageKind.PREPARE_TRANSFER:
             if self.security_failure is not None:
                 return self.security_response(request)

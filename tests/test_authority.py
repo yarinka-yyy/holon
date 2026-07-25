@@ -29,6 +29,7 @@ class Wallet:
     def __init__(self) -> None:
         self.calls = 0
         self.open_calls = 0
+        self.balance_calls = 0
         self.handle = Handle()
 
     def open_or_activate(self, flow_id: str) -> Handle:
@@ -46,6 +47,7 @@ class Wallet:
         )
 
     def read_public_balances(self) -> WalletBalancesResult:
+        self.balance_calls += 1
         networks = [
             {
                 "network": network, "chain_id": chain_id,
@@ -195,6 +197,26 @@ class AuthorityTests(unittest.TestCase):
         self.assertEqual(response.kind, MessageKind.ERROR)
         self.assertEqual(response.payload["code"], "WALLET_BALANCES_UNAVAILABLE")
         self.assertNotIn("private", str(response.to_dict()).lower())
+
+    def test_lending_reads_are_public_and_work_when_signing_disabled(self) -> None:
+        from holon_lending import LendingReadService
+
+        self.service.lending = LendingReadService.unavailable()
+        compare = self.service.handle(
+            make_envelope(MessageKind.READ_LENDING_MARKETS, {}), None,
+        )
+        self.assertEqual(compare.kind, MessageKind.LENDING_MARKETS)
+        self.assertEqual(compare.payload["code"], "LENDING_UNAVAILABLE")
+        self.assertEqual(self.wallet.balance_calls, 0)
+
+        self.lifecycle.disable_signing("POLICY_AUTHORITY_DISABLED")
+        positions = self.service.handle(
+            make_envelope(MessageKind.READ_LENDING_POSITIONS, {}), None,
+        )
+        self.assertEqual(positions.kind, MessageKind.LENDING_POSITIONS)
+        self.assertEqual(positions.payload["code"], "LENDING_POSITIONS_UNAVAILABLE")
+        self.assertEqual(self.wallet.balance_calls, 1)
+        self.assertIsNone(self.lifecycle.ledger.snapshot.current)
 
 
 if __name__ == "__main__":

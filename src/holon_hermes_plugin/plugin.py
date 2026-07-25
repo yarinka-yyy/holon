@@ -20,13 +20,16 @@ from .guard import (
 HEALTH_TOOL = "holon_health"
 OPEN_WALLET_TOOL = "holon_open_wallet"
 WALLET_BALANCES_TOOL = "holon_wallet_balances"
+LENDING_COMPARE_TOOL = "holon_lending_compare"
+LENDING_POSITIONS_TOOL = "holon_lending_positions"
 PREPARE_TRANSFER_TOOL = "holon_prepare_transfer"
 TRANSFER_STATUS_TOOL = "holon_transfer_status"
 CANCEL_TRANSFER_TOOL = "holon_cancel_transfer"
 RECOVER_TRANSFER_TOOL = "holon_recover_transfer"
 CAPABILITIES = [
     "health", "open_wallet", "wallet_balances", "prepare_transfer",
-    "transfer_status", "cancel_transfer", "recover_transfer",
+    "transfer_status", "cancel_transfer", "recover_transfer", "lending_compare",
+    "lending_positions",
 ]
 PROTECTED_TOOL_ALLOWLIST = frozenset({
     HEALTH_TOOL, TRANSFER_STATUS_TOOL, CANCEL_TRANSFER_TOOL, RECOVER_TRANSFER_TOOL,
@@ -55,6 +58,64 @@ def _unavailable_balances() -> dict[str, Any]:
         "code": "WALLET_BALANCES_UNAVAILABLE",
         "message": "Wallet balances are unavailable.",
     }
+
+
+LENDING_IDENTITIES = (
+    ("aave-v3", "base-usdc", "0xA238Dd80C259a72e81d7e4664a9801593F98d1c5"),
+    ("compound-v3", "base-usdc", "0xb125E6687d4313864e53df431d5425969c15Eb2F"),
+    ("morpho-v1", "gauntlet-usdc-prime-v1", "0xeE8F4eC5672F09119b96Ab6fB59C27E1b7e44b61"),
+)
+
+
+def _lending_root() -> dict[str, Any]:
+    return {
+        "status": "DEGRADED", "authority_available": False,
+        "network": {"network": "base", "chain_id": 8453},
+        "asset": {
+            "asset": "USDC", "address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "decimals": 6,
+        },
+    }
+
+
+def _unavailable_lending_markets() -> dict[str, Any]:
+    value = _lending_root()
+    value.update({
+        "markets": [{
+            "protocol": protocol, "market_id": market,
+            "contract_address": contract, "base_yield": None,
+            "incentives": {
+                "status": "UNAVAILABLE", "total_apr_percent": None,
+                "components": [],
+            },
+            "freshness": {
+                "state": "UNAVAILABLE", "observed_at": None, "block_number": None,
+            },
+            "caveats": ["READ_PROFILES_UNAVAILABLE"],
+        } for protocol, market, contract in LENDING_IDENTITIES],
+        "highest_observed": None, "code": "LENDING_UNAVAILABLE",
+        "message": "Lending data is unavailable.",
+    })
+    return value
+
+
+def _unavailable_lending_positions() -> dict[str, Any]:
+    value = _lending_root()
+    value.update({
+        "account": None,
+        "positions": [{
+            "protocol": protocol, "market_id": market,
+            "contract_address": contract, "amount_atomic": None, "decimals": 6,
+            "display_amount": None,
+            "freshness": {
+                "state": "UNAVAILABLE", "observed_at": None, "block_number": None,
+            },
+            "caveats": ["READ_PROFILES_UNAVAILABLE"],
+        } for protocol, market, contract in LENDING_IDENTITIES],
+        "code": "LENDING_POSITIONS_UNAVAILABLE",
+        "message": "Lending positions are unavailable.",
+    })
+    return value
 
 
 class PluginRuntime:
@@ -149,6 +210,34 @@ class PluginRuntime:
             _unavailable_balances(),
             ensure_ascii=False,
             separators=(",", ":"),
+        )
+
+    def handle_lending_compare(
+        self, params: Optional[dict] = None, **kwargs: Any,
+    ) -> str:
+        del params, kwargs
+        try:
+            response = self._connector.lending_markets()
+            if response.kind is MessageKind.LENDING_MARKETS:
+                return json.dumps(response.payload, ensure_ascii=False, separators=(",", ":"))
+        except Exception:
+            pass
+        return json.dumps(
+            _unavailable_lending_markets(), ensure_ascii=False, separators=(",", ":"),
+        )
+
+    def handle_lending_positions(
+        self, params: Optional[dict] = None, **kwargs: Any,
+    ) -> str:
+        del params, kwargs
+        try:
+            response = self._connector.lending_positions()
+            if response.kind is MessageKind.LENDING_POSITIONS:
+                return json.dumps(response.payload, ensure_ascii=False, separators=(",", ":"))
+        except Exception:
+            pass
+        return json.dumps(
+            _unavailable_lending_positions(), ensure_ascii=False, separators=(",", ":"),
         )
 
     @staticmethod
@@ -366,6 +455,14 @@ def _handle_wallet_balances(params: Optional[dict] = None, **kwargs: Any) -> str
     return _runtime.handle_wallet_balances(params, **kwargs)
 
 
+def _handle_lending_compare(params: Optional[dict] = None, **kwargs: Any) -> str:
+    return _runtime.handle_lending_compare(params, **kwargs)
+
+
+def _handle_lending_positions(params: Optional[dict] = None, **kwargs: Any) -> str:
+    return _runtime.handle_lending_positions(params, **kwargs)
+
+
 def _handle_prepare_transfer(params: Optional[dict] = None, **kwargs: Any) -> str:
     return _runtime.handle_prepare_transfer(params, **kwargs)
 
@@ -433,6 +530,39 @@ def register(ctx: Any) -> None:
         },
         handler=_handle_wallet_balances,
         description="Read live public balances for the active Holon Account.",
+    )
+    empty_parameters = {
+        "type": "object", "properties": {}, "required": [],
+        "additionalProperties": False,
+    }
+    ctx.register_tool(
+        name=LENDING_COMPARE_TOOL,
+        toolset="holon",
+        schema={
+            "name": LENDING_COMPARE_TOOL,
+            "description": (
+                "Compare verified read-only Base USDC yield for Aave V3, Compound III, "
+                "and the selected Morpho Vault. Explain freshness and rate-model "
+                "differences; the highest observed yield is not a safety recommendation."
+            ),
+            "parameters": empty_parameters,
+        },
+        handler=_handle_lending_compare,
+        description="Compare supported Base USDC lending yield.",
+    )
+    ctx.register_tool(
+        name=LENDING_POSITIONS_TOOL,
+        toolset="holon",
+        schema={
+            "name": LENDING_POSITIONS_TOOL,
+            "description": (
+                "Read public Base USDC positions for the active Holon Account in "
+                "Aave V3, Compound III, and the selected Morpho Vault without unlocking Wallet."
+            ),
+            "parameters": empty_parameters,
+        },
+        handler=_handle_lending_positions,
+        description="Read supported public Lending positions.",
     )
     transfer_properties = {
         "network": {"type": "string", "enum": ["ethereum", "base"]},

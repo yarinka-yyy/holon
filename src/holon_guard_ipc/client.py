@@ -112,6 +112,18 @@ class PipeGuardClient:
             response_timeout=35.0,
         )
 
+    def lending_markets(self) -> ContractEnvelope:
+        return self.client.request(
+            MessageKind.READ_LENDING_MARKETS,
+            response_timeout=20.0,
+        )
+
+    def lending_positions(self) -> ContractEnvelope:
+        return self.client.request(
+            MessageKind.READ_LENDING_POSITIONS,
+            response_timeout=50.0,
+        )
+
     def prepare_transfer(
         self, payload: dict[str, str], action_id: str,
     ) -> ContractEnvelope:

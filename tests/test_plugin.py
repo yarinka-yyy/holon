@@ -65,6 +65,20 @@ class StaticConnector:
             },
         )
 
+    def lending_markets(self):
+        from holon_lending import LendingReadService
+        return make_envelope(
+            MessageKind.LENDING_MARKETS,
+            LendingReadService.unavailable().compare(),
+        )
+
+    def lending_positions(self):
+        from holon_lending import LendingReadService
+        return make_envelope(
+            MessageKind.LENDING_POSITIONS,
+            LendingReadService.unavailable().positions(None),
+        )
+
     def prepare_transfer(self, payload, action_id):
         self.last_transfer = (payload, action_id)
         return make_envelope(
@@ -133,13 +147,14 @@ class FakeContext:
 
 
 class PluginTests(unittest.TestCase):
-    def test_registers_seven_tools_and_two_hooks(self) -> None:
+    def test_registers_nine_tools_and_two_hooks(self) -> None:
         context = FakeContext()
         plugin.register(context)
         self.assertEqual(
             [tool["name"] for tool in context.tools],
             [
                 "holon_health", "holon_open_wallet", "holon_wallet_balances",
+                "holon_lending_compare", "holon_lending_positions",
                 "holon_prepare_transfer", "holon_transfer_status",
                 "holon_cancel_transfer", "holon_recover_transfer",
             ],
@@ -154,6 +169,7 @@ class PluginTests(unittest.TestCase):
             payload["capabilities"], [
                 "health", "open_wallet", "wallet_balances", "prepare_transfer",
                 "transfer_status", "cancel_transfer", "recover_transfer",
+                "lending_compare", "lending_positions",
             ],
         )
         self.assertFalse(payload["authority_available"])
@@ -190,6 +206,17 @@ class PluginTests(unittest.TestCase):
         self.assertEqual(len(payload["networks"]), 2)
         self.assertTrue(all(item["balances"] is None for item in payload["networks"]))
 
+    def test_lending_tools_return_safe_structured_unavailable(self) -> None:
+        runtime = plugin.PluginRuntime(RaisingConnector())
+        markets = json.loads(runtime.handle_lending_compare({"password": "hidden"}))
+        positions = json.loads(runtime.handle_lending_positions({"password": "hidden"}))
+        self.assertEqual(markets["code"], "LENDING_UNAVAILABLE")
+        self.assertEqual(positions["code"], "LENDING_POSITIONS_UNAVAILABLE")
+        self.assertEqual([item["protocol"] for item in markets["markets"]], [
+            "aave-v3", "compound-v3", "morpho-v1",
+        ])
+        self.assertNotIn("hidden", json.dumps((markets, positions)))
+
     def test_health_exception_returns_generic_uncertain_response(self) -> None:
         payload = json.loads(plugin.PluginRuntime(RaisingConnector()).handle_health())
         self.assertEqual(payload["guard_status"], "UNCERTAIN")
@@ -211,6 +238,7 @@ class PluginTests(unittest.TestCase):
                 for tool_name in (
                     "terminal", "browser", "future_unknown_tool",
                     "holon_open_wallet", "holon_wallet_balances",
+                    "holon_lending_compare", "holon_lending_positions",
                     "holon_prepare_transfer",
                 ):
                     with self.subTest(tool_name=tool_name):

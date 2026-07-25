@@ -63,6 +63,27 @@ BALANCE_ERROR_CODES = frozenset(
 UTC_TIMESTAMP_RE = re.compile(
     r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?Z$"
 )
+LENDING_PERCENT_RE = re.compile(r"^(?:0|[1-9][0-9]{0,3})(?:\.[0-9]{1,6})?$")
+LENDING_RAW_RE = re.compile(r"^(?:0|[1-9][0-9]{0,77})(?:\.[0-9]{1,36})?$")
+LENDING_CONTRACTS = (
+    ("aave-v3", "base-usdc", "0xA238Dd80C259a72e81d7e4664a9801593F98d1c5"),
+    ("compound-v3", "base-usdc", "0xb125E6687d4313864e53df431d5425969c15Eb2F"),
+    ("morpho-v1", "gauntlet-usdc-prime-v1", "0xeE8F4eC5672F09119b96Ab6fB59C27E1b7e44b61"),
+)
+LENDING_NETWORK = {"network": "base", "chain_id": 8453}
+LENDING_ASSET = {
+    "asset": "USDC", "address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    "decimals": 6,
+}
+LENDING_CAVEATS = frozenset({
+    "AAVE_DATA_UNAVAILABLE", "AAVE_POSITION_UNAVAILABLE", "BASE_RPC_UNAVAILABLE",
+    "COMPOUND_DATA_UNAVAILABLE", "COMPOUND_POSITION_UNAVAILABLE",
+    "INCENTIVES_NOT_PROFILED", "MORPHO_DATA_UNAVAILABLE",
+    "MORPHO_POSITION_UNAVAILABLE", "READ_PROFILES_CORRUPT",
+    "READ_PROFILES_INCOMPATIBLE", "READ_PROFILES_INTEGRITY_FAILED",
+    "READ_PROFILES_MISSING", "READ_PROFILES_UNAVAILABLE",
+    "WALLET_ACCOUNT_UNAVAILABLE",
+})
 
 
 def _transfer(payload: Mapping[str, Any]) -> None:
@@ -239,6 +260,179 @@ def validate_wallet_balances(payload: Mapping[str, Any]) -> None:
         raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Inconsistent balance code.")
 
 
+def _lending_identity(payload: Mapping[str, Any]) -> None:
+    if payload.get("network") != LENDING_NETWORK or payload.get("asset") != LENDING_ASSET:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending identity.")
+    if payload.get("authority_available") is not False:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid authority status.")
+
+
+def _lending_freshness(value: object) -> None:
+    fields = {"state", "observed_at", "block_number"}
+    if not isinstance(value, Mapping) or set(value) != fields:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending freshness.")
+    state = value.get("state")
+    observed, block = value.get("observed_at"), value.get("block_number")
+    if state == "UNAVAILABLE":
+        if observed is not None or block is not None:
+            raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending freshness.")
+        return
+    if state not in {"LIVE", "STALE"} or not isinstance(observed, str) or UTC_TIMESTAMP_RE.fullmatch(observed) is None:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending freshness.")
+    if type(block) is not int or block <= 0:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending block.")
+    try:
+        datetime.fromisoformat(observed.removesuffix("Z") + "+00:00")
+    except ValueError as exc:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending timestamp.") from exc
+
+
+def _lending_caveats(value: object) -> None:
+    if (
+        not isinstance(value, list) or len(value) > 4 or len(set(value)) != len(value)
+        or any(item not in LENDING_CAVEATS for item in value)
+    ):
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending caveats.")
+
+
+def _lending_market(value: object, expected: tuple[str, str, str]) -> None:
+    fields = {
+        "protocol", "market_id", "contract_address", "base_yield", "incentives",
+        "freshness", "caveats",
+    }
+    if not isinstance(value, Mapping) or set(value) != fields:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending market.")
+    if tuple(value[name] for name in ("protocol", "market_id", "contract_address")) != expected:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending market identity.")
+    _lending_freshness(value["freshness"])
+    _lending_caveats(value["caveats"])
+    base = value["base_yield"]
+    if value["freshness"]["state"] == "UNAVAILABLE":
+        if base is not None:
+            raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid unavailable rate.")
+    else:
+        base_fields = {
+            "source_raw_value", "source_raw_unit", "value_percent", "metric",
+            "comparison_apy_percent", "normalization",
+        }
+        if not isinstance(base, Mapping) or set(base) != base_fields:
+            raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending rate.")
+        if (
+            not isinstance(base["source_raw_value"], str)
+            or LENDING_RAW_RE.fullmatch(base["source_raw_value"]) is None
+            or base["source_raw_unit"] not in {"ray_apr", "per_second_wad", "decimal_fraction"}
+            or base["metric"] not in {"APR", "APY"}
+            or base["normalization"] not in {"per_second_compounding_365d", "reported_apy"}
+            or any(not isinstance(base[name], str) or LENDING_PERCENT_RE.fullmatch(base[name]) is None
+                   for name in ("value_percent", "comparison_apy_percent"))
+        ):
+            raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending rate.")
+    incentives = value["incentives"]
+    if not isinstance(incentives, Mapping) or set(incentives) != {"status", "total_apr_percent", "components"}:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending incentives.")
+    components = incentives["components"]
+    if incentives["status"] == "UNAVAILABLE":
+        if incentives["total_apr_percent"] is not None or components != []:
+            raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid unavailable incentives.")
+    elif incentives["status"] == "AVAILABLE":
+        total = incentives["total_apr_percent"]
+        if not isinstance(total, str) or LENDING_PERCENT_RE.fullmatch(total) is None or not isinstance(components, list) or len(components) > 8:
+            raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending incentives.")
+        for component in components:
+            if not isinstance(component, Mapping) or set(component) != {"asset_address", "apr_percent"}:
+                raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending reward.")
+            if not isinstance(component["asset_address"], str) or ADDRESS_RE.fullmatch(component["asset_address"]) is None:
+                raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending reward.")
+            if not isinstance(component["apr_percent"], str) or LENDING_PERCENT_RE.fullmatch(component["apr_percent"]) is None:
+                raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending reward.")
+    else:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending incentives.")
+
+
+def validate_lending_markets(payload: Mapping[str, Any]) -> None:
+    if set(payload) != PAYLOAD_FIELDS[MessageKind.LENDING_MARKETS]:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending payload.")
+    _safe_text(payload)
+    _lending_identity(payload)
+    markets = payload.get("markets")
+    if not isinstance(markets, list) or len(markets) != 3:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending markets.")
+    for market, expected in zip(markets, LENDING_CONTRACTS, strict=True):
+        _lending_market(market, expected)
+    usable = [item for item in markets if item["freshness"]["state"] in {"LIVE", "STALE"}]
+    live = sum(item["freshness"]["state"] == "LIVE" for item in markets)
+    expected_status = "READY" if live == 3 else "PARTIAL" if usable else "DEGRADED"
+    codes = {"READY": "LENDING_MARKETS_READY", "PARTIAL": "LENDING_MARKETS_PARTIAL", "DEGRADED": "LENDING_UNAVAILABLE"}
+    messages = {
+        "READY": "Lending markets are available.",
+        "PARTIAL": "Some Lending markets are unavailable or stale.",
+        "DEGRADED": "Lending data is unavailable.",
+    }
+    if payload.get("status") != expected_status or payload.get("code") != codes[expected_status] or payload.get("message") != messages[expected_status]:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Inconsistent Lending status.")
+    highest = payload.get("highest_observed")
+    if not usable:
+        if highest is not None:
+            raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending comparison.")
+    elif not isinstance(highest, Mapping) or set(highest) != {"protocol", "comparison_apy_percent", "not_safety_recommendation"}:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending comparison.")
+    elif (
+        highest["protocol"] not in {item["protocol"] for item in usable}
+        or not isinstance(highest["comparison_apy_percent"], str)
+        or LENDING_PERCENT_RE.fullmatch(highest["comparison_apy_percent"]) is None
+        or highest["not_safety_recommendation"] is not True
+    ):
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending comparison.")
+
+
+def _lending_position(value: object, expected: tuple[str, str, str]) -> None:
+    fields = {
+        "protocol", "market_id", "contract_address", "amount_atomic", "decimals",
+        "display_amount", "freshness", "caveats",
+    }
+    if not isinstance(value, Mapping) or set(value) != fields:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending position.")
+    if tuple(value[name] for name in ("protocol", "market_id", "contract_address")) != expected or value["decimals"] != 6:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending position identity.")
+    _lending_freshness(value["freshness"])
+    _lending_caveats(value["caveats"])
+    atomic, display = value["amount_atomic"], value["display_amount"]
+    if value["freshness"]["state"] == "UNAVAILABLE":
+        if atomic is not None or display is not None:
+            raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid unavailable position.")
+    elif not isinstance(atomic, str) or NON_NEGATIVE_RE.fullmatch(atomic) is None or display != _display_units(int(atomic), 6, "USDC"):
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending position amount.")
+
+
+def validate_lending_positions(payload: Mapping[str, Any]) -> None:
+    if set(payload) != PAYLOAD_FIELDS[MessageKind.LENDING_POSITIONS]:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending payload.")
+    _safe_text(payload)
+    _lending_identity(payload)
+    account = payload.get("account")
+    if account is not None and (
+        not isinstance(account, Mapping) or set(account) != {"label", "address"}
+        or not isinstance(account["label"], str) or not account["label"] or len(account["label"]) > 64
+        or not isinstance(account["address"], str) or ADDRESS_RE.fullmatch(account["address"]) is None
+    ):
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending Account.")
+    positions = payload.get("positions")
+    if not isinstance(positions, list) or len(positions) != 3:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending positions.")
+    for position, expected in zip(positions, LENDING_CONTRACTS, strict=True):
+        _lending_position(position, expected)
+    usable = [item for item in positions if item["freshness"]["state"] in {"LIVE", "STALE"}]
+    live = sum(item["freshness"]["state"] == "LIVE" for item in positions)
+    expected_status = "READY" if live == 3 else "PARTIAL" if usable else "DEGRADED"
+    expected = {
+        "READY": ("LENDING_POSITIONS_READY", "Lending positions are available."),
+        "PARTIAL": ("LENDING_POSITIONS_PARTIAL", "Some Lending positions are unavailable or stale."),
+        "DEGRADED": ("LENDING_POSITIONS_UNAVAILABLE", "Lending positions are unavailable."),
+    }[expected_status]
+    if payload.get("status") != expected_status or (payload.get("code"), payload.get("message")) != expected:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Inconsistent Lending status.")
+
+
 def _response(kind: MessageKind, payload: Mapping[str, Any]) -> None:
     _safe_text(payload)
     if kind in {MessageKind.REFUSAL, MessageKind.ERROR}:
@@ -283,6 +477,12 @@ def validate_payload(kind: MessageKind, payload: Mapping[str, Any]) -> None:
         return
     if kind is MessageKind.WALLET_BALANCES:
         validate_wallet_balances(payload)
+        return
+    if kind is MessageKind.LENDING_MARKETS:
+        validate_lending_markets(payload)
+        return
+    if kind is MessageKind.LENDING_POSITIONS:
+        validate_lending_positions(payload)
         return
     if set(payload) != PAYLOAD_FIELDS[kind]:
         raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid message payload.")

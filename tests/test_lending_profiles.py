@@ -191,9 +191,9 @@ def test_schema_rejects_unknown_authority_or_changed_identity(mutate) -> None:
         LendingReadProfiles.from_dict(value)
 
 
-def test_lending_is_not_imported_by_hermes_guard_or_wallet() -> None:
+def test_lending_runtime_stays_out_of_hermes_and_wallet() -> None:
     source_root = Path(__file__).parents[1] / "src"
-    for package in ("holon_hermes_plugin", "holon_guard", "holon_wallet"):
+    for package in ("holon_hermes_plugin", "holon_wallet"):
         for path in (source_root / package).glob("*.py"):
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
             imported: set[str] = set()
@@ -203,6 +203,17 @@ def test_lending_is_not_imported_by_hermes_guard_or_wallet() -> None:
                 elif isinstance(node, ast.ImportFrom) and node.module:
                     imported.add(node.module.split(".")[0])
             assert "holon_lending" not in imported
+
+
+def test_only_guard_runtime_imports_lending() -> None:
+    source_root = Path(__file__).parents[1] / "src" / "holon_guard"
+    importing = []
+    for path in source_root.glob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        if any(isinstance(node, ast.ImportFrom) and node.module == "holon_lending"
+               for node in ast.walk(tree)):
+            importing.append(path.name)
+    assert sorted(importing) == ["__main__.py", "authority.py"]
 
 
 def test_read_profiles_contain_no_authority_fields() -> None:

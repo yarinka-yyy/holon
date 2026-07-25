@@ -27,6 +27,8 @@ REQUEST_KINDS = frozenset(
         MessageKind.HEALTH_REQUEST,
         MessageKind.OPEN_WALLET,
         MessageKind.READ_WALLET_BALANCES,
+        MessageKind.READ_LENDING_MARKETS,
+        MessageKind.READ_LENDING_POSITIONS,
         MessageKind.PREPARE_TRANSFER,
         MessageKind.TRANSFER_INTENT,
         MessageKind.ACTION_STATUS_REQUEST,
@@ -39,6 +41,8 @@ PAYLOAD_FIELDS = {
     MessageKind.HEALTH_REQUEST: frozenset(),
     MessageKind.OPEN_WALLET: frozenset(),
     MessageKind.READ_WALLET_BALANCES: frozenset(),
+    MessageKind.READ_LENDING_MARKETS: frozenset(),
+    MessageKind.READ_LENDING_POSITIONS: frozenset(),
     MessageKind.TRANSFER_INTENT: frozenset(
         {"network", "asset", "amount", "recipient"}
     ),
@@ -64,6 +68,18 @@ PAYLOAD_FIELDS = {
     ),
     MessageKind.WALLET_BALANCES: frozenset(
         {"status", "authority_available", "account", "networks", "code", "message"}
+    ),
+    MessageKind.LENDING_MARKETS: frozenset(
+        {
+            "status", "authority_available", "network", "asset", "markets",
+            "highest_observed", "code", "message",
+        }
+    ),
+    MessageKind.LENDING_POSITIONS: frozenset(
+        {
+            "status", "authority_available", "account", "network", "asset",
+            "positions", "code", "message",
+        }
     ),
     MessageKind.PROTECTED_FLOW_STARTED: frozenset(
         {"guard_state", "action_state", "flow_id", "code", "message"}

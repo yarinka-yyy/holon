@@ -26,6 +26,7 @@ from .profiles import (
     load_read_profiles,
     read_profiles_digest,
 )
+from .runtime import LendingReadError, LendingReader, LendingReadService
 
 __all__ = [
     "AAVE_CONTRACTS",
@@ -33,6 +34,9 @@ __all__ = [
     "BASE_USDC",
     "COMPOUND_CONTRACTS",
     "LendingReadProfiles",
+    "LendingReadError",
+    "LendingReader",
+    "LendingReadService",
     "MORPHO_BLUE_ADDRESS",
     "MORPHO_VAULT_ADDRESS",
     "MorphoAllocationEvidence",
