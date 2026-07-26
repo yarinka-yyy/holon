@@ -84,7 +84,7 @@ def test_bounded_approval_review_edit_and_wrong_password_are_terminal(tmp_path) 
     assert item.revokeAction["actionId"] != first
     assert item.beginRevokeExecution()
     assert item.currentScreen == "revoke_confirm"
-    assert item.submitRevoke(secret + "-wrong", True)
+    assert item.submitRevoke(secret + "-wrong")
     assert item.currentScreen == "revoke_result"
     assert item.mainnetResult["code"] == "AUTHENTICATION_FAILED"
     assert item.mainnetResult["actionType"] == "revoke"
@@ -936,8 +936,7 @@ def test_mainnet_execution_submits_once_and_updates_public_history(tmp_path) -> 
     assert item.mainnetFeeLimit.endswith("ETH")
     assert item.beginMainnetExecution()
     assert item.currentScreen == "sign_transfer"
-    assert not item.submitMainnetExecution(secret, False)
-    assert item.submitMainnetExecution(secret, True)
+    assert item.submitMainnetExecution(secret)
 
     assert item.currentScreen == "transfer_result"
     assert item.mainnetResult["code"] == "PENDING"
@@ -966,7 +965,7 @@ def test_manual_receipt_check_confirms_exact_public_transfer(tmp_path) -> None:
     action = item._transfer_flow.current
     assert action is not None
     assert item.beginMainnetExecution()
-    assert item.submitMainnetExecution(secret, True)
+    assert item.submitMainnetExecution(secret)
     transaction_hash = item.mainnetResult["transactionHash"]
     sender_topic = "0x" + action.sender[2:].lower().rjust(64, "0")
     recipient_topic = "0x" + action.recipient[2:].lower().rjust(64, "0")
@@ -1001,7 +1000,7 @@ def test_wrong_password_cancel_and_late_execution_result_are_terminal(tmp_path) 
     assert item.prepareTransfer("0x" + "44" * 20)
     first_id = item.transferAction["actionId"]
     assert item.beginMainnetExecution()
-    assert item.submitMainnetExecution(password(), True)
+    assert item.submitMainnetExecution(password())
     assert item.currentScreen == "transfer_result"
     assert item.mainnetResult["code"] == "AUTHENTICATION_FAILED"
     assert item._transfer_flow.state is TransferFlowState.LOCKED
@@ -1030,7 +1029,7 @@ def test_wrong_password_cancel_and_late_execution_result_are_terminal(tmp_path) 
     assert second.currentScreen == "transfer_review"
     assert second.transferAction["actionId"] != first_id
     assert second.beginMainnetExecution()
-    assert second.submitMainnetExecution(secret, True)
+    assert second.submitMainnetExecution(secret)
     assert second.mainnetExecutionInProgress
     assert not second.canCloseWallet
     second.shutdown()
@@ -1083,7 +1082,7 @@ def test_mutation_expiry_profile_change_and_executor_failure_are_terminal(tmp_pa
         transaction=replace(action.transaction, nonce=action.transaction.nonce + 1),
     )
     assert item.beginMainnetExecution()
-    assert not item.submitMainnetExecution(secret, True)
+    assert not item.submitMainnetExecution(secret)
     assert item.currentScreen == "transfer_result"
     assert item.mainnetResult["code"] == "ACTION_INVALID"
     item.finishMainnetExecution()
@@ -1142,7 +1141,7 @@ def test_mutation_expiry_profile_change_and_executor_failure_are_terminal(tmp_pa
     failing.showSend()
     assert failing.prepareTransfer("0x" + "77" * 20)
     assert failing.beginMainnetExecution()
-    assert failing.submitMainnetExecution(failure_password, True)
+    assert failing.submitMainnetExecution(failure_password)
     assert failing.currentScreen == "transfer_result"
     assert failing.mainnetResult["code"] == "SIGNING_FAILED"
     assert "canary" not in repr(failing.mainnetResult).lower()

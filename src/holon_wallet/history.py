@@ -244,6 +244,7 @@ def history_record_to_map(record: WalletHistoryRecord) -> dict[str, object]:
     is_lending = record.action_type.startswith("lending_")
     is_withdraw = record.action_type.startswith("lending_withdraw")
     is_approve = record.action_type == "lending_approve"
+    is_supply = record.action_type == "lending_supply"
     return {
         "actionId": record.action_id,
         "profileId": record.profile_id,
@@ -253,7 +254,10 @@ def history_record_to_map(record: WalletHistoryRecord) -> dict[str, object]:
         "chainId": record.chain_id,
         "sender": record.sender,
         "recipient": record.recipient,
-        "shortRecipient": f"{record.recipient[:8]}…{record.recipient[-6:]}",
+        "shortRecipient": (
+            "Aave V3" if is_lending
+            else f"{record.recipient[:8]}…{record.recipient[-6:]}"
+        ),
         "contract": record.contract or "",
         "token": record.token,
         "amount": amount,
@@ -272,15 +276,17 @@ def history_record_to_map(record: WalletHistoryRecord) -> dict[str, object]:
         "isRevoke": is_revoke,
         "summaryTitle": (
             "Revoked USDC" if is_revoke
-            else "Withdrew USDC" if is_withdraw
-            else "Aave approval" if is_approve
-            else "Aave supplied USDC" if is_lending
+            else "Withdrawn from Aave V3" if is_withdraw
+            else "Approved Aave V3" if is_approve
+            else "Supplied to Aave V3" if is_supply
             else f"Sent {record.token}"
         ),
         "counterpartyLabel": "Spender" if is_revoke else "Protocol" if is_lending else "To",
         "amountLabel": (
             "Allowance → 0" if is_revoke
             else f"+{amount}" if is_withdraw
+            else f"{amount} allowance" if is_approve
+            else amount if is_supply
             else f"−{amount}"
         ),
     }

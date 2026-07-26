@@ -99,6 +99,31 @@ def test_fee_fields_are_public_decimal_strings_and_mapped_as_eth(tmp_path) -> No
     assert mapped["actualFeeDisplay"] == "0.00025 ETH"
 
 
+@pytest.mark.parametrize(
+    ("action_type", "title", "amount_label"),
+    [
+        ("lending_approve", "Approved Aave V3", "1 USDC allowance"),
+        ("lending_supply", "Supplied to Aave V3", "1 USDC"),
+        ("lending_withdraw", "Withdrawn from Aave V3", "+1 USDC"),
+        ("lending_withdraw_all", "Withdrawn from Aave V3", "+1 USDC"),
+        ("transfer", "Sent USDC", "−1 USDC"),
+    ],
+)
+def test_history_uses_action_semantics_and_only_transfer_is_negative(
+    action_type: str, title: str, amount_label: str,
+) -> None:
+    mapped = history_record_to_map(record(
+        action_type=action_type,
+        contract="0x" + "33" * 20 if action_type.startswith("lending_") else None,
+    ))
+
+    assert mapped["summaryTitle"] == title
+    assert mapped["amountLabel"] == amount_label
+    assert mapped["shortRecipient"] == (
+        "Aave V3" if action_type.startswith("lending_") else "0x222222…222222"
+    )
+
+
 def test_duplicate_unknown_and_invalid_transition_are_refused(tmp_path) -> None:
     store = HistoryStore(WalletPaths(tmp_path))
     store.append(record())

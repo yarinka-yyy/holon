@@ -65,9 +65,11 @@ from .public_data import (
     PublicDataStatus,
     snapshot_to_map,
 )
+from .public_cache import PublicCacheStore
 from .prices import (
     PriceService,
     PriceSnapshot,
+    PriceStatus,
     estimate_asset_usd,
     estimate_wei_usd,
     portfolio_to_map,
@@ -202,6 +204,7 @@ class WalletController(QObject):
         transfer_policy: MainnetBroadcastPolicy | None = None,
         policy_control_client=None,
         lending_preflight_service: LendingPreflightService | None = None,
+        public_cache_store: PublicCacheStore | None = None,
     ) -> None:
         super().__init__()
         self._repository = repository or VaultRepository()
@@ -211,6 +214,9 @@ class WalletController(QObject):
         self._public_data_service = public_data_service or PublicDataService()
         self._price_service = price_service or PriceService()
         self._history_store = history_store or HistoryStore(self._repository.paths)
+        self._public_cache_store = (
+            public_cache_store or PublicCacheStore(self._repository.paths)
+        )
         self._public_data_executor = public_data_executor or ThreadPoolExecutor(
             max_workers=2, thread_name_prefix="holon-public-read",
         )
@@ -286,6 +292,8 @@ class WalletController(QObject):
         self._public_data_refreshing = False
         self._public_data_generation = 0
         self._public_data_updated_text = "Not refreshed"
+        self._cached_network_ids: set[str] = set()
+        self._price_cached = False
         self._price_snapshot = PriceSnapshot.unavailable(
             int(datetime.now(UTC).timestamp()), "NOT_REFRESHED",
         )
@@ -486,6 +494,8 @@ class WalletController(QObject):
             return ""
         if asset_id == "eth":
             return ""
+        if network_id in self._cached_network_ids:
+            return ""
         snapshot = self._network_snapshots.get(network_id)
         if snapshot is None or snapshot.status is PublicDataStatus.UNAVAILABLE:
             return ""
@@ -551,7 +561,7 @@ class WalletController(QObject):
             return "Maximum fee exceeds the local mainnet limit"
         if code is MainnetTransferCode.AMOUNT_LIMIT_EXCEEDED:
             return "Transfer amount exceeds the local route limit"
-        return "Fresh password and explicit confirmation authorize one submission"
+        return ""
 
     @Property(bool, notify=transferChanged)
     def mainnetExecutionInProgress(self) -> bool:
@@ -582,7 +592,13 @@ class WalletController(QObject):
     @Property(str, notify=publicDataChanged)
     def publicDataBanner(self) -> str:
         if self._public_data_refreshing:
-            return "LOCAL WALLET  ·  REFRESHING PUBLIC DATA"
+            return (
+                "LOCAL WALLET  ·  CACHED DATA  ·  UPDATING"
+                if self._cached_network_ids or self._price_cached
+                else "LOCAL WALLET  ·  REFRESHING PUBLIC DATA"
+            )
+        if self._cached_network_ids or self._price_cached:
+            return "LOCAL WALLET  ·  CACHED PUBLIC DATA"
         statuses = [
             self._network_snapshots[network_id].status
             for network_id in self._selected_network_ids()
@@ -937,6 +953,13 @@ class WalletController(QObject):
             self._revoke_policy.fee_display(action.network_id)
             if action is not None else "Not configured"
         )
+
+    @Property(str, notify=approvalChanged)
+    def revokeFeeUsd(self) -> str:
+        action = self._revoke_flow.current
+        if action is None:
+            return "Data unavailable"
+        return estimate_wei_usd(action.max_total_fee_wei, self._price_snapshot)
 
     @Property(str, notify=approvalChanged)
     def revokeGateMessage(self) -> str:
@@ -1350,9 +1373,18 @@ class WalletController(QObject):
     def editTransfer(self) -> None:
         if self._mainnet_in_progress:
             return
+        action = self._transfer_flow.current
+        if action is not None and action.action_type == "lending":
+            self._notify_external_transfer("REJECTED", "ACTION_EDIT_REQUESTED")
+            self._clear_mainnet_result()
+            self._cancel_transfer_request(clear_recipient=True)
+            self._guard_open_notice = "Aave action cancelled · change it in Hermes"
+            self.guardNoticeChanged.emit()
+            self._guard_notice_timer.start()
+            self._set_screen("main")
+            return
         self._notify_external_transfer("REJECTED", "TRANSFER_EDITED")
         self._clear_mainnet_result()
-        action = self._transfer_flow.current
         if action is None:
             self._cancel_transfer_request(clear_recipient=False)
             self._set_screen("send")
@@ -1391,13 +1423,12 @@ class WalletController(QObject):
         self._set_screen("sign_transfer")
         return True
 
-    @Slot(str, bool, result=bool)
-    def submitMainnetExecution(self, password: str, explicitly_confirmed: bool) -> bool:
+    @Slot(str, result=bool)
+    def submitMainnetExecution(self, password: str) -> bool:
         action = self._transfer_flow.current
         active = self._state.active_profile
         if (
             len(password) < MIN_PASSWORD_LENGTH
-            or not explicitly_confirmed
             or action is None
             or active is None
             or self._closed
@@ -1492,11 +1523,11 @@ class WalletController(QObject):
         self._public_data_generation += 1
         generation = self._public_data_generation
         self._public_data_refreshing = True
-        self._public_data_updated_text = "Refreshing…"
-        for network_id in network_ids:
-            self._network_snapshots[network_id] = NetworkSnapshot.unavailable(
-                NETWORK_BY_ID[network_id], "REFRESHING",
-            )
+        self._public_data_updated_text = (
+            "Cached · updating…"
+            if self._cached_network_ids or self._price_cached
+            else "Refreshing…"
+        )
         self.publicDataChanged.emit()
         future = self._public_data_executor.submit(
             self._refresh_public_bundle,
@@ -1637,6 +1668,7 @@ class WalletController(QObject):
             if revoke_invalidated or approval_open:
                 self._cancel_revoke_action(clear_snapshots=True)
             self.activeProfileChanged.emit()
+            self._load_public_cache()
             self.historyChanged.emit()
             if (
                 invalidated or recovery_invalidated or recovery_open
@@ -2451,13 +2483,12 @@ class WalletController(QObject):
         self._set_screen("revoke_confirm")
         return True
 
-    @Slot(str, bool, result=bool)
-    def submitRevoke(self, password: str, explicitly_confirmed: bool) -> bool:
+    @Slot(str, result=bool)
+    def submitRevoke(self, password: str) -> bool:
         action = self._revoke_flow.current
         active = self._state.active_profile
         if (
             len(password) < MIN_PASSWORD_LENGTH
-            or not explicitly_confirmed
             or action is None
             or active is None
             or self._closed
@@ -2811,6 +2842,7 @@ class WalletController(QObject):
         self._state.replace_profiles(profiles, selected)
         self.profilesChanged.emit()
         self.activeProfileChanged.emit()
+        self._load_public_cache()
         self._load_history()
 
     def _complete_profile_operation(
@@ -3440,7 +3472,14 @@ class WalletController(QObject):
             False,
             True,
             action.simulation,
-            "revoke" if isinstance(action, PreparedRevokeAction) else "transfer",
+            (
+                "revoke" if isinstance(action, PreparedRevokeAction)
+                else "lending_withdraw_all"
+                if action.action_type == "lending"
+                and action.method == "withdraw" and action.amount_mode == "all"
+                else f"lending_{action.method}"
+                if action.action_type == "lending" else "transfer"
+            ),
         )
 
     def _clear_mainnet_result(self) -> None:
@@ -3527,49 +3566,115 @@ class WalletController(QObject):
             snapshot, prices = result
         elif isinstance(result, PortfolioSnapshot):
             snapshot = result
-        if (
-            snapshot is None
-            or active is None
-            or snapshot.profile_id != active.profile_id
-            or snapshot.address != active.address
-        ):
-            for network_id in requested:
-                self._network_snapshots[network_id] = NetworkSnapshot.unavailable(
-                    NETWORK_BY_ID[network_id], "RPC_UNAVAILABLE",
-                )
-            self._price_snapshot = PriceSnapshot.unavailable(
-                int(datetime.now(UTC).timestamp()), "RPC_UNAVAILABLE",
-            )
+        valid_bundle = (
+            snapshot is not None
+            and active is not None
+            and snapshot.profile_id == active.profile_id
+            and snapshot.address == active.address
+        )
+        live_network_received = False
+        if not valid_bundle:
+            self._preserve_or_unavailable(requested, "RPC_UNAVAILABLE")
         else:
+            assert snapshot is not None
             returned_ids = {item.network_id for item in snapshot.networks}
             if returned_ids != set(requested):
-                for network_id in requested:
-                    self._network_snapshots[network_id] = NetworkSnapshot.unavailable(
-                        NETWORK_BY_ID[network_id], "DATA_INVALID",
-                    )
-                self._price_snapshot = PriceSnapshot.unavailable(
-                    int(datetime.now(UTC).timestamp()), "DATA_INVALID",
-                )
+                self._preserve_or_unavailable(requested, "DATA_INVALID")
             else:
                 for item in snapshot.networks:
-                    self._network_snapshots[item.network_id] = item
-                if prices is not None and prices.chain_id == 8453:
+                    if item.status in {PublicDataStatus.LIVE, PublicDataStatus.SIMULATED}:
+                        self._network_snapshots[item.network_id] = item
+                        self._cached_network_ids.discard(item.network_id)
+                        live_network_received |= item.status is PublicDataStatus.LIVE
+                    else:
+                        self._preserve_or_unavailable(
+                            (item.network_id,),
+                            item.error_code or "RPC_UNAVAILABLE",
+                        )
+                if (
+                    prices is not None
+                    and prices.chain_id == 8453
+                    and prices.status is PriceStatus.LIVE
+                ):
                     self._price_snapshot = prices
+                    self._price_cached = False
                 else:
-                    self._price_snapshot = PriceSnapshot.unavailable(
-                        int(datetime.now(UTC).timestamp()), "DATA_INVALID",
-                    )
+                    self._preserve_price_or_unavailable("DATA_INVALID")
         self._public_data_refreshing = False
         timestamps = [
             item.updated_at for item in self._network_snapshots.values()
             if item.updated_at
         ]
+        cached = bool(self._cached_network_ids or self._price_cached)
         self._public_data_updated_text = (
-            f"Updated {_display_local_time(max(timestamps))}" if timestamps
-            else "Refresh unavailable"
+            f"{'Cached · updated' if cached else 'Updated'} {_display_local_time(max(timestamps))}"
+            if timestamps else "Refresh unavailable"
         )
+        if live_network_received:
+            try:
+                self._public_cache_store.save(
+                    active.profile_id, active.address,
+                    self._network_snapshots, self._price_snapshot,
+                )
+            except StorageError:
+                pass
         self.publicDataChanged.emit()
         self.trustedDraftChanged.emit()
+
+    def _load_public_cache(self) -> None:
+        self._network_snapshots = {
+            spec.network_id: NetworkSnapshot.unavailable(spec, "NOT_REFRESHED")
+            for spec in NETWORKS
+        }
+        self._price_snapshot = PriceSnapshot.unavailable(
+            int(datetime.now(UTC).timestamp()), "NOT_REFRESHED",
+        )
+        self._cached_network_ids.clear()
+        self._price_cached = False
+        active = self._state.active_profile
+        if active is None:
+            self._public_data_updated_text = "Not refreshed"
+            self.publicDataChanged.emit()
+            return
+        bundle = self._public_cache_store.load(active.profile_id, active.address)
+        if bundle is None:
+            self._public_data_updated_text = "Not refreshed"
+            self.publicDataChanged.emit()
+            return
+        for item in bundle.networks:
+            self._network_snapshots[item.network_id] = item
+            self._cached_network_ids.add(item.network_id)
+        self._price_snapshot = bundle.prices
+        self._price_cached = True
+        timestamps = [item.updated_at for item in bundle.networks if item.updated_at]
+        self._public_data_updated_text = (
+            f"Cached · updated {_display_local_time(max(timestamps))}"
+            if timestamps else "Cached public data"
+        )
+        self.publicDataChanged.emit()
+
+    def _preserve_or_unavailable(
+        self, network_ids: tuple[str, ...], code: str,
+    ) -> None:
+        for network_id in network_ids:
+            current = self._network_snapshots[network_id]
+            if (
+                current.status in {PublicDataStatus.LIVE, PublicDataStatus.SIMULATED}
+                and current.eth is not None and current.usdc is not None
+            ):
+                self._cached_network_ids.add(network_id)
+            else:
+                self._network_snapshots[network_id] = NetworkSnapshot.unavailable(
+                    NETWORK_BY_ID[network_id], code,
+                )
+
+    def _preserve_price_or_unavailable(self, code: str) -> None:
+        if self._price_snapshot.status is PriceStatus.LIVE:
+            self._price_cached = True
+        else:
+            self._price_snapshot = PriceSnapshot.unavailable(
+                int(datetime.now(UTC).timestamp()), code,
+            )
 
     def _clear_clipboard(self) -> None:
         self._clipboard_timer.stop()

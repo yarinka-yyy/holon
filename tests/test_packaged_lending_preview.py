@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -25,9 +26,12 @@ from holon_lending import (
 )
 from holon_policy import LendingRule, Policy, PolicyRevisionStore, policy_digest
 from holon_wallet.settings import SettingsStore
+from holon_wallet.prices import AssetPrice, PriceSnapshot, PriceStatus
+from holon_wallet.public_cache import PublicCacheStore
 from holon_wallet.storage import WalletPaths
 from holon_wallet.vault import VaultRepository
 from holon_wallet.wallet_crypto import generate_mnemonic
+from wallet_public_support import public_snapshot
 
 
 def _selector(signature: str) -> str:
@@ -121,6 +125,68 @@ class RpcFixture(BaseHTTPRequestHandler):
         ):
             return _result(["uint256"], [999_999])
         raise AssertionError(f"Unexpected eth_call: {target} {data[:8]}")
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Packaged Windows executables")
+def test_packaged_wallet_boots_offline_with_public_cache(tmp_path: Path) -> None:
+    wallet = Path(os.environ.get("HOLON_TEST_WALLET_EXE", ""))
+    if not wallet.is_file():
+        pytest.skip("Packaged Wallet path was not provided")
+    local_root = tmp_path / "cached-local"
+    paths = WalletPaths(local_root / "Holon" / "data")
+    repository = VaultRepository(paths)
+    record = repository.new_record(generate_mnemonic(), "Cached Fixture")
+    repository.create_new("fixture-password", record)
+    SettingsStore(paths).save_active_id(record.summary.profile_id)
+    prices = PriceSnapshot(
+        8453,
+        PriceStatus.LIVE,
+        (
+            AssetPrice("eth", "ETH", PriceStatus.LIVE, 250_000_000_000, 8, 10),
+            AssetPrice("usdc", "USDC", PriceStatus.LIVE, 100_000_000, 8, 10),
+        ),
+        10,
+    )
+    cache = PublicCacheStore(paths)
+    cache.save(
+        record.summary.profile_id,
+        record.summary.address,
+        {
+            "ethereum": public_snapshot("ethereum", eth=2 * 10**18),
+            "base": public_snapshot("base", usdc=7_000_000),
+        },
+        prices,
+    )
+    before = cache.path.read_bytes()
+    environment = dict(os.environ)
+    environment.update({
+        "LOCALAPPDATA": str(local_root),
+        "HOLON_ETHEREUM_RPC_URL": "http://127.0.0.1:9",
+        "HOLON_BASE_RPC_URL": "http://127.0.0.1:9",
+        "QT_QPA_PLATFORM": "offscreen",
+    })
+    process = subprocess.Popen(
+        [str(wallet.resolve())],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env=environment,
+        creationflags=0x08000000,
+    )
+    try:
+        time.sleep(2)
+        assert process.poll() is None
+        assert cache.path.read_bytes() == before
+    finally:
+        if process.poll() is None:
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+            )
+        process.wait(timeout=10)
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Packaged Windows executables")

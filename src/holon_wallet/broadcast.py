@@ -850,7 +850,7 @@ class MainnetTransferExecutor:
             broadcast_attempted,
             history_available,
             action.simulation,
-            REVOKE_ACTION_TYPE if isinstance(action, PreparedRevokeAction) else action.action_type,
+            _result_action_type(action),
         )
 
 
@@ -1553,6 +1553,49 @@ def _result_text(
         ),
     }
     title, message = values[code]
+    if action_type.startswith("lending_"):
+        action = action_type.removeprefix("lending_")
+        label = {
+            "approve": "Aave approval",
+            "supply": "Aave supply",
+            "withdraw": "Aave withdrawal",
+            "withdraw_all": "Aave withdrawal",
+        }.get(action, "Aave action")
+        replacements = {
+            MainnetTransferCode.CONFIRMED: {
+                "approve": (
+                    "Aave approval confirmed",
+                    "Aave V3 can use the exact reviewed USDC amount.",
+                ),
+                "supply": (
+                    "Supplied to Aave V3",
+                    "The exact reviewed USDC amount was supplied on-chain.",
+                ),
+                "withdraw": (
+                    "Withdrawn from Aave V3",
+                    "The exact reviewed USDC amount returned to this Wallet.",
+                ),
+                "withdraw_all": (
+                    "Withdrawn from Aave V3",
+                    "The reviewed Aave position returned to this Wallet.",
+                ),
+            }.get(
+                action,
+                (
+                    "Aave action confirmed",
+                    "The reviewed action was confirmed on-chain.",
+                ),
+            ),
+            MainnetTransferCode.PENDING: (
+                f"{label} submitted",
+                "Broadcast occurred once. Confirmation is still pending.",
+            ),
+            MainnetTransferCode.FAILED: (
+                f"{label} reverted",
+                "A network fee may have been spent, but the Aave action reverted.",
+            ),
+        }
+        return replacements.get(code, (title, message))
     if action_type != REVOKE_ACTION_TYPE:
         return title, message
     replacements = {
@@ -1578,6 +1621,18 @@ def _result_text(
         ),
     }
     return replacements.get(code, (title, message))
+
+
+def _result_action_type(action: PreparedTransactionAction) -> str:
+    if isinstance(action, PreparedRevokeAction):
+        return REVOKE_ACTION_TYPE
+    if action.action_type != "lending":
+        return action.action_type
+    return (
+        "lending_withdraw_all"
+        if action.method == "withdraw" and action.amount_mode == "all"
+        else f"lending_{action.method}"
+    )
 
 
 _TRANSPORT_ERRORS = (

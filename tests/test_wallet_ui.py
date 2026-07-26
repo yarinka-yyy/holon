@@ -5,6 +5,7 @@ import os
 import secrets
 import sys
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 os.environ.setdefault("QT_PREFERRED_PHYSICAL_DEVICE", "cpu")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -208,8 +209,9 @@ def test_token_approvals_v2_review_confirm_submit_and_policy_gate(tmp_path, qt_a
         qt_app.processEvents()
         assert app.controller.currentScreen == "revoke_confirm"
         assert not child(app, "revokePasswordField").property("revealed")
+        assert not child(app, "revokeSubmitButton").property("enabled")
         set_text(app, "revokePasswordInput", secret)
-        invoke(child(app, "revokeConfirmationCheckbox"), "trigger")
+        assert child(app, "revokeSubmitButton").property("enabled")
         invoke(child(app, "revokeSubmitButton"), "trigger")
         qt_app.processEvents()
         assert app.controller.currentScreen == "revoke_result"
@@ -514,15 +516,26 @@ def test_send_review_mainnet_confirmation_result_and_history(tmp_path, qt_app) -
 
         assert app.controller.currentScreen == "transfer_review"
         assert child(app, "transferReviewPageProgress").property("activeStep") == 0
-        assert child(app, "transferReviewNetwork").property("text") == "Base · 8453"
+        assert child(app, "transferReviewNetwork").property("text") == "Base"
         assert child(app, "transferReviewAmount").property("text") == "1 USDC"
         assert child(app, "transferReviewRecipient").property("enabled")
         assert app.controller.transferAction["recipient"].endswith("444444")
-        assert child(app, "transferReviewFee").property("secondary").endswith("ETH")
+        assert child(app, "transferReviewFee").property("text").startswith("≈ $")
+        continue_button = child(app, "continueMainnetButton")
+        secondary_button = child(app, "editTransferButton")
+        assert continue_button.property("y") + continue_button.property("height") <= 592
+        assert secondary_button.property("y") + secondary_button.property("height") <= 592
+        assert child(app, "transferReviewOverflowCue").property("visible")
+        app.window.resize(520, 820)
+        qt_app.processEvents()
+        assert continue_button.property("visible")
+        assert secondary_button.property("visible")
+        app.window.resize(430, 703)
+        qt_app.processEvents()
         assert app.controller.transferAction["expiresAt"].endswith("UTC")
         assert app.controller.mainnetFeeLimit.endswith("ETH")
         invoke(child(app, "transferDetailsButton"), "trigger")
-        assert child(app, "transferReviewScroll").property("contentHeight") == 1200
+        assert child(app, "transferReviewScroll").property("contentHeight") == 900
 
         invoke(child(app, "editTransferButton"), "trigger")
         qt_app.processEvents()
@@ -539,10 +552,11 @@ def test_send_review_mainnet_confirmation_result_and_history(tmp_path, qt_app) -
         assert not child(app, "mainnetSendButton").property("enabled")
         set_text(app, "mainnetPasswordInput", password)
         qt_app.processEvents()
-        assert not child(app, "mainnetSendButton").property("enabled")
-        invoke(child(app, "mainnetConfirmationCheckbox"), "trigger")
-        qt_app.processEvents()
         assert child(app, "mainnetSendButton").property("enabled")
+        invoke(child(app, "mainnetPasswordField"), "accepted")
+        qt_app.processEvents()
+        assert app.controller.currentScreen == "sign_transfer"
+        assert app._test_mainnet_rpc.send_calls == 0
         invoke(child(app, "mainnetSendButton"), "trigger")
         qt_app.processEvents()
         assert child(app, "mainnetPasswordInput").property("text") == ""
@@ -557,6 +571,11 @@ def test_send_review_mainnet_confirmation_result_and_history(tmp_path, qt_app) -
         assert child(app, "mainnetTransactionHash").property("text").startswith("0x")
         assert child(app, "mainnetPublicStatus").property("text") == "Pending"
         assert app.controller.mainnetResult["canCheckStatus"]
+        assert child(app, "receiptTrackingLabel").property("text") in {
+            "Checking transaction status…", "Broadcast attempted exactly once",
+        }
+        done_button = child(app, "mainnetResultDoneButton")
+        assert done_button.property("y") == 528
         invoke(child(app, "checkMainnetStatusButton"), "trigger")
         qt_app.processEvents()
         assert child(app, "mainnetPublicStatus").property("text") == "Pending"
@@ -604,7 +623,7 @@ def test_guard_transfer_handoff_opens_existing_review_qml(tmp_path, qt_app) -> N
         qt_app.processEvents()
         assert app.controller.currentScreen == "transfer_review"
         assert child(app, "transferReviewAmount").property("text") == "0.001 ETH"
-        assert child(app, "transferReviewNetwork").property("text") == "Ethereum · 1"
+        assert child(app, "transferReviewNetwork").property("text") == "Ethereum"
         assert responses[0]["kind"] == "transfer_prepared"
         invoke(child(app, "continueMainnetButton"), "trigger")
         qt_app.processEvents()
@@ -778,7 +797,6 @@ def test_mainnet_runtime_gate_wrong_password_and_cancel(tmp_path, qt_app) -> Non
         invoke(child(active, "prepareTransferButton"), "trigger")
         invoke(child(active, "continueMainnetButton"), "trigger")
         set_text(active, "mainnetPasswordInput", fresh_password())
-        invoke(child(active, "mainnetConfirmationCheckbox"), "trigger")
         invoke(child(active, "mainnetSendButton"), "trigger")
         qt_app.processEvents()
         assert active.controller.currentScreen == "transfer_result"
@@ -809,7 +827,6 @@ def test_ordinary_window_close_is_blocked_only_during_submission(
         deferred.run_next()
         invoke(child(app, "continueMainnetButton"), "trigger")
         set_text(app, "mainnetPasswordInput", password)
-        invoke(child(app, "mainnetConfirmationCheckbox"), "trigger")
         invoke(child(app, "mainnetSendButton"), "trigger")
         assert app.controller.mainnetExecutionInProgress
         assert app.controller.currentScreen == "submit_transfer"
@@ -976,6 +993,27 @@ def test_resize_close_and_idle_first_run_create_no_files(wallet_app, qt_app) -> 
 
     assert (app.window.width(), app.window.height()) == (430, 703)
     assert list(repository.paths.data_dir.iterdir()) == []
+
+
+def test_transaction_pages_have_password_click_only_and_semantic_copy() -> None:
+    qml = Path(__file__).parents[1] / "src" / "holon_wallet" / "qml"
+    review = (qml / "TransferReviewPage.qml").read_text(encoding="utf-8")
+    sign = (qml / "SignPage.qml").read_text(encoding="utf-8")
+    revoke = (qml / "ApprovalConfirmPage.qml").read_text(encoding="utf-8")
+
+    assert 'value: root.action.network || ""' in review
+    assert 'root.action.chainId' in review
+    assert "transferFeeUsd" in review
+    assert "Change action" in review and "Edit transfer" in review
+    for phrase in (
+        "Approve Aave V3", "Supply to Aave V3",
+        "Withdraw from Aave V3", "Withdraw all from Aave V3",
+    ):
+        assert phrase in review
+    assert "onAccepted:" not in sign
+    assert "onAccepted:" not in revoke
+    assert "CheckBox" not in sign + revoke
+    assert "irreversible" not in (sign + revoke).lower()
 
 
 def test_guard_banner_is_public_timed_and_never_navigates(wallet_app, qt_app) -> None:

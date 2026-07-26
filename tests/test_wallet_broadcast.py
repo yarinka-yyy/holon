@@ -16,6 +16,7 @@ from holon_wallet.broadcast import (
     MainnetBroadcastPolicy,
     MainnetTransferCode,
     MainnetTransferExecutor,
+    MainnetTransferResult,
     mainnet_result_to_map,
 )
 from holon_wallet.history import (
@@ -284,6 +285,35 @@ def test_exact_transaction_is_signed_and_broadcast_once(tmp_path, profile_type) 
     assert "raw" not in repr(mapped).lower()
     assert password not in repr(result)
     assert secret_canary not in repr(result)
+
+
+@pytest.mark.parametrize(
+    ("action_type", "title"),
+    [
+        ("lending_approve", "Aave approval confirmed"),
+        ("lending_supply", "Supplied to Aave V3"),
+        ("lending_withdraw", "Withdrawn from Aave V3"),
+        ("lending_withdraw_all", "Withdrawn from Aave V3"),
+        ("transfer", "Transfer confirmed"),
+        ("revoke", "Approval revoked"),
+    ],
+)
+def test_result_copy_is_action_aware(action_type: str, title: str) -> None:
+    result = MainnetTransferResult(
+        code=MainnetTransferCode.CONFIRMED,
+        action_id="act-result",
+        digest="a" * 64,
+        transaction_hash="0x" + "b" * 64,
+        recovered_signer="0x" + "11" * 20,
+        history_status=HistoryStatus.CONFIRMED,
+        completed_at="2026-07-26T12:00:00Z",
+        broadcast_attempted=True,
+        history_available=True,
+        simulation=False,
+        action_type=action_type,
+    )
+
+    assert mainnet_result_to_map(result)["title"] == title
 
 
 def test_ethereum_native_uses_ethereum_endpoint_and_exact_receipt(tmp_path) -> None:

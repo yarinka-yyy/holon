@@ -7,108 +7,97 @@ TransactionFlowShell {
     subtitle: action.actionType === "lending"
         ? "Authorize this exact Aave action once" : "Authorize this exact transfer once"
     activeStep: 1; onBackRequested: walletController.cancelMainnetExecution()
-    property bool explicitlyConfirmed: false
     property var action: walletController.transferAction
+    property bool isLending: action.actionType === "lending"
     property string lendingMethod: action.method === "withdraw" && action.amountMode === "all"
         ? "withdraw all" : (action.method || "action")
     property url assetIcon: action.assetId === "eth"
         ? "assets/ethereum.svg" : "assets/usdc.png"
     property bool readyToSign: passwordField.text.length >= 4
-        && explicitlyConfirmed && walletController.mainnetExecutionAvailable
+        && walletController.mainnetExecutionAvailable
 
+    function actionTitle() {
+        if (!root.isLending) return (root.action.amount || "Transfer") + " on " + (root.action.network || "")
+        if (root.action.method === "approve") return "Approve Aave V3"
+        if (root.action.method === "supply") return "Supply to Aave V3"
+        if (root.action.amountMode === "all") return "Withdraw all from Aave V3"
+        return "Withdraw from Aave V3"
+    }
+    function actionSubtitle() {
+        if (!root.isLending) return "To " + (root.action.recipient || "")
+        if (root.action.method === "approve") return "Exact allowance · " + (root.action.amount || "USDC")
+        if (root.action.method === "supply") return "Supply " + (root.action.amount || "USDC") + " from this Wallet"
+        return "Receiver · " + (root.action.accountLabel || "Active Wallet")
+    }
     function submit() {
         if (!readyToSign) return
         let oneTimePassword = passwordField.text
-        passwordField.clear(); explicitlyConfirmed = false
-        walletController.submitMainnetExecution(oneTimePassword, true)
+        passwordField.clear()
+        walletController.submitMainnetExecution(oneTimePassword)
         oneTimePassword = ""
     }
-    onEnabledChanged: if (!enabled) { passwordField.clear(); explicitlyConfirmed = false }
+    onEnabledChanged: if (!enabled) passwordField.clear()
 
     SurfaceCard {
-        x: 0; y: 0; width: 458; height: 136
-        Text {
-            x: 18; y: 14; width: 350
-            text: (root.action.amount || "Transfer") + " on " + (root.action.network || "")
-            color: Design.text
-            font.family: Design.fontFamily; font.pixelSize: 20; font.weight: Font.DemiBold
+        x: 0; y: 0; width: 458; height: 168; clip: true
+        Image {
+            visible: root.isLending; x: 0; y: 0; width: parent.width; height: 62
+            source: "assets/aave-banner.png"; fillMode: Image.PreserveAspectCrop
+            sourceSize: Qt.size(916, 124)
         }
         Text {
-            x: 18; y: 48; width: 350
-            text: (root.action.actionType === "lending"
-                ? "Aave " + root.lendingMethod + " · "
-                : "To ") + (root.action.transactionTarget || root.action.recipient || "")
+            x: 18; y: root.isLending ? 78 : 18; width: 350
+            text: root.actionTitle(); color: Design.text
+            font.family: Design.fontFamily; font.pixelSize: 19; font.weight: Font.DemiBold
+        }
+        Text {
+            x: 18; y: root.isLending ? 108 : 54; width: 350
+            text: root.actionSubtitle(); color: Design.textMuted
+            font.family: Design.fontFamily; font.pixelSize: 11
+            elide: Text.ElideMiddle
+        }
+        Text {
+            x: 18; y: 140
+            text: "Maximum fee " + walletController.transferFeeUsd
             color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 11
-            wrapMode: Text.WrapAnywhere
-        }
-        Text {
-            x: 18; y: 106; text: "Maximum fee " + (root.action.maxFeeDisplay || "Unavailable")
-            color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 12
         }
         Image {
+            visible: !root.isLending
             anchors.right: parent.right; anchors.rightMargin: 18; y: 20
             width: 50; height: 50; source: root.assetIcon; sourceSize: Qt.size(100, 100)
         }
     }
     Text {
-        x: 0; y: 148; text: "Wallet password"; color: Design.textMuted
+        x: 0; y: 190; text: "Wallet password"; color: Design.textMuted
         font.family: Design.fontFamily; font.pixelSize: 13
     }
     PasswordInput {
         id: passwordField; objectName: "mainnetPasswordField"
         fieldObjectName: "mainnetPasswordInput"
-        x: 0; y: 176; width: 458; height: 56
-        placeholderText: "Enter fresh password"; onAccepted: root.submit()
+        x: 0; y: 218; width: 458; height: 56
+        placeholderText: "Enter fresh password"
     }
     Text {
-        x: 0; y: 245; width: 458; horizontalAlignment: Text.AlignHCenter
+        x: 0; y: 287; width: 458; horizontalAlignment: Text.AlignHCenter
         text: "The password is used once and is not stored"
         color: Design.textFaint; font.family: Design.fontFamily; font.pixelSize: 11
     }
-    Item {
-        objectName: "mainnetConfirmationCheckbox"
-        x: 0; y: 282; width: 458; height: 72
-        function trigger() { root.explicitlyConfirmed = !root.explicitlyConfirmed }
-        SurfaceCard { anchors.fill: parent; interactive: true; onTriggered: parent.trigger() }
-        Rectangle {
-            x: 16; anchors.verticalCenter: parent.verticalCenter
-            width: 28; height: 28; radius: 8
-            color: root.explicitlyConfirmed ? Design.accent : Design.surfaceSecondary
-            border.width: 1; border.color: root.explicitlyConfirmed ? Design.accent : Design.borderStrong
-            Image {
-                anchors.centerIn: parent; width: 20; height: 20
-                visible: root.explicitlyConfirmed; source: "assets/check.svg"; sourceSize: Qt.size(40, 40)
-            }
-        }
-        Text {
-            x: 60; width: 378; anchors.verticalCenter: parent.verticalCenter
-            text: "I confirm this irreversible "
-                + (root.action.actionType === "lending" ? "Aave action for " : "transfer of ")
-                + (root.action.amount || "the exact amount") + " on "
-                + (root.action.network || "the selected network") + "."
-            wrapMode: Text.Wrap; color: Design.text
-            font.family: Design.fontFamily; font.pixelSize: 13
-        }
-    }
-    Rectangle {
-        x: 0; y: 376; width: 458; height: 64; radius: Design.controlRadius
-        color: "#332C261B"; border.width: 1; border.color: "#66D5AA64"
-        Text {
-            anchors.centerIn: parent; width: 414; horizontalAlignment: Text.AlignHCenter
-            wrapMode: Text.Wrap; text: "Real funds · signing and submission cannot be undone once started"
-            color: Design.warning; font.family: Design.fontFamily; font.pixelSize: 12
-        }
+    Text {
+        x: 18; y: 330; width: 422; horizontalAlignment: Text.AlignHCenter
+        text: "The button below authorizes only the exact action shown above."
+        color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 12
+        wrapMode: Text.Wrap
     }
     FormButton {
-        objectName: "mainnetSendButton"; x: 0; y: 468; width: 458; height: 56
-        label: root.action.actionType === "lending"
+        objectName: "mainnetSendButton"; x: 0; y: 474; width: 458; height: 56
+        label: root.isLending
             ? "Sign and submit " + root.lendingMethod
             : "Sign and send " + (root.action.token || "asset")
         controlEnabled: root.readyToSign
         onTriggered: root.submit()
     }
     FormButton {
-        objectName: "mainnetCancelButton"; x: 0; y: 538; width: 458; height: 48
+        objectName: "mainnetCancelButton"; x: 0; y: 542; width: 458; height: 42
         label: "Cancel"; primary: false
         onTriggered: walletController.cancelMainnetExecution()
     }

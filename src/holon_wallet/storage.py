@@ -38,6 +38,10 @@ class WalletPaths:
         return self.data_dir / "wallet-history.json"
 
     @property
+    def public_cache(self) -> Path:
+        return self.data_dir / "wallet-public-cache.json"
+
+    @property
     def transfer_policy_draft(self) -> Path:
         return self.data_dir / "transfer-policy-draft.json"
 
