@@ -6,12 +6,14 @@ from dataclasses import replace
 from pathlib import Path
 
 from holon_contracts import MessageKind, make_envelope
+from holon_lending import ACTION_PROFILES_DIGEST, ActionProfilesState
 from holon_guard import GuardLifecycle, SnapshotStore
 from holon_guard.authority import AuthorityService
 from holon_guard.wallet import (
     WalletBalancesResult, WalletLendingPreviewResult, WalletOpenResult,
+    WalletPreparedResult,
 )
-from holon_policy import Policy, PolicyEngine
+from holon_policy import LendingRule, Policy, PolicyEngine, PolicySnapshot, policy_digest
 from guard_support import (
     ACTION_ID, ACTION_ID_2, enabled_policy, make_audit, make_ledger, transfer_request,
 )
@@ -33,6 +35,7 @@ class Wallet:
         self.open_calls = 0
         self.balance_calls = 0
         self.preview_calls = 0
+        self.lending_prepare_calls = 0
         self.handle = Handle()
 
     def open_or_activate(self, flow_id: str) -> Handle:
@@ -84,6 +87,13 @@ class Wallet:
                 amount_mode=intent["amount_mode"], profile_digest=profile_digest,
             ),
         )
+
+    def prepare_lending_action(self, request) -> WalletPreparedResult:
+        self.lending_prepare_calls += 1
+        return WalletPreparedResult(True, "LENDING_ACTION_PREPARED", {
+            "max_total_fee_wei": "90000000000000",
+            "prepared_digest": "a" * 64,
+        }, self.handle)
 
 
 class Owner:
@@ -251,6 +261,36 @@ class AuthorityTests(unittest.TestCase):
         self.assertEqual(self.wallet.preview_calls, 1)
         self.assertIsNone(self.lifecycle.ledger.snapshot.current)
         self.assertNotIn("action_id", response.to_dict())
+
+    def test_lending_authority_starts_one_protected_action_under_v3_only(self) -> None:
+        rule = LendingRule(
+            "lending", "1", "aave-v3-base-usdc", "1", "base", "usdc", 8453,
+            ("approve", "supply"), "5000000", "100000000000000",
+            ACTION_PROFILES_DIGEST,
+        )
+        policy = Policy("3", "2", False, (), True, (rule,))
+        snapshot = PolicySnapshot(2, policy_digest(policy.to_dict()), policy, "d" * 64)
+        service = AuthorityService(
+            self.lifecycle, PolicyEngine(policy), self.audit,
+            policy_snapshot=snapshot, lending_actions=ActionProfilesState.load(),
+        )
+        request = make_envelope(
+            MessageKind.LENDING_AUTHORITY_INTENT,
+            {
+                "module_id": "lending", "module_version": "1",
+                "protocol_profile_id": "aave-v3-base-usdc",
+                "protocol_profile_version": "1", "network": "base", "asset": "usdc",
+                "beneficiary_mode": "active_wallet_account", "action": "supply",
+                "amount_mode": "exact", "amount": "1",
+            }, action_id=ACTION_ID,
+        )
+        response = service.handle(request, owner_pid=101)
+        self.assertEqual(response.kind, MessageKind.PROTECTED_FLOW_STARTED)
+        self.assertEqual(self.wallet.lending_prepare_calls, 1)
+        self.assertEqual(self.lifecycle.snapshot.state.value, "ACTIVE")
+        self.assertEqual(
+            service.handle(request, owner_pid=101).payload["code"], "ACTION_REPLAYED",
+        )
 
 
 if __name__ == "__main__":

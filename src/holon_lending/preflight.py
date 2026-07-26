@@ -20,6 +20,8 @@ PREVIEW_LIFETIME = timedelta(minutes=5)
 BLOCK_MAX_AGE_SECONDS = 120
 FUTURE_TOLERANCE_SECONDS = 60
 MAX_UINT256 = 2**256 - 1
+BASE_GAS_PRICE_ORACLE = "0x420000000000000000000000000000000000000F"
+LENDING_TRANSACTION_SIZE_UPPER_BOUND = 512
 AMOUNT_RE = re.compile(r"^[0-9]+(?:[.,][0-9]+)?$")
 ADDRESS_ABI = lambda name: [{
     "type": "function", "name": name, "stateMutability": "view",
@@ -101,6 +103,11 @@ ACCOUNT_DATA_ABI = [{
         {"name": "ltv", "type": "uint256"},
         {"name": "healthFactor", "type": "uint256"},
     ],
+}]
+L1_FEE_UPPER_BOUND_ABI = [{
+    "type": "function", "name": "getL1FeeUpperBound", "stateMutability": "view",
+    "inputs": [{"name": "unsignedTxSize", "type": "uint256"}],
+    "outputs": [{"name": "", "type": "uint256"}],
 }]
 
 
@@ -194,6 +201,7 @@ class AavePreflightRpc(Protocol):
     def priority_fee(self) -> int: ...
     def estimate_gas(self, transaction: Mapping[str, object]) -> int: ...
     def simulate(self, transaction: Mapping[str, object]) -> bytes: ...
+    def l1_fee_upper_bound(self, transaction_size: int, block: int) -> int: ...
 
 
 class Web3AavePreflightRpc:
@@ -267,6 +275,12 @@ class Web3AavePreflightRpc:
 
     def simulate(self, transaction: Mapping[str, object]) -> bytes:
         return bytes(self.web3.eth.call(dict(transaction)))
+
+    def l1_fee_upper_bound(self, transaction_size: int, block: int) -> int:
+        contract = self._contract(BASE_GAS_PRICE_ORACLE, L1_FEE_UPPER_BOUND_ABI)
+        return int(contract.functions.getL1FeeUpperBound(
+            transaction_size,
+        ).call(block_identifier=block))
 
 
 RpcFactory = Callable[[], AavePreflightRpc]
@@ -384,7 +398,16 @@ class LendingPreflightService:
             raise LendingPreflightError(LendingPreflightCode.GAS_ESTIMATE_FAILED) from exc
         if gas <= 0 or max_fee <= 0:
             raise LendingPreflightError(LendingPreflightCode.GAS_ESTIMATE_FAILED)
-        max_total_fee = gas * max_fee
+        l2_fee_ceiling = gas * max_fee
+        try:
+            l1_fee_upper_bound = rpc.l1_fee_upper_bound(
+                LENDING_TRANSACTION_SIZE_UPPER_BOUND, block,
+            )
+        except Exception as exc:
+            raise LendingPreflightError(LendingPreflightCode.GAS_ESTIMATE_FAILED) from exc
+        if l1_fee_upper_bound <= 0:
+            raise LendingPreflightError(LendingPreflightCode.GAS_ESTIMATE_FAILED)
+        max_total_fee = l2_fee_ceiling + l1_fee_upper_bound
         if rpc.native_balance(sender, block) < max_total_fee:
             raise LendingPreflightError(LendingPreflightCode.INSUFFICIENT_ETH)
         transaction["gas"] = gas
@@ -403,6 +426,8 @@ class LendingPreflightService:
             "calldata_hash": calldata_hash(calldata), "native_value_wei": "0",
             "nonce": str(nonce), "gas": str(gas), "max_fee_per_gas_wei": str(max_fee),
             "max_priority_fee_per_gas_wei": str(priority_fee),
+            "l2_fee_ceiling_wei": str(l2_fee_ceiling),
+            "l1_fee_upper_bound_wei": str(l1_fee_upper_bound),
             "max_total_fee_wei": str(max_total_fee), "block_number": str(block),
             "observed_at": timestamp(datetime.fromtimestamp(block_time, UTC)),
             "created_at": timestamp(now), "expires_at": timestamp(expires),
@@ -422,6 +447,10 @@ class LendingPreflightService:
             "target": target, "method": next_action,
             "calldata_hash": material["calldata_hash"], "native_value_wei": "0",
             "nonce": str(nonce), "gas": str(gas),
+            "max_fee_per_gas_wei": str(max_fee),
+            "max_priority_fee_per_gas_wei": str(priority_fee),
+            "l2_fee_ceiling_wei": str(l2_fee_ceiling),
+            "l1_fee_upper_bound_wei": str(l1_fee_upper_bound),
             "max_total_fee_wei": str(max_total_fee), "block_number": str(block),
             "observed_at": material["observed_at"], "expires_at": material["expires_at"],
             "preview_digest": digest, "checks": checks,
@@ -501,6 +530,8 @@ def unavailable_preview(
         "amount_mode": amount_mode, "amount_atomic": None, "display_amount": None,
         "target": None, "method": None, "calldata_hash": None,
         "native_value_wei": "0", "nonce": None, "gas": None,
+        "max_fee_per_gas_wei": None, "max_priority_fee_per_gas_wei": None,
+        "l2_fee_ceiling_wei": None, "l1_fee_upper_bound_wei": None,
         "max_total_fee_wei": None, "block_number": None, "observed_at": None,
         "expires_at": None, "preview_digest": None, "checks": [],
         "caveats": [reason],

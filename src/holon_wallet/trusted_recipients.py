@@ -10,7 +10,8 @@ from typing import Any, Mapping
 
 from web3 import Web3
 
-from holon_policy import Policy, RecipientRule, TransferRule, policy_digest
+from holon_lending.action_profiles import ACTION_PROFILES_DIGEST
+from holon_policy import LendingRule, Policy, RecipientRule, TransferRule, policy_digest
 
 from .public_data import BASE_USDC, ETHEREUM_USDC, NETWORK_BY_ID
 from .storage import StorageError, WalletPaths, atomic_write_json, read_json
@@ -23,7 +24,7 @@ from .transfer import (
     parse_transfer_amount,
 )
 
-DRAFT_SCHEMA_VERSION = "1"
+DRAFT_SCHEMA_VERSION = "2"
 MAX_DRAFT_BYTES = 64 * 1024
 ENVELOPE_FIELDS = frozenset({
     "draft_schema_version", "policy", "policy_digest", "recipient_labels",
@@ -127,6 +128,8 @@ class TrustedRouteDraft:
 @dataclass(frozen=True, slots=True)
 class TrustedPolicyDraft:
     routes: tuple[TrustedRouteDraft, ...] = ()
+    lending_max_amount_atomic: str | None = None
+    lending_max_total_fee_wei: str | None = None
 
     def canonical(self) -> "TrustedPolicyDraft":
         if any(route.key not in ROUTE_ORDER for route in self.routes):
@@ -140,7 +143,9 @@ class TrustedPolicyDraft:
             )
             for route in sorted(self.routes, key=lambda item: ROUTE_ORDER[item.key])
         )
-        return TrustedPolicyDraft(routes)
+        return TrustedPolicyDraft(
+            routes, self.lending_max_amount_atomic, self.lending_max_total_fee_wei,
+        )
 
     def route(self, network: str, asset: str) -> TrustedRouteDraft | None:
         return next(
@@ -166,12 +171,23 @@ class TrustedPolicyDraft:
         routes = tuple(item for item in self.routes if item.key != route.key) + (route,)
         if len(routes) > len(ROUTE_ORDER):
             raise TrustedDraftError("Too many transfer routes")
-        return TrustedPolicyDraft(routes).canonical()
+        return TrustedPolicyDraft(
+            routes, self.lending_max_amount_atomic, self.lending_max_total_fee_wei,
+        ).canonical()
 
     def without_route(self, network: str, asset: str) -> "TrustedPolicyDraft":
-        return TrustedPolicyDraft(tuple(
-            item for item in self.routes if item.key != (network, asset)
-        )).canonical()
+        return TrustedPolicyDraft(
+            tuple(item for item in self.routes if item.key != (network, asset)),
+            self.lending_max_amount_atomic, self.lending_max_total_fee_wei,
+        ).canonical()
+
+    def with_lending_limits(self, amount: str, fee: str) -> "TrustedPolicyDraft":
+        amount_atomic = parse_cap(amount, "usdc")
+        fee_wei = parse_fee_cap(fee)
+        return TrustedPolicyDraft(self.routes, amount_atomic, fee_wei).canonical()
+
+    def without_lending_limits(self) -> "TrustedPolicyDraft":
+        return TrustedPolicyDraft(self.routes).canonical()
 
     def to_envelope(self) -> dict[str, Any]:
         canonical = self.canonical()
@@ -207,7 +223,18 @@ class TrustedPolicyDraft:
             for route in canonical.routes
         )
         try:
-            policy = Policy.from_dict(Policy("2", "1", False, rules).to_dict())
+            lending_rules = ()
+            if self.lending_max_amount_atomic is not None or self.lending_max_total_fee_wei is not None:
+                if self.lending_max_amount_atomic is None or self.lending_max_total_fee_wei is None:
+                    raise TrustedDraftError("Lending limits are incomplete")
+                lending_rules = (LendingRule(
+                    "lending", "1", "aave-v3-base-usdc", "1", "base", "usdc",
+                    8453, ("approve", "supply"), self.lending_max_amount_atomic,
+                    self.lending_max_total_fee_wei, ACTION_PROFILES_DIGEST,
+                ),)
+            policy = Policy.from_dict(Policy(
+                "3", "2", False, rules, False, lending_rules,
+            ).to_dict())
         except ValueError as exc:
             raise TrustedDraftError("Invalid draft policy") from exc
         policy_value = policy.to_dict()
@@ -235,7 +262,8 @@ class TrustedPolicyDraft:
     def from_envelope(cls, value: Mapping[str, Any]) -> "TrustedPolicyDraft":
         if not isinstance(value, Mapping) or set(value) != ENVELOPE_FIELDS:
             raise TrustedDraftError("Invalid draft fields")
-        if value.get("draft_schema_version") != DRAFT_SCHEMA_VERSION:
+        draft_version = value.get("draft_schema_version")
+        if draft_version not in {"1", DRAFT_SCHEMA_VERSION}:
             raise TrustedDraftError("Unsupported draft version")
         raw_policy = value.get("policy")
         if not isinstance(raw_policy, Mapping):
@@ -297,23 +325,30 @@ class TrustedPolicyDraft:
             ))
         if labels:
             raise TrustedDraftError("Recipient label has no policy recipient")
-        draft = cls(tuple(routes)).canonical()
-        if draft.to_envelope() != dict(value):
+        lending_amount = None
+        lending_fee = None
+        if policy.lending_rules:
+            lending_amount = policy.lending_rules[0].max_amount_atomic
+            lending_fee = policy.lending_rules[0].max_total_fee_wei
+        draft = cls(tuple(routes), lending_amount, lending_fee).canonical()
+        if draft_version == DRAFT_SCHEMA_VERSION and draft.to_envelope() != dict(value):
             raise TrustedDraftError("Draft is not canonical")
         return draft
 
 
 class TrustedPolicyDraftStore:
     def __init__(self, paths: WalletPaths) -> None:
-        self.path: Path = paths.transfer_policy_draft
+        self.path: Path = paths.authority_policy_draft
+        self.legacy_path: Path = paths.transfer_policy_draft
 
     def load(self) -> TrustedPolicyDraft:
-        if not self.path.exists():
+        path = self.path if self.path.exists() else self.legacy_path
+        if not path.exists():
             return TrustedPolicyDraft()
         try:
-            if self.path.stat().st_size > MAX_DRAFT_BYTES:
+            if path.stat().st_size > MAX_DRAFT_BYTES:
                 raise TrustedDraftError("Draft is oversized")
-            value = read_json(self.path)
+            value = read_json(path)
             return TrustedPolicyDraft.from_envelope(value)
         except (OSError, StorageError, TrustedDraftError, TypeError, ValueError) as exc:
             raise TrustedDraftUnavailable("Trusted recipients draft is unavailable") from exc

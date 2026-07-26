@@ -14,6 +14,7 @@ from holon_policy import (
 from .authority_audit import AuthorityAudit
 from .authority_prepare import prepare
 from .authority_intent import prepare_intent
+from .lending_authority import prepare_lending_authority
 from .authority_responses import REFUSAL_CODES, ResponseMixin
 from .lifecycle import GuardLifecycle
 
@@ -230,6 +231,11 @@ class AuthorityService(ResponseMixin):
                         profile_digest=self.lending_actions.profile.digest,
                     )
             return self._response(request, MessageKind.LENDING_ACTION_PREVIEW, payload)
+        if request.kind is MessageKind.LENDING_AUTHORITY_INTENT:
+            if not self.revalidate_policy() or self.security_failure is not None:
+                return self.security_response(request)
+            assert owner_pid is not None
+            return prepare_lending_authority(self, request, owner_pid)
         if request.kind is MessageKind.PREPARE_TRANSFER:
             if self.security_failure is not None:
                 return self.security_response(request)

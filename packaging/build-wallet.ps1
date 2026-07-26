@@ -18,6 +18,7 @@ $entryPoint = Join-Path $sourceRoot "holon_wallet_app.py"
 $qmlRoot = Join-Path $sourceRoot "holon_wallet\qml"
 $resourceRoot = Join-Path $sourceRoot "holon_wallet\resources"
 $lendingActionProfile = Join-Path $sourceRoot "holon_lending\action-profiles.json"
+$baselinePolicy = Join-Path $sourceRoot "holon_policy\baseline-policy.json"
 New-Item -ItemType Directory -Force -Path $buildRoot | Out-Null
 $previousPythonPath = $env:PYTHONPATH
 
@@ -38,6 +39,7 @@ try {
         --add-data "$qmlRoot;holon_wallet/qml" `
         --add-data "$resourceRoot;holon_wallet/resources" `
         --add-data "$lendingActionProfile;holon_lending" `
+        --add-data "$baselinePolicy;holon_policy" `
         --collect-data bip_utils `
         --collect-all coincurve `
         --collect-data web3 `

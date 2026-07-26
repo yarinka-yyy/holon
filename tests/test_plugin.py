@@ -159,7 +159,7 @@ class FakeContext:
 
 
 class PluginTests(unittest.TestCase):
-    def test_registers_ten_tools_and_two_hooks(self) -> None:
+    def test_registers_authority_tools_and_two_hooks(self) -> None:
         context = FakeContext()
         plugin.register(context)
         self.assertEqual(
@@ -168,8 +168,10 @@ class PluginTests(unittest.TestCase):
                 "holon_health", "holon_open_wallet", "holon_wallet_balances",
                 "holon_lending_compare", "holon_lending_positions",
                 "holon_lending_prepare",
+                "holon_lending_execute",
                 "holon_prepare_transfer", "holon_transfer_status",
                 "holon_cancel_transfer", "holon_recover_transfer",
+                "holon_action_status", "holon_cancel_action", "holon_recover_action",
             ],
         )
         self.assertEqual([name for name, _ in context.hooks], ["on_session_start", "pre_tool_call"])
@@ -183,7 +185,8 @@ class PluginTests(unittest.TestCase):
                 "health", "open_wallet", "wallet_balances", "prepare_transfer",
                 "transfer_status", "cancel_transfer", "recover_transfer",
                 "lending_compare", "lending_positions",
-                "lending_prepare",
+                "lending_prepare", "lending_execute", "action_status",
+                "cancel_action", "recover_action",
             ],
         )
         self.assertFalse(payload["authority_available"])

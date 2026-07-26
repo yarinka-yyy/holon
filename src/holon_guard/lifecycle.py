@@ -198,6 +198,109 @@ class GuardLifecycle(GuardCore):
             self.authority_expires_at = expires.timestamp()
             return self._result(True, "AWAITING_LOCAL_CONFIRMATION", "Protected flow started."), payload
 
+    def start_lending_intent(
+        self, owner_pid: int, action_id: str, fingerprint: str,
+        intent: dict[str, object], policy_version: str, fee_cap_wei: str,
+        policy_revision: int, policy_digest: str, action_profile_digest: str,
+    ) -> tuple[GuardResult, dict[str, object] | None]:
+        """Start one fresh approve or supply action; never chains the second action."""
+        with self._lock:
+            try:
+                self.ledger.preflight(action_id, fingerprint)
+            except ActionLedgerFailure as exc:
+                return self._result(False, exc.code, "Action cannot be started."), None
+            if self.snapshot.state is not GuardState.NORMAL:
+                code = "SIGNING_DISABLED" if self.snapshot.state is GuardState.SIGNING_DISABLED else RefusalCode.ACTION_ALREADY_ACTIVE.value
+                return self._result(False, code, "Lending authority is unavailable."), None
+            if not self.owner_probe.is_alive(owner_pid):
+                return self._result(False, "OWNER_UNAVAILABLE", "Flow owner is unavailable."), None
+            try:
+                self.ledger.begin(action_id, fingerprint)
+            except ActionLedgerFailure:
+                return self.disable_signing(SecurityCode.ACTION_STATE_INVALID.value), None
+            flow_id = self.id_factory()
+            created = datetime.fromtimestamp(self.clock(), UTC)
+            expires = created + timedelta(minutes=5)
+            entering = GuardSnapshot(
+                GuardState.ENTERING, flow_id, owner_pid, None, "FLOW_STARTING",
+                self.clock(), action_id, fingerprint,
+            )
+            if not self._persist(entering):
+                return self._fail_started_action("STATE_WRITE_FAILED"), None
+            request = {
+                "authority_version": AUTHORITY_VERSION, "kind": "prepare_lending_action",
+                "flow_id": flow_id, "action_id": action_id,
+                "policy_version": policy_version, "policy_revision": policy_revision,
+                "policy_digest": policy_digest,
+                "action_profile_digest": action_profile_digest, **intent,
+                "created_at": created.isoformat().replace("+00:00", "Z"),
+                "expires_at": expires.isoformat().replace("+00:00", "Z"),
+            }
+            try:
+                prepared = self.wallet.prepare_lending_action(request)
+            except Exception:
+                return self._recover("WALLET_PREPARATION_FAILED"), None
+            if not prepared.ok or prepared.payload is None or prepared.handle is None:
+                if prepared.code == "WALLET_PREPARATION_AMBIGUOUS":
+                    return self._recover(prepared.code), None
+                try:
+                    self.ledger.terminalize(ActionState.FAILED, prepared.code)
+                except ActionLedgerFailure:
+                    return self.disable_signing(SecurityCode.ACTION_STATE_INVALID.value), None
+                self._persist(idle_snapshot(GuardState.NORMAL, prepared.code, self.clock()))
+                return self._result(False, prepared.code, "Wallet could not prepare the action."), prepared.payload
+            payload = prepared.payload
+            try:
+                fee = int(str(payload["max_total_fee_wei"]))
+                digest = str(payload["prepared_digest"])
+                if fee <= 0 or fee > int(fee_cap_wei):
+                    raise ValueError
+            except (KeyError, TypeError, ValueError):
+                cancel = {
+                    "authority_version": AUTHORITY_VERSION, "kind": "cancel_action",
+                    "flow_id": flow_id, "action_id": action_id,
+                    "prepared_digest": str(payload.get("prepared_digest", "")),
+                }
+                if not self.wallet.cancel_transfer(cancel):
+                    self.wallet_handle = prepared.handle
+                    return self._recover("WALLET_CALLBACK_FAILED"), None
+                try:
+                    self.ledger.terminalize(ActionState.FAILED, "MAX_FEE_EXCEEDED")
+                except ActionLedgerFailure:
+                    return self.disable_signing(SecurityCode.ACTION_STATE_INVALID.value), None
+                self._persist(idle_snapshot(GuardState.NORMAL, "MAX_FEE_EXCEEDED", self.clock()))
+                return self._result(False, "MAX_FEE_EXCEEDED", "Maximum fee exceeds policy."), None
+            self.wallet_handle = prepared.handle
+            active = GuardSnapshot(
+                GuardState.ACTIVE, flow_id, owner_pid, prepared.handle.pid,
+                "FLOW_ACTIVE", self.clock(), action_id, fingerprint,
+            )
+            if not self._persist(active):
+                try:
+                    self.wallet.cancel_transfer({
+                        "authority_version": AUTHORITY_VERSION, "kind": "cancel_action",
+                        "flow_id": flow_id, "action_id": action_id,
+                        "prepared_digest": digest,
+                    })
+                except Exception:
+                    pass
+                return self._fail_started_action("STATE_WRITE_FAILED"), None
+            try:
+                self.ledger.transition(ActionState.AWAITING_LOCAL_CONFIRMATION, "AWAITING_LOCAL_CONFIRMATION")
+            except ActionLedgerFailure:
+                try:
+                    self.wallet.cancel_transfer({
+                        "authority_version": AUTHORITY_VERSION, "kind": "cancel_action",
+                        "flow_id": flow_id, "action_id": action_id,
+                        "prepared_digest": digest,
+                    })
+                except Exception:
+                    pass
+                return self.disable_signing(SecurityCode.ACTION_STATE_INVALID.value), None
+            self.prepared_digest = digest
+            self.authority_expires_at = expires.timestamp()
+            return self._result(True, "AWAITING_LOCAL_CONFIRMATION", "Protected flow started."), payload
+
     def accept_wallet_status(self, update: dict[str, object]) -> bool:
         with self._lock:
             if (

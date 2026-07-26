@@ -19,9 +19,26 @@ class AuthorityAudit:
         policy_version: str | None = None,
     ) -> dict:
         payload = request.payload
-        if request.kind is MessageKind.TRANSFER_INTENT:
+        if request.kind in {
+            MessageKind.TRANSFER_INTENT, MessageKind.LENDING_AUTHORITY_INTENT,
+        }:
             if amount_atomic is None or policy_version is None:
                 raise ValueError("Canonical intent audit fields are required")
+            if request.kind is MessageKind.LENDING_AUTHORITY_INTENT:
+                from holon_lending import ActionProfilesState
+                profile = ActionProfilesState.load().profile
+                if profile is None:
+                    raise ValueError("Lending profile is unavailable")
+                return {
+                    "request_id": request.request_id,
+                    "action_id": request.action_id,
+                    "action_type": "lending",
+                    "network": "base",
+                    "recipient": profile.pool,
+                    "asset": "usdc",
+                    "amount_atomic": amount_atomic,
+                    "policy_version": policy_version,
+                }
             return {
                 "request_id": request.request_id,
                 "action_id": request.action_id,

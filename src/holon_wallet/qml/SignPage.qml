@@ -3,7 +3,9 @@ import "."
 
 TransactionFlowShell {
     id: root
-    title: "Confirm Transaction"; subtitle: "Authorize this exact transfer once"
+    title: "Confirm Transaction"
+    subtitle: action.actionType === "lending"
+        ? "Authorize this exact Aave action once" : "Authorize this exact transfer once"
     activeStep: 1; onBackRequested: walletController.cancelMainnetExecution()
     property bool explicitlyConfirmed: false
     property var action: walletController.transferAction
@@ -31,7 +33,9 @@ TransactionFlowShell {
         }
         Text {
             x: 18; y: 48; width: 350
-            text: "To " + (root.action.recipient || "")
+            text: (root.action.actionType === "lending"
+                ? "Aave " + (root.action.method || "action") + " · "
+                : "To ") + (root.action.transactionTarget || root.action.recipient || "")
             color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 11
             wrapMode: Text.WrapAnywhere
         }
@@ -76,7 +80,8 @@ TransactionFlowShell {
         }
         Text {
             x: 60; width: 378; anchors.verticalCenter: parent.verticalCenter
-            text: "I confirm this irreversible transfer of "
+            text: "I confirm this irreversible "
+                + (root.action.actionType === "lending" ? "Aave action for " : "transfer of ")
                 + (root.action.amount || "the exact amount") + " on "
                 + (root.action.network || "the selected network") + "."
             wrapMode: Text.Wrap; color: Design.text
@@ -94,7 +99,9 @@ TransactionFlowShell {
     }
     FormButton {
         objectName: "mainnetSendButton"; x: 0; y: 468; width: 458; height: 56
-        label: "Sign and send " + (root.action.token || "asset")
+        label: root.action.actionType === "lending"
+            ? "Sign and submit " + (root.action.method || "action")
+            : "Sign and send " + (root.action.token || "asset")
         controlEnabled: root.readyToSign
         onTriggered: root.submit()
     }

@@ -16,7 +16,14 @@ from web3 import Web3
 from holon_contracts import MessageKind
 from holon_guard_ipc import PipeClient
 from holon_guard_ipc.client import wait_for_pipe
-from holon_lending import AAVE_CONTRACTS, BASE_USDC
+from holon_guard.action_store import ActionStateStore
+from holon_guard.request_store import RequestStateStore
+from holon_guard.store import SnapshotStore
+from holon_journal import JournalStore
+from holon_lending import (
+    AAVE_CONTRACTS, ACTION_PROFILES_DIGEST, BASE_USDC,
+)
+from holon_policy import LendingRule, Policy, PolicyRevisionStore, policy_digest
 from holon_wallet.settings import SettingsStore
 from holon_wallet.storage import WalletPaths
 from holon_wallet.vault import VaultRepository
@@ -59,14 +66,14 @@ class RpcFixture(BaseHTTPRequestHandler):
 
             return {
                 "number": hex(50_000_000), "timestamp": hex(int(time.time()) - 1),
-                "baseFeePerGas": hex(1_000_000_000),
+                "baseFeePerGas": hex(10_000_000),
             }
         if method == "eth_getCode":
             return "0x01"
         if method == "eth_getTransactionCount":
             return "0x7"
         if method == "eth_maxPriorityFeePerGas":
-            return hex(100_000_000)
+            return hex(1_000_000)
         if method == "eth_estimateGas":
             return hex(75_000)
         if method == "eth_getBalance":
@@ -103,6 +110,8 @@ class RpcFixture(BaseHTTPRequestHandler):
             return _result(["uint256"], [10_000_000])
         if data.startswith(_selector("allowance(address,address)")):
             return _result(["uint256"], [0])
+        if data.startswith(_selector("getL1FeeUpperBound(uint256)")):
+            return _result(["uint256"], [20_000])
         if target == BASE_USDC.lower() and data.startswith(_selector("approve(address,uint256)")):
             return _result(["bool"], [True])
         raise AssertionError(f"Unexpected eth_call: {target} {data[:8]}")
@@ -156,6 +165,85 @@ def test_packaged_guard_wallet_preview_with_offline_rpc(tmp_path: Path) -> None:
         assert response.payload["execution_available"] is False
         assert "eth_sendRawTransaction" not in RpcFixture.calls
         assert not (paths.data_dir / "action-state.json").exists()
+    finally:
+        subprocess.run(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=10,
+        )
+        process.wait(timeout=10)
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=2)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Packaged Windows executables")
+def test_packaged_lending_authority_starts_and_cancels_without_signing(tmp_path: Path) -> None:
+    guard = Path(os.environ.get("HOLON_TEST_GUARD_EXE", ""))
+    wallet = Path(os.environ.get("HOLON_TEST_WALLET_EXE", ""))
+    if not guard.is_file() or not wallet.is_file():
+        pytest.skip("Packaged Guard and Wallet paths were not provided")
+    local_root = tmp_path / "authority-local"
+    paths = WalletPaths(local_root / "Holon" / "data")
+    repository = VaultRepository(paths)
+    record = repository.new_record(generate_mnemonic(), "Packaged Authority Fixture")
+    repository.create_new("fixture-password", record)
+    SettingsStore(paths).save_active_id(record.summary.profile_id)
+    SnapshotStore(paths.data_dir / "guard-state.json").bootstrap_normal_for_test()
+    ActionStateStore(paths.data_dir / "action-state.json").bootstrap_empty_for_test()
+    RequestStateStore(
+        paths.data_dir / "request-control-state.json",
+    ).bootstrap_empty_for_test()
+    JournalStore(paths.data_dir / "journal.jsonl").bootstrap_empty_for_test()
+    baseline = Policy("2", "1", False, ())
+    rule = LendingRule(
+        "lending", "1", "aave-v3-base-usdc", "1", "base", "usdc", 8453,
+        ("approve", "supply"), "5000000", "100000000000000",
+        ACTION_PROFILES_DIGEST,
+    )
+    active = Policy("3", "2", False, (), True, (rule,))
+    PolicyRevisionStore(paths.data_dir, baseline).apply(
+        active, "d" * 64, 0, policy_digest(baseline.to_dict()),
+        require_disabled=False,
+    )
+
+    RpcFixture.calls = []
+    server = ThreadingHTTPServer(("127.0.0.1", 0), RpcFixture)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    pipe = rf"\\.\pipe\Holon.Guard.packaged-authority.{uuid.uuid4()}"
+    environment = dict(os.environ)
+    environment.update({
+        "LOCALAPPDATA": str(local_root),
+        "HOLON_BASE_RPC_URL": f"http://127.0.0.1:{server.server_port}",
+        "QT_QPA_PLATFORM": "offscreen",
+    })
+    process = subprocess.Popen(
+        [str(guard.resolve()), "--pipe-name", pipe, "--wallet-path", str(wallet.resolve())],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        env=environment, creationflags=0x08000000,
+    )
+    action_id = f"act-{uuid.uuid4()}"
+    try:
+        wait_for_pipe(pipe, 20.0)
+        client = PipeClient(pipe, 2.0, 40.0)
+        response = client.request(
+            MessageKind.LENDING_AUTHORITY_INTENT,
+            {
+                "module_id": "lending", "module_version": "1",
+                "protocol_profile_id": "aave-v3-base-usdc",
+                "protocol_profile_version": "1", "network": "base", "asset": "usdc",
+                "beneficiary_mode": "active_wallet_account", "action": "supply",
+                "amount_mode": "exact", "amount": "1",
+            },
+            action_id=action_id, owner_pid=os.getpid(), response_timeout=40.0,
+        )
+        assert response.kind is MessageKind.PROTECTED_FLOW_STARTED, response.payload
+        assert response.payload["code"] == "AWAITING_LOCAL_CONFIRMATION"
+        cancelled = client.request(MessageKind.CANCEL_ACTION, action_id=action_id)
+        assert cancelled.kind is MessageKind.ACTION_STATUS
+        assert cancelled.payload["code"] == "ACTION_CANCELLED"
+        assert "eth_sendRawTransaction" not in RpcFixture.calls
     finally:
         subprocess.run(
             ["taskkill", "/PID", str(process.pid), "/T", "/F"],

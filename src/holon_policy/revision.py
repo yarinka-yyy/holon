@@ -80,8 +80,6 @@ class PolicyRevision:
     def to_dict(self) -> dict[str, Any]:
         if type(self.policy_revision) is not int or self.policy_revision <= 0:
             raise PolicyRevisionError("Invalid policy revision")
-        if self.policy.authority_enabled:
-            raise PolicyRevisionError("Policy authority must remain disabled")
         policy_value = self.policy.to_dict()
         return {
             "revision_schema_version": REVISION_SCHEMA_VERSION,
@@ -105,8 +103,6 @@ class PolicyRevision:
             policy = Policy.from_dict(raw_policy)
         except PolicyError as exc:
             raise PolicyRevisionError("Invalid revision policy") from exc
-        if policy.authority_enabled:
-            raise PolicyRevisionError("Policy authority must remain disabled")
         if _hex_digest(value.get("policy_digest")) != policy_digest(policy.to_dict()):
             raise PolicyRevisionError("Revision policy digest does not match")
         result = cls(number, policy, _hex_digest(value.get("source_draft_digest")))
@@ -152,19 +148,35 @@ class PolicyRevisionStore:
     def __init__(self, data_dir: Path, baseline_policy: Policy) -> None:
         self.data_dir = data_dir
         self.baseline_policy = baseline_policy
-        self.active_path = data_dir / "transfer-policy-active.json"
+        self.active_path = data_dir / "authority-policy-active.json"
+        self.legacy_active_path = data_dir / "transfer-policy-active.json"
 
     def slot_path(self, slot: str) -> Path:
+        if slot not in SLOTS:
+            raise PolicyRevisionError("Invalid policy slot")
+        return self.data_dir / f"authority-policy-slot-{slot}.json"
+
+    def legacy_slot_path(self, slot: str) -> Path:
         if slot not in SLOTS:
             raise PolicyRevisionError("Invalid policy slot")
         return self.data_dir / f"transfer-policy-slot-{slot}.json"
 
     def load(self) -> PolicySnapshot:
-        if not self.active_path.exists():
+        active_path = (
+            self.active_path if self.active_path.exists()
+            else self.legacy_active_path if self.legacy_active_path.exists()
+            else None
+        )
+        if active_path is None:
             return PolicySnapshot.baseline(self.baseline_policy)
         try:
-            pointer = ActivePolicyPointer.from_dict(self._read(self.active_path))
-            raw_revision = self._read(self.slot_path(pointer.active_slot))
+            pointer = ActivePolicyPointer.from_dict(self._read(active_path))
+            slot_path = (
+                self.slot_path(pointer.active_slot)
+                if active_path == self.active_path
+                else self.legacy_slot_path(pointer.active_slot)
+            )
+            raw_revision = self._read(slot_path)
             revision = PolicyRevision.from_dict(raw_revision)
             if (
                 revision.policy_revision != pointer.policy_revision
@@ -181,6 +193,7 @@ class PolicyRevisionStore:
     def apply(
         self, policy: Policy, source_draft_digest: str,
         expected_revision: int, expected_policy_digest: str, *, repair: bool = False,
+        require_disabled: bool = True,
     ) -> tuple[PolicySnapshot, bool]:
         try:
             current = self.load()
@@ -195,7 +208,9 @@ class PolicyRevisionStore:
             or current.policy_digest != _hex_digest(expected_policy_digest)
         ):
             raise PolicyRevisionStale("Active policy changed; review it again")
-        if policy.authority_enabled:
+        if require_disabled and (
+            policy.authority_enabled or policy.lending_authority_enabled
+        ):
             raise PolicyRevisionUnavailable("Policy authority must remain disabled")
         if (
             not repair
@@ -227,24 +242,31 @@ class PolicyRevisionStore:
 
     def _recoverable(self) -> tuple[PolicySnapshot, str | None]:
         candidates: list[tuple[PolicySnapshot, str]] = []
-        for slot in SLOTS:
-            try:
-                revision = PolicyRevision.from_dict(self._read(self.slot_path(slot)))
-            except (OSError, UnicodeError, json.JSONDecodeError, PolicyRevisionError):
-                continue
-            candidates.append((PolicySnapshot(
-                revision.policy_revision, policy_digest(revision.policy.to_dict()),
-                revision.policy, revision.source_draft_digest,
-            ), slot))
+        for legacy in (False, True):
+            for slot in SLOTS:
+                path = self.legacy_slot_path(slot) if legacy else self.slot_path(slot)
+                try:
+                    revision = PolicyRevision.from_dict(self._read(path))
+                except (OSError, UnicodeError, json.JSONDecodeError, PolicyRevisionError):
+                    continue
+                candidates.append((PolicySnapshot(
+                    revision.policy_revision, policy_digest(revision.policy.to_dict()),
+                    revision.policy, revision.source_draft_digest,
+                ), slot))
         if not candidates:
             return PolicySnapshot.baseline(self.baseline_policy), None
         return max(candidates, key=lambda item: item[0].policy_revision)
 
     def _active_slot(self) -> str | None:
-        if not self.active_path.exists():
+        active_path = (
+            self.active_path if self.active_path.exists()
+            else self.legacy_active_path if self.legacy_active_path.exists()
+            else None
+        )
+        if active_path is None:
             return None
         try:
-            return ActivePolicyPointer.from_dict(self._read(self.active_path)).active_slot
+            return ActivePolicyPointer.from_dict(self._read(active_path)).active_slot
         except (OSError, UnicodeError, json.JSONDecodeError, PolicyRevisionError) as exc:
             raise PolicyRevisionUnavailable("Active transfer policy is unavailable") from exc
 

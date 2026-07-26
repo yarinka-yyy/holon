@@ -28,6 +28,10 @@ from holon_policy import (
     Policy, PolicyEngine, PolicyRevisionStore, PolicyRevisionUnavailable,
     PolicySnapshot, policy_digest,
 )
+from holon_lending import ActionProfilesState
+from holon_lending.preflight import (
+    BASE_GAS_PRICE_ORACLE, Web3AavePreflightRpc, encode_approve, encode_supply,
+)
 
 from .approval import (
     REVOKE_ACTION_TYPE,
@@ -211,6 +215,12 @@ class MainnetBroadcastPolicy:
 
     def display_for(self, action: PreparedTransferAction) -> str:
         if self.shared_engine is not None:
+            if action.action_type == "lending":
+                rule = next(iter(self.shared_engine.policy.lending_rules), None)
+                return (
+                    OfflineSigningPolicy(int(rule.max_total_fee_wei)).display
+                    if rule is not None else "Not configured"
+                )
             rule = self._shared_rule(action.network_id, action.asset_id)
             return (
                 OfflineSigningPolicy(int(rule.max_total_fee_wei)).display
@@ -220,6 +230,9 @@ class MainnetBroadcastPolicy:
 
     def amount_display_for(self, action: PreparedTransferAction) -> str:
         if self.shared_engine is not None:
+            if action.action_type == "lending":
+                rule = next(iter(self.shared_engine.policy.lending_rules), None)
+                return str(rule.max_amount_atomic) if rule is not None else "Not configured"
             rule = self._shared_rule(action.network_id, action.asset_id)
             recipient = self._shared_recipient_limit(rule, action.recipient)
             if rule is None or recipient is None:
@@ -254,6 +267,25 @@ class MainnetBroadcastPolicy:
             return MainnetTransferCode.AMOUNT_LIMIT_EXCEEDED
         return None
 
+    def lending_intent_code(
+        self, amount_atomic: int, action_profile_digest: str,
+        policy_version: str | None = None,
+    ) -> MainnetTransferCode | None:
+        """Reject a semantic Lending intent before Wallet performs any RPC."""
+        if not self.refresh() or self.shared_engine is None:
+            return MainnetTransferCode.POLICY_UNAVAILABLE
+        if (
+            policy_version is not None
+            and policy_version != self.shared_engine.policy.policy_version
+        ):
+            return MainnetTransferCode.POLICY_VERSION_MISMATCH
+        decision, _rule = self.shared_engine.evaluate_lending_intent({
+            "module_id": "lending", "protocol_profile_id": "aave-v3-base-usdc",
+            "network": "base", "asset": "usdc", "action": "supply",
+            "amount_mode": "exact", "amount_atomic": amount_atomic,
+        }, action_profile_digest)
+        return self._shared_code(decision.code) if not decision.allowed else None
+
     def maximum_draft_amount(
         self,
         network_id: str,
@@ -287,6 +319,17 @@ class MainnetBroadcastPolicy:
         if not self.matches(action.policy_revision, action.policy_digest):
             return MainnetTransferCode.REVALIDATION_FAILED
         if self.shared_engine is not None:
+            if action.action_type == "lending":
+                decision, rule = self.shared_engine.evaluate_lending_intent({
+                    "module_id": "lending", "protocol_profile_id": "aave-v3-base-usdc",
+                    "network": "base", "asset": "usdc", "action": "supply",
+                    "amount_mode": "exact", "amount_atomic": action.amount_atomic,
+                }, action.action_profile_digest)
+                if decision.allowed and rule is not None:
+                    decision = self.shared_engine.evaluate_lending_prepared(
+                        action.method, action.amount_atomic, action.max_total_fee_wei, rule,
+                    )
+                return self._shared_code(decision.code) if not decision.allowed else None
             decision = self.shared_engine.evaluate_transfer({
                 "policy_version": self.shared_engine.policy.policy_version,
                 "action_type": "transfer",
@@ -413,6 +456,26 @@ class MainnetRpc(Protocol):
     def estimate_gas(self, transaction: Mapping[str, object]) -> int: ...
 
     def send_raw_transaction(self, raw_transaction: bytes) -> str: ...
+    def l1_fee(self, raw_transaction: bytes) -> int: ...
+
+    def lending_has_code(self, address: str, block: int) -> bool: ...
+    def lending_resolve_pool(self, provider: str, block: int) -> str: ...
+    def lending_token_decimals(self, token: str, block: int) -> int: ...
+    def lending_reserve_a_token(self, provider: str, asset: str, block: int) -> str: ...
+    def lending_reserve_configuration(
+        self, provider: str, asset: str, block: int,
+    ) -> tuple[int, bool, bool]: ...
+    def lending_reserve_caps(
+        self, provider: str, asset: str, block: int,
+    ) -> tuple[int, int]: ...
+    def lending_reserve_paused(self, provider: str, asset: str, block: int) -> bool: ...
+    def lending_reserve_total_supply(self, provider: str, asset: str, block: int) -> int: ...
+    def lending_account_debt(self, pool: str, account: str, block: int) -> int: ...
+    def lending_token_balance(self, token: str, account: str, block: int) -> int: ...
+    def lending_allowance(
+        self, token: str, owner: str, spender: str, block: int,
+    ) -> int: ...
+    def lending_simulate(self, transaction: Mapping[str, object]) -> bytes: ...
 
     def transaction(self, transaction_hash: str) -> Mapping[str, object] | None: ...
 
@@ -431,6 +494,7 @@ class Web3MainnetRpc:
             exception_retry_configuration=None,
         )
         self._web3 = Web3(provider)
+        self._aave = Web3AavePreflightRpc(endpoint, timeout_seconds)
 
     def chain_id(self) -> int:
         return int(self._call(lambda: self._web3.eth.chain_id))
@@ -469,6 +533,59 @@ class Web3MainnetRpc:
         return Web3.to_hex(
             self._call(lambda: self._web3.eth.send_raw_transaction(raw_transaction))
         )
+
+    def l1_fee(self, raw_transaction: bytes) -> int:
+        oracle = self._web3.eth.contract(
+            address=BASE_GAS_PRICE_ORACLE,
+            abi=[{
+                "type": "function", "name": "getL1Fee", "stateMutability": "view",
+                "inputs": [{"name": "_data", "type": "bytes"}],
+                "outputs": [{"name": "", "type": "uint256"}],
+            }],
+        )
+        return int(self._call(lambda: oracle.functions.getL1Fee(raw_transaction).call()))
+
+    def lending_has_code(self, address: str, block: int) -> bool:
+        return self._aave.has_code(address, block)
+
+    def lending_resolve_pool(self, provider: str, block: int) -> str:
+        return self._aave.resolve_pool(provider, block)
+
+    def lending_token_decimals(self, token: str, block: int) -> int:
+        return self._aave.token_decimals(token, block)
+
+    def lending_reserve_a_token(self, provider: str, asset: str, block: int) -> str:
+        return self._aave.reserve_a_token(provider, asset, block)
+
+    def lending_reserve_configuration(
+        self, provider: str, asset: str, block: int,
+    ) -> tuple[int, bool, bool]:
+        return self._aave.reserve_configuration(provider, asset, block)
+
+    def lending_reserve_caps(
+        self, provider: str, asset: str, block: int,
+    ) -> tuple[int, int]:
+        return self._aave.reserve_caps(provider, asset, block)
+
+    def lending_reserve_paused(self, provider: str, asset: str, block: int) -> bool:
+        return self._aave.reserve_paused(provider, asset, block)
+
+    def lending_reserve_total_supply(self, provider: str, asset: str, block: int) -> int:
+        return self._aave.reserve_total_supply(provider, asset, block)
+
+    def lending_account_debt(self, pool: str, account: str, block: int) -> int:
+        return self._aave.account_debt(pool, account, block)
+
+    def lending_token_balance(self, token: str, account: str, block: int) -> int:
+        return self._aave.token_balance(token, account, block)
+
+    def lending_allowance(
+        self, token: str, owner: str, spender: str, block: int,
+    ) -> int:
+        return self._aave.allowance(token, owner, spender, block)
+
+    def lending_simulate(self, transaction: Mapping[str, object]) -> bytes:
+        return self._aave.simulate(transaction)
 
     def transaction(self, transaction_hash: str) -> Mapping[str, object] | None:
         try:
@@ -601,6 +718,18 @@ class MainnetTransferExecutor:
                     MainnetTransferCode.CANCELLED
                     if permit.cancelled else MainnetTransferCode.SIGNING_FAILED,
                 )
+            if action.action_type == "lending":
+                try:
+                    exact_l1_fee = rpc.l1_fee(bytes(signed.raw_transaction))
+                    total_fee = action.l2_fee_ceiling_wei + exact_l1_fee
+                except Exception:
+                    return self._failure(action, MainnetTransferCode.REVALIDATION_FAILED)
+                if (
+                    exact_l1_fee <= 0
+                    or total_fee > action.max_total_fee_wei
+                    or int(rpc.native_balance(action.sender)) < total_fee
+                ):
+                    return self._failure(action, MainnetTransferCode.FEE_LIMIT_EXCEEDED)
             transaction_hash = Web3.to_hex(signed.hash)
             try:
                 self.history_store.update_status(
@@ -715,7 +844,7 @@ class MainnetTransferExecutor:
             broadcast_attempted,
             history_available,
             action.simulation,
-            REVOKE_ACTION_TYPE if isinstance(action, PreparedRevokeAction) else "transfer",
+            REVOKE_ACTION_TYPE if isinstance(action, PreparedRevokeAction) else action.action_type,
         )
 
 
@@ -780,7 +909,11 @@ class BroadcastReceiptTracker:
             if receipt is not None:
                 transaction = (
                     rpc.transaction(record.transaction_hash)
-                    if record.token == "ETH" or record.action_type == REVOKE_ACTION_TYPE
+                    if (
+                        record.token == "ETH"
+                        or record.action_type == REVOKE_ACTION_TYPE
+                        or record.action_type.startswith("lending_")
+                    )
                     else None
                 )
                 observed = _receipt_status(receipt, record, transaction)
@@ -905,6 +1038,8 @@ def _evaluate_policy(
 def _final_revalidation(rpc: MainnetRpc, action: PreparedTransactionAction) -> bool:
     if isinstance(action, PreparedRevokeAction):
         return _final_revoke_revalidation(rpc, action)
+    if action.action_type == "lending":
+        return _final_lending_revalidation(rpc, action)
     tx = action.transaction
     route = transfer_route(action.network_id, action.asset_id)
     if rpc.chain_id() != route.chain_id:
@@ -950,6 +1085,85 @@ def _final_revalidation(rpc: MainnetRpc, action: PreparedTransactionAction) -> b
     )
 
 
+def _final_lending_revalidation(rpc: MainnetRpc, action: PreparedTransferAction) -> bool:
+    profiles = ActionProfilesState.load()
+    profile = profiles.profile
+    if profile is None or profile.digest != action.action_profile_digest:
+        return False
+    tx = action.transaction
+    try:
+        block, base_fee = rpc.latest_block()
+        if any(not rpc.lending_has_code(address, block) for address in (
+            profile.asset, profile.pool, profile.provider,
+            profile.data_provider, profile.a_token,
+        )):
+            return False
+        decimals, active, frozen = rpc.lending_reserve_configuration(
+            profile.data_provider, profile.asset, block,
+        )
+        if (
+            rpc.lending_resolve_pool(profile.provider, block) != profile.pool
+            or rpc.lending_token_decimals(profile.asset, block) != profile.decimals
+            or rpc.lending_reserve_a_token(
+                profile.data_provider, profile.asset, block,
+            ) != profile.a_token
+            or decimals != profile.decimals or not active or frozen
+            or rpc.lending_reserve_paused(
+                profile.data_provider, profile.asset, block,
+            )
+            or rpc.lending_account_debt(profile.pool, action.sender, block) != 0
+        ):
+            return False
+        allowance = int(rpc.lending_allowance(
+            profile.asset, action.sender, profile.pool, block,
+        ))
+        expected_data = (
+            encode_approve(profile.pool, action.amount_atomic)
+            if action.method == "approve"
+            else encode_supply(profile.asset, action.amount_atomic, action.sender)
+        )
+        expected_target = profile.asset if action.method == "approve" else profile.pool
+        estimate = int(rpc.estimate_gas({
+            "from": action.sender, "to": tx.to, "value": 0, "data": tx.data,
+            "nonce": tx.nonce, "type": 2, "chainId": tx.chain_id,
+            "maxFeePerGas": tx.max_fee_per_gas,
+            "maxPriorityFeePerGas": tx.max_priority_fee_per_gas,
+        }))
+        priority = int(rpc.max_priority_fee_per_gas())
+        balance = int(rpc.lending_token_balance(
+            profile.asset, action.sender, block,
+        ))
+        _borrow_cap, supply_cap = rpc.lending_reserve_caps(
+            profile.data_provider, profile.asset, block,
+        )
+        total_supply = rpc.lending_reserve_total_supply(
+            profile.data_provider, profile.asset, block,
+        )
+        native = int(rpc.native_balance(action.sender))
+        rpc.lending_simulate({
+            "from": action.sender, "to": tx.to, "value": 0, "data": tx.data,
+            "nonce": tx.nonce, "type": 2, "chainId": tx.chain_id,
+            "maxFeePerGas": tx.max_fee_per_gas,
+            "maxPriorityFeePerGas": tx.max_priority_fee_per_gas, "gas": tx.gas,
+        })
+    except Exception:
+        return False
+    return (
+        rpc.chain_id() == profile.chain_id and block >= action.block_number
+        and rpc.token_decimals(profile.asset) == 6
+        and balance >= action.amount_atomic
+        and (
+            supply_cap == 0
+            or total_supply + action.amount_atomic <= supply_cap * 10**profile.decimals
+        )
+        and ((action.method == "approve" and allowance == 0)
+             or (action.method == "supply" and allowance == action.amount_atomic))
+        and tx.to.lower() == expected_target.lower() and tx.data == expected_data
+        and rpc.pending_nonce(action.sender) == tx.nonce
+        and 0 < estimate <= tx.gas and 0 <= priority <= tx.max_priority_fee_per_gas
+        and 0 < 2 * int(base_fee) + priority <= tx.max_fee_per_gas
+        and native >= action.max_total_fee_wei
+    )
 def _final_revoke_revalidation(
     rpc: MainnetRpc, action: PreparedRevokeAction,
 ) -> bool:
@@ -1022,9 +1236,14 @@ def _receipt_status(
             return HistoryStatus.FAILED
         if status != 1:
             return HistoryStatus.UNKNOWN
-        if record.token == "ETH" or record.action_type == REVOKE_ACTION_TYPE:
+        if (
+            record.token == "ETH" or record.action_type == REVOKE_ACTION_TYPE
+            or record.action_type.startswith("lending_")
+        ):
             if transaction is None or not _public_transaction_matches(transaction, record):
                 return HistoryStatus.UNKNOWN
+        if record.action_type.startswith("lending_"):
+            return HistoryStatus.CONFIRMED
         if record.token == "ETH":
             return (
                 HistoryStatus.CONFIRMED
@@ -1101,9 +1320,15 @@ def _receipt_fee_wei(receipt: Mapping[str, object]) -> str | None:
     try:
         gas_used = int(receipt["gasUsed"])
         effective_gas_price = int(receipt["effectiveGasPrice"])
-        if gas_used < 0 or effective_gas_price < 0:
+        l1_fee_value = receipt.get("l1Fee", 0)
+        l1_fee = (
+            int(l1_fee_value, 16)
+            if isinstance(l1_fee_value, str) and l1_fee_value.startswith("0x")
+            else int(l1_fee_value)
+        )
+        if gas_used < 0 or effective_gas_price < 0 or l1_fee < 0:
             return None
-        return str(gas_used * effective_gas_price)
+        return str(gas_used * effective_gas_price + l1_fee)
     except (KeyError, TypeError, ValueError):
         return None
 
@@ -1122,6 +1347,15 @@ def _public_transaction_matches(
         data = _transaction_data(value)
         if record.action_type == REVOKE_ACTION_TYPE:
             expected_data = encode_usdc_approve_zero(record.recipient)
+            expected_value = 0
+        elif record.action_type == "lending_approve":
+            expected_data = encode_approve(record.recipient, int(record.amount_atomic))
+            expected_value = 0
+        elif record.action_type == "lending_supply":
+            profile = ActionProfilesState.load().profile
+            if profile is None:
+                return False
+            expected_data = encode_supply(profile.asset, int(record.amount_atomic), record.sender)
             expected_value = 0
         elif record.token == "ETH":
             expected_data = "0x"

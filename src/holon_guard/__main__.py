@@ -28,6 +28,7 @@ from .actions import ActionLedger
 from .authority import AuthorityService
 from .lifecycle import GuardLifecycle
 from .policy_control import GuardPolicyControl
+from .provisioning import AuthorityStateProvisioner
 from .lock import GuardAlreadyRunning, SingleInstanceLock
 from .runtime_security import load_authority_audit
 from .server import GuardServer
@@ -77,6 +78,10 @@ def _policy_path(args: argparse.Namespace) -> Path | None:
     if args.require_install_integrity and args.app_root is not None:
         return args.app_root / INSTALLED_POLICY_RELATIVE_PATH
     return None
+
+
+def _any_authority_enabled(policy: Policy) -> bool:
+    return policy.authority_enabled or policy.lending_authority_enabled
 
 
 def _wallet_controller(
@@ -138,7 +143,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             if failure is not None:
                 lifecycle.disable_signing(failure)
-            elif not policy_snapshot.policy.authority_enabled:
+            elif not _any_authority_enabled(policy_snapshot.policy):
                 lifecycle.disable_signing(RefusalCode.POLICY_AUTHORITY_DISABLED.value)
             authority = AuthorityService(
                 lifecycle, PolicyEngine(policy_snapshot.policy), audit,
@@ -164,6 +169,13 @@ def main(argv: list[str] | None = None) -> int:
                 authority,
                 promotion_blocker=promotion_blocker,
                 revision_invalid=revision_invalid,
+                provisioner=AuthorityStateProvisioner(data_dir, revision_store),
+                provisioning_blocker=(
+                    install_failure or policy_failure or (
+                        SecurityCode.POLICY_STATE_INVALID.value
+                        if revision_invalid else None
+                    )
+                ),
             )
             policy_server = (
                 PolicyControlServer(policy_handler.handle, wallet_path)

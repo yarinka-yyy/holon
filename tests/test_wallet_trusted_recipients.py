@@ -70,8 +70,9 @@ def test_envelope_is_disabled_canonical_and_round_trips() -> None:
     )).canonical()
     envelope = draft.to_envelope()
 
-    assert envelope["draft_schema_version"] == "1"
-    assert envelope["policy"]["authority_enabled"] is False
+    assert envelope["draft_schema_version"] == "2"
+    assert envelope["policy"]["transfer_authority_enabled"] is False
+    assert envelope["policy"]["lending_authority_enabled"] is False
     assert [
         (item["network"], item["asset"])
         for item in envelope["policy"]["transfer_rules"]
@@ -84,7 +85,7 @@ def test_envelope_rejects_digest_authority_labels_and_noncanonical_order() -> No
     cases = []
     changed_digest = dict(envelope, policy_digest="0" * 64)
     cases.append(changed_digest)
-    enabled_policy = dict(envelope["policy"], authority_enabled=True)
+    enabled_policy = dict(envelope["policy"], transfer_authority_enabled=True)
     cases.append(dict(envelope, policy=enabled_policy))
     cases.append(dict(envelope, recipient_labels=[]))
     changed_label = [dict(envelope["recipient_labels"][0], label=" bad\nlabel ")]
@@ -136,17 +137,17 @@ def test_store_missing_restart_corruption_and_digest_mutation(tmp_path) -> None:
     draft = TrustedPolicyDraft((route(),)).canonical()
     store.save(draft)
     assert store.load() == draft
-    assert json.loads(paths.transfer_policy_draft.read_text(encoding="utf-8")) == (
+    assert json.loads(paths.authority_policy_draft.read_text(encoding="utf-8")) == (
         draft.to_envelope()
     )
 
-    paths.transfer_policy_draft.write_text("{broken", encoding="utf-8")
+    paths.authority_policy_draft.write_text("{broken", encoding="utf-8")
     with pytest.raises(TrustedDraftUnavailable):
         store.load()
 
     value = draft.to_envelope()
     value["policy"]["transfer_rules"][0]["max_amount_atomic"] = "999999999"
-    paths.transfer_policy_draft.write_text(json.dumps(value), encoding="utf-8")
+    paths.authority_policy_draft.write_text(json.dumps(value), encoding="utf-8")
     with pytest.raises(TrustedDraftUnavailable):
         store.load()
 
@@ -154,13 +155,13 @@ def test_store_missing_restart_corruption_and_digest_mutation(tmp_path) -> None:
 def test_store_rejects_oversized_and_incompatible_draft(tmp_path) -> None:
     paths = WalletPaths(tmp_path)
     store = TrustedPolicyDraftStore(paths)
-    paths.transfer_policy_draft.write_bytes(b" " * (64 * 1024 + 1))
+    paths.authority_policy_draft.write_bytes(b" " * (64 * 1024 + 1))
     with pytest.raises(TrustedDraftUnavailable):
         store.load()
 
     value = TrustedPolicyDraft().to_envelope()
-    value["draft_schema_version"] = "2"
-    paths.transfer_policy_draft.write_text(json.dumps(value), encoding="utf-8")
+    value["draft_schema_version"] = "3"
+    paths.authority_policy_draft.write_text(json.dumps(value), encoding="utf-8")
     with pytest.raises(TrustedDraftUnavailable):
         store.load()
 
@@ -170,7 +171,7 @@ def test_failed_atomic_save_preserves_previous_draft(tmp_path, monkeypatch) -> N
     store = TrustedPolicyDraftStore(paths)
     original = TrustedPolicyDraft((route(),)).canonical()
     store.save(original)
-    previous = paths.transfer_policy_draft.read_bytes()
+    previous = paths.authority_policy_draft.read_bytes()
 
     def fail_write(_path, _value) -> None:
         raise StorageError("fixture write failure")
@@ -181,4 +182,4 @@ def test_failed_atomic_save_preserves_previous_draft(tmp_path, monkeypatch) -> N
     changed = TrustedPolicyDraft((route("ethereum", "eth"),)).canonical()
     with pytest.raises(TrustedDraftUnavailable):
         store.save(changed)
-    assert paths.transfer_policy_draft.read_bytes() == previous
+    assert paths.authority_policy_draft.read_bytes() == previous

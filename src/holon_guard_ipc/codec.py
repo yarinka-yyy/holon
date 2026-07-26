@@ -70,6 +70,7 @@ def validate_request(request: Mapping[str, Any]) -> tuple[ContractEnvelope, int 
     requires_owner = envelope.kind in {
         MessageKind.PREPARE_TRANSFER,
         MessageKind.TRANSFER_INTENT,
+        MessageKind.LENDING_AUTHORITY_INTENT,
     }
     if requires_owner and (type(owner_pid) is not int or owner_pid <= 0):
         raise CodecError("Invalid owner PID")

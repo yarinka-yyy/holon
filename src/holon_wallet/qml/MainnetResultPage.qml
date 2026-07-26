@@ -3,7 +3,7 @@ import "."
 
 TransactionFlowShell {
     id: root
-    title: "Transaction Complete"; subtitle: "One-time transfer result"
+    title: "Transaction Complete"; subtitle: "One-time action result"
     activeStep: 3; backVisible: false
     property var result: walletController.mainnetResult
     property bool positive: result.confirmed === true || result.submitted === true

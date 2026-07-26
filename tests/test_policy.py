@@ -6,7 +6,10 @@ import unittest
 from pathlib import Path
 
 from holon_contracts import RefusalCode
-from holon_policy import Policy, PolicyEngine, PolicyLoadError, load_policy, policy_digest
+from holon_policy import (
+    LendingRule, Policy, PolicyEngine, PolicyLoadError, load_policy, policy_digest,
+)
+from holon_lending import ACTION_PROFILES_DIGEST
 from holon_policy.baseline import (
     BASELINE_POLICY_DIGEST,
     BASELINE_POLICY_PATH,
@@ -40,6 +43,34 @@ def policy_value(enabled: bool = True) -> dict:
 
 
 class PolicyTests(unittest.TestCase):
+    def test_policy_v3_separates_transfer_and_lending_authority(self) -> None:
+        rule = LendingRule(
+            "lending", "1", "aave-v3-base-usdc", "1", "base", "usdc", 8453,
+            ("approve", "supply"), "5000000", "100000000000000",
+            ACTION_PROFILES_DIGEST,
+        )
+        policy = Policy("3", "2", False, (), True, (rule,))
+        parsed = Policy.from_dict(policy.to_dict())
+        self.assertFalse(parsed.authority_enabled)
+        self.assertTrue(parsed.lending_authority_enabled)
+        decision, selected = PolicyEngine(parsed).evaluate_lending_intent({
+            "module_id": "lending", "protocol_profile_id": "aave-v3-base-usdc",
+            "network": "base", "asset": "usdc", "action": "supply",
+            "amount_mode": "exact", "amount_atomic": 1_000_000,
+        }, ACTION_PROFILES_DIGEST)
+        self.assertTrue(decision.allowed)
+        self.assertIsNotNone(selected)
+        self.assertEqual(
+            PolicyEngine(parsed).evaluate_transfer(TRANSFER).code,
+            RefusalCode.POLICY_AUTHORITY_DISABLED.value,
+        )
+        over, _ = PolicyEngine(parsed).evaluate_lending_intent({
+            "module_id": "lending", "protocol_profile_id": "aave-v3-base-usdc",
+            "network": "base", "asset": "usdc", "action": "supply",
+            "amount_mode": "exact", "amount_atomic": 5_000_001,
+        }, ACTION_PROFILES_DIGEST)
+        self.assertEqual(over.code, RefusalCode.AMOUNT_LIMIT_EXCEEDED.value)
+
     def test_production_baseline_is_pinned_and_authority_disabled(self) -> None:
         policy = load_baseline_policy()
         self.assertFalse(policy.authority_enabled)

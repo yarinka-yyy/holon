@@ -41,6 +41,10 @@ class WalletPaths:
     def transfer_policy_draft(self) -> Path:
         return self.data_dir / "transfer-policy-draft.json"
 
+    @property
+    def authority_policy_draft(self) -> Path:
+        return self.data_dir / "authority-policy-draft.json"
+
 
 def read_json(path: Path) -> Any:
     try:

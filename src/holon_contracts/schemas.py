@@ -9,6 +9,7 @@ ACTION_REQUIRED_KINDS = frozenset(
     {
         MessageKind.PREPARE_TRANSFER,
         MessageKind.TRANSFER_INTENT,
+        MessageKind.LENDING_AUTHORITY_INTENT,
         MessageKind.ACTION_STATUS_REQUEST,
         MessageKind.CANCEL_ACTION,
         MessageKind.RECOVER_ACTION,
@@ -30,6 +31,7 @@ REQUEST_KINDS = frozenset(
         MessageKind.READ_LENDING_MARKETS,
         MessageKind.READ_LENDING_POSITIONS,
         MessageKind.LENDING_ACTION_INTENT,
+        MessageKind.LENDING_AUTHORITY_INTENT,
         MessageKind.PREPARE_TRANSFER,
         MessageKind.TRANSFER_INTENT,
         MessageKind.ACTION_STATUS_REQUEST,
@@ -45,6 +47,13 @@ PAYLOAD_FIELDS = {
     MessageKind.READ_LENDING_MARKETS: frozenset(),
     MessageKind.READ_LENDING_POSITIONS: frozenset(),
     MessageKind.LENDING_ACTION_INTENT: frozenset(
+        {
+            "module_id", "module_version", "protocol_profile_id",
+            "protocol_profile_version", "network", "asset",
+            "beneficiary_mode", "action", "amount_mode", "amount",
+        }
+    ),
+    MessageKind.LENDING_AUTHORITY_INTENT: frozenset(
         {
             "module_id", "module_version", "protocol_profile_id",
             "protocol_profile_version", "network", "asset",
@@ -96,6 +105,8 @@ PAYLOAD_FIELDS = {
             "profile_version", "profile_digest", "network", "asset",
             "amount_mode", "amount_atomic", "display_amount", "target", "method",
             "calldata_hash", "native_value_wei", "nonce", "gas",
+            "max_fee_per_gas_wei", "max_priority_fee_per_gas_wei",
+            "l2_fee_ceiling_wei", "l1_fee_upper_bound_wei",
             "max_total_fee_wei", "block_number", "observed_at", "expires_at",
             "preview_digest", "checks", "caveats", "code", "message",
         }

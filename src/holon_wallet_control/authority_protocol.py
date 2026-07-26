@@ -29,6 +29,11 @@ PREPARE_FIELDS = frozenset({
     "policy_revision", "policy_digest",
     "network", "asset", "amount_atomic", "recipient", "created_at", "expires_at",
 })
+LENDING_PREPARE_FIELDS = frozenset({
+    "authority_version", "kind", "flow_id", "action_id", "policy_version",
+    "policy_revision", "policy_digest", "action_profile_digest", "action",
+    "amount_mode", "amount", "created_at", "expires_at",
+})
 CANCEL_FIELDS = frozenset({
     "authority_version", "kind", "flow_id", "action_id", "prepared_digest",
 })
@@ -37,6 +42,14 @@ PREPARED_FIELDS = frozenset({
     "profile_id", "sender", "recipient", "network", "asset", "amount_atomic",
     "max_total_fee_wei", "prepared_digest", "created_at", "expires_at", "code",
     "policy_revision", "policy_digest",
+})
+LENDING_PREPARED_FIELDS = frozenset({
+    "authority_version", "kind", "flow_id", "action_id", "wallet_pid",
+    "profile_id", "sender", "requested_action", "next_action", "network",
+    "asset", "amount_atomic", "target", "method", "max_total_fee_wei",
+    "l2_fee_ceiling_wei", "l1_fee_upper_bound_wei", "prepared_digest",
+    "created_at", "expires_at", "code", "policy_revision", "policy_digest",
+    "action_profile_digest",
 })
 REFUSED_FIELDS = frozenset({
     "authority_version", "kind", "flow_id", "action_id", "wallet_pid", "code",
@@ -86,15 +99,41 @@ def _decode(raw: bytes) -> dict[str, object]:
 
 def validate_request(value: Mapping[str, object]) -> dict[str, object]:
     kind = value.get("kind")
-    expected = PREPARE_FIELDS if kind == "prepare_transfer" else CANCEL_FIELDS
+    if kind not in {
+        "prepare_transfer", "prepare_lending_action", "cancel_transfer", "cancel_action",
+    }:
+        raise ControlProtocolError("Invalid authority request")
+    expected = (
+        PREPARE_FIELDS if kind == "prepare_transfer"
+        else LENDING_PREPARE_FIELDS if kind == "prepare_lending_action"
+        else CANCEL_FIELDS
+    )
     if set(value) != expected or value.get("authority_version") != AUTHORITY_VERSION:
         raise ControlProtocolError("Invalid authority request")
     _uuid(value.get("flow_id"))
     _action(value.get("action_id"))
-    if kind == "cancel_transfer":
+    if kind in {"cancel_transfer", "cancel_action"}:
         digest = value.get("prepared_digest")
         if not isinstance(digest, str) or HEX_RE.fullmatch(digest) is None:
             raise ControlProtocolError("Invalid authority request")
+        return dict(value)
+    if kind == "prepare_lending_action":
+        if (
+            value.get("policy_version") != "2"
+            or type(value.get("policy_revision")) is not int
+            or value["policy_revision"] <= 0
+            or not isinstance(value.get("policy_digest"), str)
+            or HEX_RE.fullmatch(value["policy_digest"]) is None
+            or not isinstance(value.get("action_profile_digest"), str)
+            or HEX_RE.fullmatch(value["action_profile_digest"]) is None
+            or value.get("action") != "supply"
+            or value.get("amount_mode") != "exact"
+            or not isinstance(value.get("amount"), str)
+        ):
+            raise ControlProtocolError("Invalid lending authority request")
+        for field in ("created_at", "expires_at"):
+            if not isinstance(value.get(field), str) or len(value[field]) > 40:
+                raise ControlProtocolError("Invalid authority request")
         return dict(value)
     if (
         value.get("policy_version") != "1"
@@ -120,9 +159,17 @@ def validate_response(
     value: Mapping[str, object], request: Mapping[str, object], peer_pid: int,
 ) -> dict[str, object]:
     kind = value.get("kind")
-    expected = PREPARED_FIELDS if kind == "transfer_prepared" else REFUSED_FIELDS
+    allowed_kinds = {
+        "transfer_prepared", "lending_action_prepared", "transfer_refused",
+        "lending_action_refused", "transfer_cancelled", "action_cancelled",
+    }
+    expected = (
+        PREPARED_FIELDS if kind == "transfer_prepared"
+        else LENDING_PREPARED_FIELDS if kind == "lending_action_prepared"
+        else REFUSED_FIELDS
+    )
     if (
-        set(value) != expected
+        set(value) != expected or kind not in allowed_kinds
         or value.get("authority_version") != AUTHORITY_VERSION
         or value.get("flow_id") != request.get("flow_id")
         or value.get("action_id") != request.get("action_id")
@@ -131,7 +178,38 @@ def validate_response(
         or CODE_RE.fullmatch(value["code"]) is None
     ):
         raise ControlProtocolError("Invalid authority response")
-    if kind != "transfer_prepared":
+    if kind not in {"transfer_prepared", "lending_action_prepared"}:
+        return dict(value)
+    if kind == "lending_action_prepared":
+        for field in (
+            "requested_action", "created_at", "expires_at", "policy_revision",
+            "policy_digest", "action_profile_digest",
+        ):
+            expected_field = "action" if field == "requested_action" else field
+            if value.get(field) != request.get(expected_field):
+                raise ControlProtocolError("Authority response mismatch")
+        if (
+            value.get("next_action") not in {"approve", "supply"}
+            or value.get("network") != "base" or value.get("asset") != "usdc"
+            or value.get("method") != value.get("next_action")
+            or not isinstance(value.get("target"), str)
+            or ADDRESS_RE.fullmatch(value["target"]) is None
+        ):
+            raise ControlProtocolError("Invalid lending authority response")
+        for field in (
+            "amount_atomic", "max_total_fee_wei", "l2_fee_ceiling_wei",
+            "l1_fee_upper_bound_wei",
+        ):
+            if not isinstance(value.get(field), str) or DECIMAL_RE.fullmatch(value[field]) is None:
+                raise ControlProtocolError("Invalid lending authority response")
+        if (
+            not isinstance(value.get("profile_id"), str) or not value["profile_id"]
+            or not isinstance(value.get("sender"), str)
+            or ADDRESS_RE.fullmatch(value["sender"]) is None
+            or not isinstance(value.get("prepared_digest"), str)
+            or HEX_RE.fullmatch(value["prepared_digest"]) is None
+        ):
+            raise ControlProtocolError("Invalid lending authority response")
         return dict(value)
     for field in (
         "network", "asset", "amount_atomic", "recipient", "created_at", "expires_at",

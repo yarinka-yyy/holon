@@ -39,6 +39,8 @@ class WalletController(Protocol):
 
     def prepare_transfer(self, request: dict[str, object]) -> "WalletPreparedResult": ...
 
+    def prepare_lending_action(self, request: dict[str, object]) -> "WalletPreparedResult": ...
+
     def preview_lending(
         self, intent: dict[str, object], profile_digest: str,
     ) -> "WalletLendingPreviewResult": ...
@@ -101,6 +103,9 @@ class UnavailableWalletController:
     def prepare_transfer(self, request: dict[str, object]) -> WalletPreparedResult:
         del request
         return WalletPreparedResult(False, "WALLET_UNAVAILABLE", None, None)
+
+    def prepare_lending_action(self, request: dict[str, object]) -> WalletPreparedResult:
+        return self.prepare_transfer(request)
 
     def preview_lending(
         self, intent: dict[str, object], profile_digest: str,
@@ -294,12 +299,15 @@ class VerifiedWalletController(UnavailableWalletController):
         if type(pid) is not int:
             return WalletPreparedResult(False, "WALLET_UNAVAILABLE", None, None)
         handle = WindowsProcessReference(pid)
-        if response.get("kind") != "transfer_prepared":
+        if response.get("kind") not in {"transfer_prepared", "lending_action_prepared"}:
             return WalletPreparedResult(
                 False, str(response.get("code", "TRANSFER_PREPARATION_FAILED")),
                 response, handle,
             )
         return WalletPreparedResult(True, str(response["code"]), response, handle)
+
+    def prepare_lending_action(self, request: dict[str, object]) -> WalletPreparedResult:
+        return self.prepare_transfer(request)
 
     def preview_lending(
         self, intent: dict[str, object], profile_digest: str,
@@ -343,7 +351,7 @@ class VerifiedWalletController(UnavailableWalletController):
             )
         except Exception:
             return False
-        return response.get("kind") == "transfer_cancelled"
+        return response.get("kind") in {"transfer_cancelled", "action_cancelled"}
 
     @staticmethod
     def _unavailable() -> WalletOpenResult:

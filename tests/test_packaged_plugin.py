@@ -89,9 +89,11 @@ def test_vendored_plugin_registers_without_project_imports(tmp_path: Path, runti
     assert tools == [
         "holon_health", "holon_open_wallet", "holon_wallet_balances",
         "holon_lending_compare", "holon_lending_positions",
-        "holon_lending_prepare",
-        "holon_prepare_transfer", "holon_transfer_status", "holon_cancel_transfer",
-        "holon_recover_transfer",
+            "holon_lending_prepare",
+            "holon_lending_execute",
+            "holon_prepare_transfer", "holon_transfer_status", "holon_cancel_transfer",
+            "holon_recover_transfer",
+            "holon_action_status", "holon_cancel_action", "holon_recover_action",
     ]
     assert hooks == ["on_session_start", "pre_tool_call"]
 

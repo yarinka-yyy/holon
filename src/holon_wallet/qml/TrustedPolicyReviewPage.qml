@@ -3,24 +3,42 @@ import "."
 
 PageState {
     id: root
-    property var routes: walletController.trustedDraftRoutes
+    property var routes: operation === "initialize" ? [] : walletController.trustedDraftRoutes
     property bool applyMode: walletController.trustedApplyMode
+    property string operation: walletController.trustedPolicyOperation
+    property var lending: walletController.trustedLendingLimits
 
     ScreenHeader {
         objectName: "trustedReviewHeader"; x: 28; y: 54; width: 458
-        title: root.applyMode ? "Apply Policy Draft" : "Review Policy Draft"
-        subtitle: root.applyMode ? walletController.trustedActiveRevision : "Authority remains disabled"
+        title: root.operation === "initialize" ? "Initialize Authority"
+            : root.operation === "activate" ? "Activate Lending"
+            : root.operation === "deactivate" ? "Deactivate Lending"
+            : root.applyMode ? "Apply Policy Draft" : "Review Policy Draft"
+        subtitle: root.operation === "initialize" ? "Baseline revision 0"
+            : root.applyMode ? walletController.trustedActiveRevision : "Authority remains disabled"
         onBackRequested: root.applyMode
             ? walletController.closeTrustedApplyReview()
             : walletController.closeTrustedDraftReview()
+    }
+    SurfaceCard {
+        visible: root.lending.configured && root.operation !== "initialize"; x: 28; y: 220; width: 458; height: 82
+        Text { x: 16; y: 12; text: "Aave V3 · Base · USDC"; color: Design.text; font.family: Design.fontFamily; font.pixelSize: 14; font.weight: Font.DemiBold }
+        Text { x: 16; y: 39; text: "Supply ≤ " + root.lending.amount + " USDC · fee ≤ " + root.lending.fee + " ETH per action"; color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 12 }
+        Text { x: 16; y: 61; text: "Exact approve and supply only · active Wallet Account"; color: Design.textFaint; font.family: Design.fontFamily; font.pixelSize: 10 }
     }
     Rectangle {
         x: 28; y: 136; width: 458; height: 72; radius: Design.controlRadius
         color: "#332C261B"; border.width: 1; border.color: "#66D5AA64"
         Text {
             x: 16; width: 426; anchors.verticalCenter: parent.verticalCenter
-            text: root.applyMode
-                ? "Guard will independently verify and pin this exact saved draft. Transfer authority will remain disabled."
+            text: root.operation === "initialize"
+                ? "Guard will create first-run journal and replay-protection state. No policy or transaction will be activated."
+                : root.operation === "activate"
+                ? "Guard will enable only Aave Base USDC approve/supply limits. Send remains disabled."
+                : root.operation === "deactivate"
+                ? "Guard will disable Lending authority. No transaction will be created."
+                : root.applyMode
+                ? "Guard will independently verify and pin this exact saved draft. All authority remains disabled."
                 : "Saving records this draft only. Guard and Send will continue using the current disabled policy."
             wrapMode: Text.Wrap; color: Design.warning
             font.family: Design.fontFamily; font.pixelSize: 12
@@ -29,14 +47,17 @@ PageState {
     Text {
         visible: root.routes.length === 0; x: 52; y: 350; width: 410
         horizontalAlignment: Text.AlignHCenter; wrapMode: Text.Wrap
-        text: root.applyMode
+        text: root.operation === "initialize"
+            ? "No previous authority state exists. Initialization is allowed once and remains signing-disabled."
+            : root.applyMode
             ? "This will apply an empty disabled policy with no trusted recipients."
             : "This will save an empty draft with no trusted recipients."
         color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 14
     }
     ListView {
         id: reviewList; objectName: "trustedReviewList"
-        x: 28; y: 232; width: 458; height: 400; clip: true; spacing: 10
+        x: 28; y: root.lending.configured ? 314 : 232; width: 458
+        height: root.lending.configured ? 318 : 400; clip: true; spacing: 10
         model: root.routes; boundsBehavior: Flickable.StopAtBounds
         delegate: SurfaceCard {
             required property var modelData

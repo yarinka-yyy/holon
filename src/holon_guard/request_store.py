@@ -63,3 +63,16 @@ class RequestStateStore:
         snapshot = RequestControlSnapshot((), None, None)
         self.save(snapshot)
         return snapshot
+
+    def initialize_empty(self) -> RequestControlSnapshot:
+        """Create first-run request state and never replace an existing file."""
+        snapshot = RequestControlSnapshot((), None, None)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(
+            snapshot.to_dict(), ensure_ascii=False, separators=(",", ":"), sort_keys=True,
+        )
+        with self.path.open("x", encoding="utf-8", newline="\n") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        return snapshot

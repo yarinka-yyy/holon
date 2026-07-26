@@ -133,6 +133,14 @@ class PipeGuardClient:
             response_timeout=40.0,
         )
 
+    def lending_action_execute(
+        self, payload: dict[str, object], action_id: str,
+    ) -> ContractEnvelope:
+        return self.client.request(
+            MessageKind.LENDING_AUTHORITY_INTENT, payload,
+            action_id=action_id, owner_pid=os.getpid(), response_timeout=40.0,
+        )
+
     def prepare_transfer(
         self, payload: dict[str, str], action_id: str,
     ) -> ContractEnvelope:

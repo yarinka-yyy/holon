@@ -124,8 +124,10 @@ class _AuthorityBridge(QObject):
             pending["response"] = response
             pending["event"].set()
 
-        if request.get("kind") == "cancel_transfer":
+        if request.get("kind") in {"cancel_transfer", "cancel_action"}:
             complete(application.controller.cancelExternalTransfer(request))
+        elif request.get("kind") == "prepare_lending_action":
+            application.controller.prepareExternalLending(request, complete)
         else:
             application.controller.prepareExternalTransfer(request, complete)
 

@@ -4,6 +4,7 @@ import "."
 PageState {
     id: root
     property bool applyMode: walletController.trustedApplyMode
+    property string operation: walletController.trustedPolicyOperation
     function submit() {
         if (root.applyMode)
             walletController.submitTrustedApply(passwordField.text)
@@ -14,7 +15,10 @@ PageState {
 
     ScreenHeader {
         objectName: "trustedPasswordHeader"; x: 28; y: 54; width: 458
-        title: root.applyMode ? "Confirm Apply" : "Confirm Draft"
+        title: root.operation === "initialize" ? "Confirm Initialization"
+            : root.operation === "activate" ? "Confirm Activation"
+            : root.operation === "deactivate" ? "Confirm Deactivation"
+            : root.applyMode ? "Confirm Apply" : "Confirm Draft"
         subtitle: "Fresh local authentication"
         onBackRequested: root.applyMode
             ? walletController.closeTrustedApplyPassword()
@@ -30,8 +34,14 @@ PageState {
     }
     Text {
         x: 72; y: 382; width: 370; horizontalAlignment: Text.AlignHCenter
-        text: root.applyMode
-            ? "Authenticate applying this exact saved draft. Transfer authority remains disabled."
+        text: root.operation === "initialize"
+            ? "Authenticate one-time authority-state initialization. Send and Lending remain disabled."
+            : root.operation === "activate"
+            ? "Authenticate enabling the reviewed Aave limits. Send remains disabled."
+            : root.operation === "deactivate"
+            ? "Authenticate disabling Lending authority."
+            : root.applyMode
+            ? "Authenticate applying this exact saved draft. All authority remains disabled."
             : "Authenticate this complete draft. This does not activate transfer authority."
         color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 14; wrapMode: Text.Wrap
     }
@@ -49,7 +59,10 @@ PageState {
     }
     FormButton {
         objectName: "trustedPasswordSubmitButton"; x: 72; y: 600; width: 370; height: 56
-        label: root.applyMode ? "Apply Disabled Draft" : "Save Disabled Draft"
+        label: root.operation === "initialize" ? "Initialize Authority"
+            : root.operation === "activate" ? "Activate Lending"
+            : root.operation === "deactivate" ? "Deactivate Lending"
+            : root.applyMode ? "Apply Disabled Draft" : "Save Disabled Draft"
         controlEnabled: passwordField.text.length >= 4
         onTriggered: root.submit()
     }

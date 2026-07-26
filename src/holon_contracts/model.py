@@ -16,6 +16,7 @@ class MessageKind(str, Enum):
     READ_LENDING_MARKETS = "read_lending_markets"
     READ_LENDING_POSITIONS = "read_lending_positions"
     LENDING_ACTION_INTENT = "lending_action_intent"
+    LENDING_AUTHORITY_INTENT = "lending_authority_intent"
     TRANSFER_INTENT = "transfer_intent"
     PREPARE_TRANSFER = "prepare_transfer"
     ACTION_STATUS_REQUEST = "action_status_request"

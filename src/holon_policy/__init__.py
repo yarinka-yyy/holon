@@ -3,7 +3,7 @@
 from .engine import PolicyDecision, PolicyEngine
 from .fingerprint import action_fingerprint
 from .loader import PolicyLoadError, load_policy, policy_digest
-from .model import Policy, PolicyError, RecipientRule, TransferRule
+from .model import LendingRule, Policy, PolicyError, RecipientRule, TransferRule
 from .revision import (
     ActivePolicyPointer,
     PolicyRevision,
@@ -21,6 +21,7 @@ __all__ = [
     "PolicyEngine",
     "PolicyError",
     "PolicyLoadError",
+    "LendingRule",
     "RecipientRule",
     "TransferRule",
     "action_fingerprint",

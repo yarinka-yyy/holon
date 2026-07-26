@@ -633,7 +633,7 @@ def _response(kind: MessageKind, payload: Mapping[str, Any]) -> None:
 
 
 def validate_payload(kind: MessageKind, payload: Mapping[str, Any]) -> None:
-    if kind is MessageKind.LENDING_ACTION_INTENT:
+    if kind in {MessageKind.LENDING_ACTION_INTENT, MessageKind.LENDING_AUTHORITY_INTENT}:
         validate_lending_action_intent(payload)
         return
     if kind is MessageKind.TRANSFER_INTENT:

@@ -3,7 +3,8 @@ import "."
 
 TransactionFlowShell {
     id: root
-    title: "Confirm Transaction"; subtitle: "Review exact transfer details"
+    title: "Confirm Transaction"
+    subtitle: action.actionType === "lending" ? "Review exact Aave action" : "Review exact transfer details"
     activeStep: 0; onBackRequested: walletController.editTransfer()
     property bool detailsOpen: false
     property var action: walletController.transferAction
@@ -15,13 +16,15 @@ TransactionFlowShell {
     Flickable {
         id: reviewScroll; objectName: "transferReviewScroll"
         width: 458; height: 592; clip: true; contentWidth: width
-        contentHeight: root.detailsOpen ? 1090 : 730
+        contentHeight: root.detailsOpen ? 1200 : 730
         boundsBehavior: Flickable.StopAtBounds
         Rectangle {
             objectName: "mainnetTransferBanner"; x: 0; y: 0; width: 458; height: 46
             radius: 12; color: "#332C261B"; border.width: 1; border.color: "#66D5AA64"
             Text {
-                anchors.centerIn: parent; text: "MAINNET TRANSFER · REAL FUNDS"
+                anchors.centerIn: parent
+                text: root.action.actionType === "lending"
+                    ? "AAVE V3 · BASE · REAL FUNDS" : "MAINNET TRANSFER · REAL FUNDS"
                 color: Design.warning; font.family: Design.fontFamily
                 font.pixelSize: 11; font.weight: Font.DemiBold; font.letterSpacing: 0.3
             }
@@ -50,7 +53,9 @@ TransactionFlowShell {
                 source: "assets/user.svg"; sourceSize: Qt.size(48, 48)
             }
             Text {
-                x: 52; y: 14; text: "To"; color: Design.textMuted
+                x: 52; y: 14
+                text: root.action.actionType === "lending" ? "Target · " + root.action.method : "To"
+                color: Design.textMuted
                 font.family: Design.fontFamily; font.pixelSize: 13
             }
             Text {
@@ -94,12 +99,14 @@ TransactionFlowShell {
             }
         }
         SurfaceCard {
-            visible: root.detailsOpen; x: 0; y: 554; width: 458; height: 330
+            visible: root.detailsOpen; x: 0; y: 554; width: 458; height: 420
             Column {
                 x: 16; y: 10; width: parent.width - 32; spacing: 0
                 Repeater {
                     model: [
                         ["Transaction target", root.action.shortTransactionTarget || ""],
+                        ["Method", root.action.method || "transfer"],
+                        ["Action profile", root.action.actionProfileDigest || ""],
                         ["Contract", root.action.shortContract || "Native asset"],
                         ["Data hash", root.action.calldataHash || ""],
                         ["Native value", (root.action.nativeValueWei || "0") + " wei"],
@@ -109,6 +116,8 @@ TransactionFlowShell {
                         ["Max fee / gas", (root.action.maxFeePerGas || "") + " wei"],
                         ["Priority fee", (root.action.maxPriorityFeePerGas || "") + " wei"],
                         ["Exact maximum fee", (root.action.maxTotalFeeWei || "") + " wei"],
+                        ["L2 fee ceiling", (root.action.l2FeeCeilingWei || "0") + " wei"],
+                        ["L1 fee upper bound", (root.action.l1FeeUpperBoundWei || "0") + " wei"],
                         ["Local fee cap", walletController.mainnetFeeLimit],
                         ["Local amount cap", walletController.mainnetAmountLimit],
                         ["Action ID", root.action.shortActionId || ""],
@@ -134,12 +143,12 @@ TransactionFlowShell {
         }
         FormButton {
             objectName: "continueMainnetButton"; x: 0
-            y: root.detailsOpen ? 900 : 558; width: 458; height: 56
+            y: root.detailsOpen ? 990 : 558; width: 458; height: 56
             label: "Continue"; controlEnabled: walletController.mainnetExecutionAvailable
             onTriggered: walletController.beginMainnetExecution()
         }
         Text {
-            x: 18; y: root.detailsOpen ? 968 : 626; width: 422
+            x: 18; y: root.detailsOpen ? 1058 : 626; width: 422
             horizontalAlignment: Text.AlignHCenter; wrapMode: Text.Wrap
             text: walletController.mainnetGateMessage
             color: walletController.mainnetExecutionAvailable ? Design.textFaint : Design.danger
@@ -147,7 +156,7 @@ TransactionFlowShell {
         }
         FormButton {
             objectName: "editTransferButton"; x: 0
-            y: root.detailsOpen ? 1024 : 678; width: 458; height: 48
+            y: root.detailsOpen ? 1114 : 678; width: 458; height: 48
             label: "Edit transfer"; primary: false
             onTriggered: walletController.editTransfer()
         }

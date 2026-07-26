@@ -62,6 +62,18 @@ def apply_request(pid: int = 44) -> dict[str, object]:
     }
 
 
+def initialize_request(pid: int = 44) -> dict[str, object]:
+    return {
+        "policy_control_version": POLICY_CONTROL_VERSION,
+        "kind": "initialize_authority_state",
+        "request_id": str(uuid.uuid4()),
+        "wallet_pid": pid,
+        "expected_policy_revision": 0,
+        "expected_policy_digest": "1" * 64,
+        "capability": "authority_state",
+    }
+
+
 def response(request_id: str, kind: str = "policy_applied") -> dict[str, object]:
     return {
         "policy_control_version": POLICY_CONTROL_VERSION,
@@ -70,6 +82,10 @@ def response(request_id: str, kind: str = "policy_applied") -> dict[str, object]
         "code": "POLICY_REVISION_APPLIED",
         "policy_revision": 1,
         "policy_digest": "3" * 64,
+        "transfer_authority_enabled": False,
+        "lending_authority_enabled": False,
+        "source_draft_digest": "2" * 64,
+        "authority_state": "READY",
     }
 
 
@@ -83,6 +99,20 @@ def test_policy_control_schema_has_only_digest_metadata() -> None:
         dict(request, policy={}),
         dict(request, candidate_policy_digest="x" * 64),
         dict(request, expected_policy_revision=-1),
+    ):
+        with pytest.raises(ControlProtocolError):
+            validate_request(changed)
+
+
+def test_initialization_schema_is_strict_and_contains_no_secret_or_policy() -> None:
+    request = initialize_request()
+    assert validate_request(request) == request
+    raw = _encode(request)
+    assert b"password" not in raw and b'"policy":' not in raw
+    for changed in (
+        dict(request, password="secret"),
+        dict(request, policy={}),
+        dict(request, capability="lending"),
     ):
         with pytest.raises(ControlProtocolError):
             validate_request(changed)

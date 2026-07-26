@@ -135,6 +135,11 @@ class StubPolicyControl:
         self.revision = 0
         self.digest = policy_digest(Policy("2", "1", False, ()).to_dict())
         self.applies = []
+        self.capability_changes = []
+        self.transfer_enabled = False
+        self.lending_enabled = False
+        self.authority_state = "READY"
+        self.initializations = []
 
     def status(self):
         if not self.available:
@@ -142,6 +147,9 @@ class StubPolicyControl:
         return {
             "kind": "policy_status", "code": "POLICY_STATUS",
             "policy_revision": self.revision, "policy_digest": self.digest,
+            "transfer_authority_enabled": self.transfer_enabled,
+            "lending_authority_enabled": self.lending_enabled,
+            "authority_state": self.authority_state,
         }
 
     def apply(self, expected_revision, expected_digest, draft_digest, candidate_digest):
@@ -155,6 +163,38 @@ class StubPolicyControl:
         return {
             "kind": "policy_applied", "code": "POLICY_REVISION_APPLIED",
             "policy_revision": self.revision, "policy_digest": self.digest,
+            "transfer_authority_enabled": False,
+            "lending_authority_enabled": False,
+            "authority_state": self.authority_state,
+        }
+
+    def set_capability(
+        self, enabled, expected_revision, expected_digest, draft_digest,
+        candidate_digest,
+    ):
+        self.capability_changes.append((
+            enabled, expected_revision, expected_digest, draft_digest, candidate_digest,
+        ))
+        self.revision += 1
+        self.digest = candidate_digest
+        self.lending_enabled = enabled
+        return {
+            "kind": "policy_activated" if enabled else "policy_deactivated",
+            "code": "LENDING_AUTHORITY_ENABLED" if enabled else "LENDING_AUTHORITY_DISABLED",
+            "policy_revision": self.revision, "policy_digest": self.digest,
+            "transfer_authority_enabled": False,
+            "lending_authority_enabled": enabled,
+            "authority_state": self.authority_state,
+        }
+
+    def initialize_authority_state(self, expected_revision, expected_digest):
+        self.initializations.append((expected_revision, expected_digest))
+        self.authority_state = "READY"
+        return {
+            "kind": "authority_initialized", "code": "AUTHORITY_STATE_INITIALIZED",
+            "policy_revision": self.revision, "policy_digest": self.digest,
+            "transfer_authority_enabled": False,
+            "lending_authority_enabled": False, "authority_state": "READY",
         }
 
 
@@ -255,21 +295,22 @@ def test_trusted_recipients_draft_review_password_restart_and_cancel(tmp_path) -
     item._trusted_working = TrustedPolicyDraft()
     assert not item.submitTrustedDraft(secret)
     assert item.errorMessage == "Draft changed; review it again"
-    assert not (tmp_path / "transfer-policy-draft.json").exists()
+    assert not (tmp_path / "authority-policy-draft.json").exists()
     item._trusted_working = reviewed
     assert item.showTrustedDraftReview()
     item.beginTrustedDraftPassword()
     assert not item.submitTrustedDraft(secret + "-wrong")
     assert item.errorMessage == "Authentication failed"
-    assert not (tmp_path / "transfer-policy-draft.json").exists()
+    assert not (tmp_path / "authority-policy-draft.json").exists()
     assert item.submitTrustedDraft(secret)
     assert item.currentScreen == "trusted_recipients"
     assert not item.trustedDraftDirty
     assert item.trustedDraftStatus == (
         "Draft saved. Transfers remain disabled until policy activation."
     )
-    stored = (tmp_path / "transfer-policy-draft.json").read_text(encoding="utf-8")
-    assert '"authority_enabled": false' in stored
+    stored = (tmp_path / "authority-policy-draft.json").read_text(encoding="utf-8")
+    assert '"transfer_authority_enabled": false' in stored
+    assert '"lending_authority_enabled": false' in stored
     assert '"max_amount_atomic": "100000000"' in stored
     assert "$" not in stored and "USD" not in stored
 
@@ -285,7 +326,7 @@ def test_trusted_recipients_draft_review_password_restart_and_cancel(tmp_path) -
     restarted.closeTrustedRecipients()
     restarted.showTrustedRecipients()
     assert restarted.trustedDraftRoutes[0]["routeAmount"] == "100"
-    assert (tmp_path / "transfer-policy-draft.json").read_text(encoding="utf-8") == stored
+    assert (tmp_path / "authority-policy-draft.json").read_text(encoding="utf-8") == stored
 
     assert restarted.editTrustedRoute("base", "usdc")
     checksum = restarted.trustedRoute["recipients"][0]["address"]
@@ -328,7 +369,37 @@ def test_trusted_draft_apply_has_separate_review_password_and_guard_gate(tmp_pat
     assert item.trustedActiveRevision == "Active revision 1"
     assert item.trustedDraftMatchesActive
     assert len(policy_control.applies) == 1
-    assert "Transfers remain disabled" in item.trustedDraftStatus
+    assert "Send and Lending remain disabled" in item.trustedDraftStatus
+
+
+def test_first_authority_state_initialization_has_review_and_fresh_password(
+    tmp_path,
+) -> None:
+    policy_control = StubPolicyControl()
+    policy_control.authority_state = "INITIALIZATION_REQUIRED"
+    item = controller(tmp_path, policy_control)
+    secret = password()
+    item.beginCreate()
+    assert item.submitPassword(secret, secret)
+    assert item.finishBackup()
+
+    item.showTrustedRecipients()
+    assert item.trustedCanInitializeAuthority
+    assert not item.trustedCanApply
+    assert item.showTrustedInitializationReview()
+    assert item.trustedPolicyOperation == "initialize"
+    assert item.currentScreen == "trusted_apply_review"
+    item.beginTrustedApplyPassword()
+    assert not item.submitTrustedApply(secret + "-wrong")
+    assert policy_control.initializations == []
+    assert item.submitTrustedApply(secret)
+
+    assert policy_control.initializations == [(0, policy_control.digest)]
+    assert item.currentScreen == "trusted_recipients"
+    assert not item.trustedCanInitializeAuthority
+    assert item.trustedCanApply
+    assert item.trustedAuthorityState == "Authority state ready"
+    assert "Send and Lending remain disabled" in item.trustedDraftStatus
 
 
 def test_trusted_apply_rejects_post_review_change_and_unavailable_guard(tmp_path) -> None:
@@ -360,13 +431,43 @@ def test_trusted_apply_rejects_post_review_change_and_unavailable_guard(tmp_path
     assert "Guard is unavailable" in item.errorMessage
 
 
+def test_lending_limits_apply_activate_and_deactivate_need_separate_password_reviews(tmp_path) -> None:
+    policy_control = StubPolicyControl()
+    item = controller(tmp_path, policy_control)
+    secret = password()
+    item.beginCreate()
+    assert item.submitPassword(secret, secret)
+    assert item.finishBackup()
+    item.showTrustedRecipients()
+    assert item.saveTrustedLendingLimits("5", "0.0001")
+    assert item.trustedLendingLimits["amount"] == "5"
+    assert item.trustedLendingLimits["fee"] == "0.0001"
+    assert item.showTrustedDraftReview()
+    item.beginTrustedDraftPassword()
+    assert item.submitTrustedDraft(secret)
+    assert item.showTrustedApplyReview()
+    item.beginTrustedApplyPassword()
+    assert item.submitTrustedApply(secret)
+    assert item.trustedCanActivateLending
+    assert item.showTrustedCapabilityReview(True)
+    item.beginTrustedApplyPassword()
+    assert item.submitTrustedApply(secret)
+    assert item.trustedAuthorityStatus == "Send disabled · Lending enabled"
+    assert policy_control.capability_changes[-1][0] is True
+    assert item.showTrustedCapabilityReview(False)
+    item.beginTrustedApplyPassword()
+    assert item.submitTrustedApply(secret)
+    assert item.trustedAuthorityStatus == "Send disabled · Lending disabled"
+    assert policy_control.capability_changes[-1][0] is False
+
+
 def test_corrupt_trusted_draft_does_not_block_public_wallet(tmp_path) -> None:
     item = controller(tmp_path)
     secret = password()
     item.beginCreate()
     assert item.submitPassword(secret, secret)
     assert item.finishBackup()
-    (tmp_path / "transfer-policy-draft.json").write_text("{broken", encoding="utf-8")
+    (tmp_path / "authority-policy-draft.json").write_text("{broken", encoding="utf-8")
 
     item.showSettings()
     assert item.showSettingsSection("security")

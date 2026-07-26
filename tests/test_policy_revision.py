@@ -5,9 +5,10 @@ import json
 import pytest
 
 from holon_policy import (
-    Policy, PolicyRevisionStale, PolicyRevisionStore, PolicyRevisionUnavailable,
+    LendingRule, Policy, PolicyRevisionStale, PolicyRevisionStore, PolicyRevisionUnavailable,
     RecipientRule, TransferRule, policy_digest,
 )
+from holon_lending import ACTION_PROFILES_DIGEST
 from holon_policy.baseline import BASELINE_POLICY_DIGEST
 
 
@@ -123,3 +124,28 @@ def test_revision_rejects_enabled_policy_and_digest_mutation(tmp_path) -> None:
     with pytest.raises(PolicyRevisionUnavailable):
         store.load()
     assert snapshot.policy_revision == 1
+
+
+def test_v3_lending_activation_is_explicit_and_legacy_baseline_stays_disabled(tmp_path) -> None:
+    baseline = Policy("2", "1", False, ())
+    store = PolicyRevisionStore(tmp_path, baseline)
+    rule = LendingRule(
+        "lending", "1", "aave-v3-base-usdc", "1", "base", "usdc", 8453,
+        ("approve", "supply"), "5000000", "100000000000000",
+        ACTION_PROFILES_DIGEST,
+    )
+    disabled = Policy("3", "2", False, (), False, (rule,))
+    saved, changed = store.apply(disabled, "4" * 64, 0, BASELINE_POLICY_DIGEST)
+    assert changed and not saved.policy.lending_authority_enabled
+    enabled = Policy("3", "2", False, (), True, (rule,))
+    active, changed = store.apply(
+        enabled, "4" * 64, saved.policy_revision, saved.policy_digest,
+        require_disabled=False,
+    )
+    assert changed and active.policy.lending_authority_enabled
+    assert not active.policy.authority_enabled
+    restored, changed = store.apply(
+        disabled, "4" * 64, active.policy_revision, active.policy_digest,
+        require_disabled=False,
+    )
+    assert changed and not restored.policy.lending_authority_enabled

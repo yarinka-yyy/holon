@@ -18,6 +18,7 @@ from holon_wallet_control import (
 )
 from holon_wallet_control.public_protocol import MAX_PUBLIC_BYTES
 from holon_wallet_control.authority_protocol import (
+    _encode as _authority_encode,
     validate_request as validate_authority_request,
     validate_response as validate_authority_response,
 )
@@ -251,3 +252,37 @@ def test_authority_protocol_is_exact_correlated_and_fee_bounded() -> None:
             validate_authority_response(invalid, checked, 202)
     with pytest.raises(ControlProtocolError):
         validate_authority_request(dict(request, password="hidden"))
+
+
+def test_lending_authority_protocol_has_only_semantics_and_material_digests() -> None:
+    request = {
+        "authority_version": AUTHORITY_VERSION, "kind": "prepare_lending_action",
+        "flow_id": "11111111-1111-4111-8111-111111111111",
+        "action_id": "act-22222222-2222-4222-8222-222222222222",
+        "policy_version": "2", "policy_revision": 4,
+        "policy_digest": "c" * 64, "action_profile_digest": "d" * 64,
+        "action": "supply", "amount_mode": "exact", "amount": "1",
+        "created_at": "2026-07-26T12:00:00Z",
+        "expires_at": "2026-07-26T12:05:00Z",
+    }
+    checked = validate_authority_request(request)
+    response = {
+        "authority_version": AUTHORITY_VERSION, "kind": "lending_action_prepared",
+        "flow_id": request["flow_id"], "action_id": request["action_id"],
+        "wallet_pid": 202, "profile_id": "profile-one",
+        "sender": "0x2222222222222222222222222222222222222222",
+        "requested_action": "supply", "next_action": "approve",
+        "network": "base", "asset": "usdc", "amount_atomic": "1000000",
+        "target": "0x3333333333333333333333333333333333333333",
+        "method": "approve", "max_total_fee_wei": "100000000000000",
+        "l2_fee_ceiling_wei": "90000000000000",
+        "l1_fee_upper_bound_wei": "10000000000000",
+        "prepared_digest": "a" * 64, "created_at": request["created_at"],
+        "expires_at": request["expires_at"], "code": "LENDING_ACTION_PREPARED",
+        "policy_revision": 4, "policy_digest": "c" * 64,
+        "action_profile_digest": "d" * 64,
+    }
+    assert validate_authority_response(response, checked, 202) == response
+    wire = _authority_encode(response)
+    for secret_field in (b"password", b"calldata", b"private", b"rawSigned"):
+        assert secret_field not in wire

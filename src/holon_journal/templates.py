@@ -7,6 +7,7 @@ from typing import Any, Mapping
 from .model import EventType
 
 TEMPLATES = {
+    EventType.AUTHORITY_STATE_INITIALIZED: "Authority state was initialized locally.",
     EventType.POLICY_DECISION: "Policy decision: {policy_result}.",
     EventType.REFUSAL: "Authority request was refused ({code}).",
     EventType.FLOW_STARTED: "Protected Wallet flow started.",

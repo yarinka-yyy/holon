@@ -147,11 +147,13 @@ class UiPolicyControl:
         self.revision = 0
         self.digest = policy_digest(Policy("2", "1", False, ()).to_dict())
         self.calls = 0
+        self.authority_state = "READY"
 
     def status(self):
         return {
             "kind": "policy_status", "code": "POLICY_STATUS",
             "policy_revision": self.revision, "policy_digest": self.digest,
+            "authority_state": self.authority_state,
         }
 
     def apply(self, _revision, _active_digest, _draft_digest, policy_value):
@@ -161,6 +163,15 @@ class UiPolicyControl:
         return {
             "kind": "policy_applied", "code": "POLICY_REVISION_APPLIED",
             "policy_revision": self.revision, "policy_digest": self.digest,
+            "authority_state": self.authority_state,
+        }
+
+    def initialize_authority_state(self, _revision, _digest):
+        self.authority_state = "READY"
+        return {
+            "kind": "authority_initialized", "code": "AUTHORITY_STATE_INITIALIZED",
+            "policy_revision": self.revision, "policy_digest": self.digest,
+            "authority_state": "READY",
         }
 
 
@@ -511,7 +522,7 @@ def test_send_review_mainnet_confirmation_result_and_history(tmp_path, qt_app) -
         assert app.controller.transferAction["expiresAt"].endswith("UTC")
         assert app.controller.mainnetFeeLimit.endswith("ETH")
         invoke(child(app, "transferDetailsButton"), "trigger")
-        assert child(app, "transferReviewScroll").property("contentHeight") == 1090
+        assert child(app, "transferReviewScroll").property("contentHeight") == 1200
 
         invoke(child(app, "editTransferButton"), "trigger")
         qt_app.processEvents()
@@ -657,7 +668,7 @@ def test_trusted_recipients_qml_review_and_password_save(tmp_path, qt_app) -> No
         invoke(child(app, "trustedPasswordSubmitButton"), "trigger")
         assert app.controller.currentScreen == "trusted_recipients"
         assert "Draft saved" in child(app, "trustedDraftStatus").property("text")
-        assert repository.paths.transfer_policy_draft.is_file()
+        assert repository.paths.authority_policy_draft.is_file()
         assert not app.controller.trustedDraftDirty
         assert app._test_mainnet_rpc.send_calls == 0
     finally:
@@ -694,6 +705,42 @@ def test_trusted_recipients_qml_apply_uses_separate_review_and_password(
         assert app.controller.currentScreen == "trusted_recipients"
         assert policy_control.calls == 1
         assert "Draft applied as revision 1" in app.controller.trustedDraftStatus
+        assert app._test_mainnet_rpc.send_calls == 0
+    finally:
+        app.close()
+
+
+def test_trusted_recipients_qml_initializes_authority_before_apply(
+    tmp_path, qt_app,
+) -> None:
+    repository = VaultRepository(WalletPaths(tmp_path))
+    password = fresh_password()
+    repository.create_new(
+        password, repository.new_record(generate_mnemonic(), "Main Account"),
+    )
+    policy_control = UiPolicyControl()
+    policy_control.authority_state = "INITIALIZATION_REQUIRED"
+    app = make_app(qt_app, repository, policy_control_client=policy_control)
+    try:
+        app.controller.showTrustedRecipients()
+        qt_app.processEvents()
+        button = child(app, "trustedApplyButton")
+        assert button.property("enabled")
+        invoke(button, "trigger")
+        qt_app.processEvents()
+        assert app.controller.currentScreen == "trusted_apply_review"
+        assert child(app, "trustedReviewHeader").property("title") == (
+            "Initialize Authority"
+        )
+        invoke(child(app, "trustedReviewContinueButton"), "trigger")
+        qt_app.processEvents()
+        set_text(app, "trustedPasswordInput", password)
+        invoke(child(app, "trustedPasswordSubmitButton"), "trigger")
+        qt_app.processEvents()
+        assert app.controller.currentScreen == "trusted_recipients"
+        assert policy_control.authority_state == "READY"
+        assert "Send disabled" in app.controller.trustedAuthorityStatus
+        assert "Lending disabled" in app.controller.trustedAuthorityStatus
         assert app._test_mainnet_rpc.send_calls == 0
     finally:
         app.close()

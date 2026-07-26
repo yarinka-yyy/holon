@@ -98,3 +98,10 @@ class JournalStore:
     def bootstrap_empty_for_test(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_bytes(b"")
+
+    def initialize_empty(self) -> None:
+        """Create a first-run journal without overwriting any prior evidence."""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self.path.open("xb") as stream:
+            stream.flush()
+            os.fsync(stream.fileno())

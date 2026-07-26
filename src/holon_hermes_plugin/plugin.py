@@ -23,17 +23,23 @@ WALLET_BALANCES_TOOL = "holon_wallet_balances"
 LENDING_COMPARE_TOOL = "holon_lending_compare"
 LENDING_POSITIONS_TOOL = "holon_lending_positions"
 LENDING_PREPARE_TOOL = "holon_lending_prepare"
+LENDING_EXECUTE_TOOL = "holon_lending_execute"
 PREPARE_TRANSFER_TOOL = "holon_prepare_transfer"
 TRANSFER_STATUS_TOOL = "holon_transfer_status"
 CANCEL_TRANSFER_TOOL = "holon_cancel_transfer"
 RECOVER_TRANSFER_TOOL = "holon_recover_transfer"
+ACTION_STATUS_TOOL = "holon_action_status"
+CANCEL_ACTION_TOOL = "holon_cancel_action"
+RECOVER_ACTION_TOOL = "holon_recover_action"
 CAPABILITIES = [
     "health", "open_wallet", "wallet_balances", "prepare_transfer",
     "transfer_status", "cancel_transfer", "recover_transfer", "lending_compare",
-    "lending_positions", "lending_prepare",
+    "lending_positions", "lending_prepare", "lending_execute",
+    "action_status", "cancel_action", "recover_action",
 ]
 PROTECTED_TOOL_ALLOWLIST = frozenset({
     HEALTH_TOOL, TRANSFER_STATUS_TOOL, CANCEL_TRANSFER_TOOL, RECOVER_TRANSFER_TOOL,
+    ACTION_STATUS_TOOL, CANCEL_ACTION_TOOL, RECOVER_ACTION_TOOL,
 })
 
 
@@ -115,6 +121,8 @@ def _unavailable_lending_preview() -> dict[str, Any]:
         "amount_mode": None, "amount_atomic": None, "display_amount": None,
         "target": None, "method": None, "calldata_hash": None,
         "native_value_wei": "0", "nonce": None, "gas": None,
+        "max_fee_per_gas_wei": None, "max_priority_fee_per_gas_wei": None,
+        "l2_fee_ceiling_wei": None, "l1_fee_upper_bound_wei": None,
         "max_total_fee_wei": None, "block_number": None, "observed_at": None,
         "expires_at": None, "preview_digest": None, "checks": [],
         "caveats": ["WALLET_UNAVAILABLE"], "code": "LENDING_ACTION_UNAVAILABLE",
@@ -290,6 +298,45 @@ class PluginRuntime:
         except Exception:
             pass
         return json.dumps(_unavailable_lending_preview(), separators=(",", ":"))
+
+    def handle_lending_execute(
+        self, params: Optional[dict] = None, **kwargs: Any,
+    ) -> str:
+        del kwargs
+        if not isinstance(params, dict) or set(params) != {"action", "amount_mode", "amount"}:
+            return self._safe_transfer_failure()
+        if (
+            params.get("action") != "supply" or params.get("amount_mode") != "exact"
+            or not isinstance(params.get("amount"), str)
+        ):
+            return self._safe_transfer_failure()
+        action_id = new_action_id()
+        intent = {
+            "module_id": "lending", "module_version": "1",
+            "protocol_profile_id": "aave-v3-base-usdc",
+            "protocol_profile_version": "1", "network": "base", "asset": "usdc",
+            "beneficiary_mode": "active_wallet_account", **params,
+        }
+        try:
+            response = self._connector.lending_action_execute(intent, action_id)
+        except Exception:
+            return self._safe_transfer_failure(action_id)
+        if response.kind is MessageKind.PROTECTED_FLOW_STARTED:
+            self._protected_latch = True
+            self._protected_action_id = action_id
+            return json.dumps({
+                "status": "AWAITING_LOCAL_CONFIRMATION", "authority_available": True,
+                "action_id": action_id, "action": "supply", "amount": params["amount"],
+                "code": response.payload["code"],
+                "message": "Review and confirm the independent Aave action in Wallet.",
+                "turn_state": "END_REQUIRED",
+                "next_step": "End this turn and wait for the user's decision in Wallet.",
+            }, separators=(",", ":"))
+        return json.dumps({
+            "status": "REFUSED", "authority_available": False, "action_id": action_id,
+            "code": response.payload.get("code", "LENDING_ACTION_REFUSED"),
+            "message": response.payload.get("message", "Lending action was refused."),
+        }, separators=(",", ":"))
 
     @staticmethod
     def _safe_transfer_failure(action_id: str | None = None) -> str:
@@ -518,6 +565,10 @@ def _handle_lending_prepare(params: Optional[dict] = None, **kwargs: Any) -> str
     return _runtime.handle_lending_prepare(params, **kwargs)
 
 
+def _handle_lending_execute(params: Optional[dict] = None, **kwargs: Any) -> str:
+    return _runtime.handle_lending_execute(params, **kwargs)
+
+
 def _handle_prepare_transfer(params: Optional[dict] = None, **kwargs: Any) -> str:
     return _runtime.handle_prepare_transfer(params, **kwargs)
 
@@ -642,6 +693,22 @@ def register(ctx: Any) -> None:
         handler=_handle_lending_prepare,
         description="Prepare a read-only Aave action preview.",
     )
+    ctx.register_tool(
+        name=LENDING_EXECUTE_TOOL, toolset="holon",
+        schema={
+            "name": LENDING_EXECUTE_TOOL,
+            "description": "Prepare one independently reviewed Aave V3 Base USDC authority action.",
+            "parameters": {
+                "type": "object", "properties": {
+                    "action": {"type": "string", "enum": ["supply"]},
+                    "amount_mode": {"type": "string", "enum": ["exact"]},
+                    "amount": {"type": "string"},
+                }, "required": ["action", "amount_mode", "amount"],
+                "additionalProperties": False,
+            },
+        }, handler=_handle_lending_execute,
+        description="Prepare one Aave supply authority action.",
+    )
     transfer_properties = {
         "network": {"type": "string", "enum": ["ethereum", "base"]},
         "asset": {"type": "string", "enum": ["eth", "usdc"]},
@@ -705,5 +772,15 @@ def register(ctx: Any) -> None:
         handler=_handle_recover_transfer,
         description="Finish safe recovery for an interrupted transfer.",
     )
+    for name, handler, description in (
+        (ACTION_STATUS_TOOL, _handle_transfer_status, "Read generic protected action status."),
+        (CANCEL_ACTION_TOOL, _handle_cancel_transfer, "Cancel a generic protected action."),
+        (RECOVER_ACTION_TOOL, _handle_recover_transfer, "Recover a generic interrupted action."),
+    ):
+        ctx.register_tool(
+            name=name, toolset="holon",
+            schema={"name": name, "description": description, "parameters": action_parameters},
+            handler=handler, description=description,
+        )
     ctx.register_hook("on_session_start", _on_session_start)
     ctx.register_hook("pre_tool_call", _on_pre_tool_call)

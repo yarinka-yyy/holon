@@ -21,16 +21,40 @@ PageState {
             text: walletController.trustedDraftStatus + "\n"
                 + walletController.trustedActiveRevision
                 + (walletController.trustedDraftMatchesActive ? " · draft matches" : " · draft differs")
+                + " · " + walletController.trustedAuthorityStatus
+                + "\n" + walletController.trustedAuthorityState
             color: walletController.trustedDraftAvailable ? Design.text : Design.danger
             font.family: Design.fontFamily; font.pixelSize: 12
         }
     }
+    SurfaceCard {
+        x: 28; y: 230; width: 458; height: 142
+        Text { x: 16; y: 12; text: "AAVE · BASE · USDC"; color: Design.text; font.family: Design.fontFamily; font.pixelSize: 14; font.weight: Font.DemiBold }
+        DraftField {
+            id: lendingAmount; x: 16; y: 38; width: 170; height: 72
+            label: "Supply cap (USDC)"; placeholderText: "5"
+            text: walletController.trustedLendingLimits.amount
+            fieldObjectName: "trustedLendingAmountInput"
+        }
+        DraftField {
+            id: lendingFee; x: 196; y: 38; width: 150; height: 72
+            label: "Fee cap (ETH)"; placeholderText: "0.0001"
+            text: walletController.trustedLendingLimits.fee
+            fieldObjectName: "trustedLendingFeeInput"
+        }
+        FormButton {
+            objectName: "trustedSaveLendingButton"; x: 354; y: 58; width: 88; height: 48
+            label: "Set Limits"; primary: false
+            onTriggered: walletController.saveTrustedLendingLimits(lendingAmount.text, lendingFee.text)
+        }
+        Text { x: 16; y: 116; text: "Only exact approve and supply · Send remains separate"; color: Design.textFaint; font.family: Design.fontFamily; font.pixelSize: 10 }
+    }
     Text {
-        x: 28; y: 232; text: "TRANSFER ROUTES"; color: Design.textFaint
+        x: 28; y: 392; text: "TRANSFER ROUTES"; color: Design.textFaint
         font.family: Design.fontFamily; font.pixelSize: 11; font.weight: Font.Medium
     }
     Text {
-        visible: root.routes.length === 0; x: 52; y: 334; width: 410
+        visible: root.routes.length === 0; x: 52; y: 475; width: 410
         horizontalAlignment: Text.AlignHCenter; wrapMode: Text.Wrap
         text: walletController.trustedDraftAvailable
             ? "No routes in this draft. Add one of the supported Ethereum or Base routes."
@@ -39,7 +63,7 @@ PageState {
     }
     ListView {
         id: routeList; objectName: "trustedRouteList"
-        x: 28; y: 258; width: 458; height: 336; clip: true; spacing: 10
+        x: 28; y: 416; width: 458; height: 178; clip: true; spacing: 10
         model: root.routes; boundsBehavior: Flickable.StopAtBounds
         delegate: SurfaceCard {
             required property var modelData
@@ -82,19 +106,35 @@ PageState {
     }
     FormButton {
         objectName: "trustedApplyButton"; x: 328; y: 620; width: 158; height: 52
-        label: "Apply Draft"
-        controlEnabled: walletController.trustedCanApply
-        onTriggered: walletController.showTrustedApplyReview()
+        label: walletController.trustedCanInitializeAuthority
+            ? "Initialize Authority" : "Apply Draft"
+        controlEnabled: walletController.trustedCanInitializeAuthority
+            || walletController.trustedCanApply
+        onTriggered: walletController.trustedCanInitializeAuthority
+            ? walletController.showTrustedInitializationReview()
+            : walletController.showTrustedApplyReview()
+    }
+    FormButton {
+        objectName: "trustedActivateLendingButton"; x: 28; y: 684; width: 220; height: 48
+        label: walletController.trustedLendingLimits.enabled ? "Lending Active" : "Activate Lending"
+        controlEnabled: walletController.trustedCanActivateLending
+        onTriggered: walletController.showTrustedCapabilityReview(true)
+    }
+    FormButton {
+        objectName: "trustedDeactivateLendingButton"; x: 266; y: 684; width: 220; height: 48
+        label: "Deactivate Lending"; primary: false
+        controlEnabled: walletController.trustedCanDeactivateLending
+        onTriggered: walletController.showTrustedCapabilityReview(false)
     }
     Text {
-        objectName: "trustedDraftError"; x: 48; y: 694; width: 418
+        objectName: "trustedDraftError"; x: 48; y: 742; width: 418
         horizontalAlignment: Text.AlignHCenter; wrapMode: Text.Wrap
         text: walletController.errorMessage; color: Design.danger
         font.family: Design.fontFamily; font.pixelSize: 12
     }
     Text {
-        x: 48; y: 754; width: 418; horizontalAlignment: Text.AlignHCenter
-        text: "Labels and USD estimates never authorize a transfer"
+        x: 48; y: 786; width: 418; horizontalAlignment: Text.AlignHCenter
+        text: "Draft limits do not authorize signing until Guard activation"
         color: Design.textFaint; font.family: Design.fontFamily; font.pixelSize: 11
     }
 }

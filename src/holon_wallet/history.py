@@ -278,7 +278,9 @@ def _validate_record(record: WalletHistoryRecord) -> None:
         raise HistoryValidationError("History action ID is invalid")
     if not isinstance(record.profile_id, str) or not 1 <= len(record.profile_id) <= 128:
         raise HistoryValidationError("History profile ID is invalid")
-    if record.action_type not in {"transfer", "revoke"}:
+    if record.action_type not in {
+        "transfer", "revoke", "lending_approve", "lending_supply",
+    }:
         raise HistoryValidationError("History action type is invalid")
     expected_chain = {"ethereum": 1, "base": 8453}.get(record.network)
     if expected_chain is None or type(record.chain_id) is not int or record.chain_id != expected_chain:
@@ -305,6 +307,11 @@ def _validate_record(record: WalletHistoryRecord) -> None:
         }
     ):
         raise HistoryValidationError("History revoke is invalid")
+    if record.action_type.startswith("lending_") and (
+        record.network != "base" or record.token != "USDC" or record.contract is None
+        or record.recipient.lower() == record.sender.lower()
+    ):
+        raise HistoryValidationError("History lending action is invalid")
     if record.transaction_hash is not None and (
         not isinstance(record.transaction_hash, str)
         or HASH_RE.fullmatch(record.transaction_hash) is None

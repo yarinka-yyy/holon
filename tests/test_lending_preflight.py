@@ -129,6 +129,11 @@ class FakeRpc:
         self.last_transaction = dict(transaction)
         return 75_000
 
+    def l1_fee_upper_bound(self, transaction_size, block):
+        assert transaction_size == 512
+        del block
+        return 2_000_000_000_000
+
     def simulate(self, transaction):
         self.calls.append("simulate")
         if self.simulation_error:

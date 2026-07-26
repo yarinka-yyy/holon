@@ -243,6 +243,11 @@ class PreparedTransferAction:
     simulation: bool = False
     policy_revision: int = 0
     policy_digest: str = ""
+    action_type: str = "transfer"
+    method: str = "transfer"
+    action_profile_digest: str = ""
+    l2_fee_ceiling_wei: int = 0
+    l1_fee_upper_bound_wei: int = 0
 
     def material_fields(self) -> dict[str, object]:
         return {
@@ -268,6 +273,11 @@ class PreparedTransferAction:
             "simulation": self.simulation,
             "policy_revision": self.policy_revision,
             "policy_digest": self.policy_digest,
+            "action_type": self.action_type,
+            "method": self.method,
+            "action_profile_digest": self.action_profile_digest,
+            "l2_fee_ceiling_wei": self.l2_fee_ceiling_wei,
+            "l1_fee_upper_bound_wei": self.l1_fee_upper_bound_wei,
         }
 
     @property
@@ -906,6 +916,11 @@ def transfer_action_to_map(action: PreparedTransferAction) -> dict[str, object]:
         "maxFeePerGas": str(tx.max_fee_per_gas),
         "maxPriorityFeePerGas": str(tx.max_priority_fee_per_gas),
         "maxTotalFeeWei": str(action.max_total_fee_wei),
+        "l2FeeCeilingWei": str(action.l2_fee_ceiling_wei),
+        "l1FeeUpperBoundWei": str(action.l1_fee_upper_bound_wei),
+        "actionType": action.action_type,
+        "method": action.method,
+        "actionProfileDigest": action.action_profile_digest,
         "maxFeeDisplay": f"≤ {_format_wei(action.max_total_fee_wei)} ETH",
         "expiresAt": action.expires_at.strftime("%H:%M:%S UTC"),
         "digest": action.digest,

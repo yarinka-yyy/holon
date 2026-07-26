@@ -166,3 +166,12 @@ class GuardCore:
                 idle_snapshot(GuardState.SIGNING_DISABLED, reason, self.clock())
             )
             return self._result(True, "SIGNING_DISABLED", "Wallet authority is disabled.")
+
+    def enable_signing(self, reason: str = "POLICY_AUTHORITY_ENABLED") -> GuardResult:
+        with self._lock:
+            if self.snapshot.state not in {GuardState.NORMAL, GuardState.SIGNING_DISABLED}:
+                return self._result(False, "POLICY_FLOW_ACTIVE", "A protected flow is active.")
+            if self.ledger.snapshot.current is not None:
+                return self._result(False, "POLICY_FLOW_ACTIVE", "An authority action is active.")
+            self._persist(idle_snapshot(GuardState.NORMAL, reason, self.clock()))
+            return self._result(True, reason, "Wallet authority is available.")

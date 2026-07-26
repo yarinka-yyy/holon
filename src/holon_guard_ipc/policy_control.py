@@ -16,8 +16,8 @@ from ctypes import wintypes
 
 from .wallet_status import _client_pid
 
-POLICY_CONTROL_VERSION = "1"
-POLICY_CONTROL_PIPE_NAME = r"\\.\pipe\Holon.Guard.Policy.v1"
+POLICY_CONTROL_VERSION = "2"
+POLICY_CONTROL_PIPE_NAME = r"\\.\pipe\Holon.Guard.Policy.v2"
 MAX_POLICY_CONTROL_BYTES = 4096
 STATUS_FIELDS = frozenset({
     "policy_control_version", "kind", "request_id", "wallet_pid",
@@ -27,9 +27,14 @@ APPLY_FIELDS = frozenset({
     "expected_policy_revision", "expected_policy_digest",
     "reviewed_draft_digest", "candidate_policy_digest",
 })
+CAPABILITY_FIELDS = APPLY_FIELDS | {"capability"}
+INITIALIZE_FIELDS = STATUS_FIELDS | {
+    "expected_policy_revision", "expected_policy_digest", "capability",
+}
 RESPONSE_FIELDS = frozenset({
     "policy_control_version", "kind", "request_id", "code",
-    "policy_revision", "policy_digest",
+    "policy_revision", "policy_digest", "transfer_authority_enabled",
+    "lending_authority_enabled", "source_draft_digest", "authority_state",
 })
 
 
@@ -145,27 +150,39 @@ def _decode(raw: bytes) -> dict[str, object]:
 
 
 def validate_request(value: Mapping[str, object]) -> dict[str, object]:
-    expected = APPLY_FIELDS if value.get("kind") == "apply_draft" else STATUS_FIELDS
+    kind = value.get("kind")
+    expected = (
+        APPLY_FIELDS if kind == "apply_draft"
+        else CAPABILITY_FIELDS if kind in {"activate_capability", "deactivate_capability"}
+        else INITIALIZE_FIELDS if kind == "initialize_authority_state"
+        else STATUS_FIELDS
+    )
     if (
         set(value) != expected
         or value.get("policy_control_version") != POLICY_CONTROL_VERSION
-        or value.get("kind") not in {"policy_status", "apply_draft"}
+        or kind not in {
+            "policy_status", "apply_draft", "activate_capability", "deactivate_capability",
+            "initialize_authority_state",
+        }
     ):
         raise ControlProtocolError("Invalid policy control request")
     _uuid(value.get("request_id"))
     if type(value.get("wallet_pid")) is not int or value["wallet_pid"] <= 0:
         raise ControlProtocolError("Invalid Wallet process")
-    if value["kind"] == "apply_draft":
+    if kind != "policy_status":
         if (
             type(value.get("expected_policy_revision")) is not int
             or value["expected_policy_revision"] < 0
         ):
             raise ControlProtocolError("Invalid expected policy revision")
-        for field in (
-            "expected_policy_digest", "reviewed_draft_digest",
-            "candidate_policy_digest",
-        ):
-            _digest(value.get(field))
+        _digest(value.get("expected_policy_digest"))
+        if kind != "initialize_authority_state":
+            for field in ("reviewed_draft_digest", "candidate_policy_digest"):
+                _digest(value.get(field))
+        if kind in {"activate_capability", "deactivate_capability"} and value.get("capability") != "lending":
+            raise ControlProtocolError("Invalid policy capability")
+        if kind == "initialize_authority_state" and value.get("capability") != "authority_state":
+            raise ControlProtocolError("Invalid policy capability")
     return dict(value)
 
 
@@ -175,16 +192,29 @@ def validate_response(
     if (
         set(value) != RESPONSE_FIELDS
         or value.get("policy_control_version") != POLICY_CONTROL_VERSION
-        or value.get("kind") not in {"policy_status", "policy_applied", "policy_refused"}
+        or value.get("kind") not in {
+            "policy_status", "policy_applied", "policy_activated",
+            "policy_deactivated", "policy_refused",
+            "authority_initialized",
+        }
         or value.get("request_id") != request_id
         or not isinstance(value.get("code"), str)
         or not value["code"]
         or len(value["code"]) > 64
         or type(value.get("policy_revision")) is not int
         or value["policy_revision"] < 0
+        or type(value.get("transfer_authority_enabled")) is not bool
+        or type(value.get("lending_authority_enabled")) is not bool
+        or value.get("authority_state") not in {
+            "READY", "INITIALIZATION_REQUIRED", "INVALID",
+        }
+        or value.get("source_draft_digest") is not None
+        and not isinstance(value.get("source_draft_digest"), str)
     ):
         raise ControlProtocolError("Invalid policy control response")
     _digest(value.get("policy_digest"))
+    if value.get("source_draft_digest") is not None:
+        _digest(value.get("source_draft_digest"))
     return dict(value)
 
 
@@ -228,6 +258,35 @@ class PolicyControlClient:
             "candidate_policy_digest": candidate_policy_digest,
         }, timeout)
 
+    def set_capability(
+        self, enabled: bool, expected_policy_revision: int,
+        expected_policy_digest: str, reviewed_draft_digest: str,
+        candidate_policy_digest: str, timeout: float = 3.0,
+    ) -> dict[str, object]:
+        return self._exchange({
+            "policy_control_version": POLICY_CONTROL_VERSION,
+            "kind": "activate_capability" if enabled else "deactivate_capability",
+            "request_id": str(uuid.uuid4()), "wallet_pid": self._wallet_pid(),
+            "expected_policy_revision": expected_policy_revision,
+            "expected_policy_digest": expected_policy_digest,
+            "reviewed_draft_digest": reviewed_draft_digest,
+            "candidate_policy_digest": candidate_policy_digest,
+            "capability": "lending",
+        }, timeout)
+
+    def initialize_authority_state(
+        self, expected_policy_revision: int, expected_policy_digest: str,
+        timeout: float = 3.0,
+    ) -> dict[str, object]:
+        return self._exchange({
+            "policy_control_version": POLICY_CONTROL_VERSION,
+            "kind": "initialize_authority_state",
+            "request_id": str(uuid.uuid4()), "wallet_pid": self._wallet_pid(),
+            "expected_policy_revision": expected_policy_revision,
+            "expected_policy_digest": expected_policy_digest,
+            "capability": "authority_state",
+        }, timeout)
+
     def _exchange(self, request: Mapping[str, object], timeout: float) -> dict[str, object]:
         checked = validate_request(request)
         self._waiter(self.pipe_name, timeout)
@@ -256,7 +315,10 @@ class PolicyControlClient:
         allowed = (
             {"policy_status", "policy_refused"}
             if checked["kind"] == "policy_status"
-            else {"policy_applied", "policy_refused"}
+            else {
+                "policy_applied", "policy_activated", "policy_deactivated",
+                "authority_initialized", "policy_refused",
+            }
         )
         if result["kind"] not in allowed:
             raise ControlProtocolError("Unexpected policy control response")

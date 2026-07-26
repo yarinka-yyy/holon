@@ -7,7 +7,7 @@ from typing import Any, Mapping
 
 from holon_contracts import RefusalCode
 
-from .model import Policy, RecipientRule, TransferRule
+from .model import LendingRule, Policy, RecipientRule, TransferRule
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +82,65 @@ class PolicyEngine:
             ), None
         limits = self._evaluate_limits(rule, amount_atomic, recipient)
         return limits, rule if limits.allowed else None
+
+    def evaluate_lending_intent(
+        self, payload: Mapping[str, Any], action_profile_digest: str,
+    ) -> tuple[PolicyDecision, LendingRule | None]:
+        if not self.policy.lending_authority_enabled:
+            return PolicyDecision.refuse(
+                RefusalCode.POLICY_AUTHORITY_DISABLED,
+                "Lending authority is disabled by policy.",
+            ), None
+        rule = next((item for item in self.policy.lending_rules if (
+            item.module_id == payload.get("module_id")
+            and item.protocol_profile_id == payload.get("protocol_profile_id")
+            and item.network == payload.get("network")
+            and item.asset == payload.get("asset")
+        )), None)
+        if rule is None or rule.action_profile_digest != action_profile_digest:
+            return PolicyDecision.refuse(
+                RefusalCode.ACTION_NOT_ALLOWED, "Lending profile is not allowed.",
+            ), None
+        if payload.get("action") != "supply" or payload.get("amount_mode") != "exact":
+            return PolicyDecision.refuse(
+                RefusalCode.ACTION_NOT_ALLOWED, "Lending action is not allowed.",
+            ), None
+        amount = payload.get("amount_atomic")
+        if type(amount) is not int or amount <= 0:
+            return PolicyDecision.refuse(
+                RefusalCode.AMOUNT_INVALID, "Lending amount is invalid.",
+            ), None
+        if amount > int(rule.max_amount_atomic):
+            return PolicyDecision.refuse(
+                RefusalCode.AMOUNT_LIMIT_EXCEEDED,
+                "Lending amount exceeds the policy limit.",
+            ), None
+        return PolicyDecision.allow(), rule
+
+    @staticmethod
+    def evaluate_lending_prepared(
+        next_action: object, amount_atomic: object, max_total_fee_wei: object,
+        rule: LendingRule,
+    ) -> PolicyDecision:
+        if next_action not in rule.allowed_actions:
+            return PolicyDecision.refuse(
+                RefusalCode.ACTION_NOT_ALLOWED, "Prepared lending action is not allowed.",
+            )
+        if type(amount_atomic) is not int or amount_atomic <= 0:
+            return PolicyDecision.refuse(RefusalCode.AMOUNT_INVALID, "Amount is invalid.")
+        if amount_atomic > int(rule.max_amount_atomic):
+            return PolicyDecision.refuse(
+                RefusalCode.AMOUNT_LIMIT_EXCEEDED, "Amount exceeds the policy limit.",
+            )
+        if type(max_total_fee_wei) is not int or max_total_fee_wei <= 0:
+            return PolicyDecision.refuse(
+                RefusalCode.MAX_FEE_REQUIRED, "Maximum fee is required.",
+            )
+        if max_total_fee_wei > int(rule.max_total_fee_wei):
+            return PolicyDecision.refuse(
+                RefusalCode.MAX_FEE_EXCEEDED, "Maximum fee exceeds the policy limit.",
+            )
+        return PolicyDecision.allow()
 
     @classmethod
     def _evaluate_limits(cls, rule: TransferRule, amount: object,

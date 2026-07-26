@@ -34,6 +34,8 @@ from .transfer import (
     encode_usdc_transfer,
     transfer_route,
 )
+from holon_lending import ActionProfilesState
+from holon_lending.preflight import encode_approve, encode_supply
 from .vault import (
     AuthenticationFailedError,
     VaultRepository,
@@ -240,6 +242,8 @@ def validate_signing_action(
         return OfflineSigningCode.ACTION_EXPIRED
     if isinstance(action, PreparedRevokeAction):
         return _validate_revoke_action(action, expected_digest, now)
+    if action.action_type == "lending":
+        return _validate_lending_action(action, expected_digest, now)
     tx = action.transaction
     try:
         route = transfer_route(action.network_id, action.asset_id)
@@ -278,6 +282,39 @@ def validate_signing_action(
         and tx.max_fee_per_gas > 0
         and action.max_total_fee_wei == tx.gas * tx.max_fee_per_gas
         and action.block_number >= 0
+    )
+    return None if valid else OfflineSigningCode.ACTION_INVALID
+
+
+def _validate_lending_action(
+    action: PreparedTransferAction, expected_digest: str, now: datetime,
+) -> OfflineSigningCode | None:
+    profile = ActionProfilesState.load().profile
+    if profile is None:
+        return OfflineSigningCode.ACTION_INVALID
+    tx = action.transaction
+    expected_data = (
+        encode_approve(profile.pool, action.amount_atomic)
+        if action.method == "approve"
+        else encode_supply(profile.asset, action.amount_atomic, action.sender)
+    )
+    expected_target = profile.asset if action.method == "approve" else profile.pool
+    valid = (
+        action.digest == expected_digest and now < action.expires_at
+        and action.expires_at - action.created_at == ACTION_LIFETIME
+        and action.method in {"approve", "supply"}
+        and action.action_profile_digest == profile.digest
+        and action.network_id == "base" and action.asset_id == "usdc"
+        and action.chain_id == profile.chain_id and action.token_contract == profile.asset
+        and Web3.is_checksum_address(action.sender) and action.amount_atomic > 0
+        and tx.transaction_type == 2 and tx.chain_id == profile.chain_id
+        and tx.to.lower() == expected_target.lower() and tx.value == 0
+        and tx.data == expected_data and tx.nonce >= 0 and tx.gas > 0
+        and 0 <= tx.max_priority_fee_per_gas <= tx.max_fee_per_gas
+        and action.l2_fee_ceiling_wei == tx.gas * tx.max_fee_per_gas
+        and action.l1_fee_upper_bound_wei > 0
+        and action.max_total_fee_wei
+            == action.l2_fee_ceiling_wei + action.l1_fee_upper_bound_wei
     )
     return None if valid else OfflineSigningCode.ACTION_INVALID
 
