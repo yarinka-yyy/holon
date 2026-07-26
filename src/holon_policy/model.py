@@ -132,7 +132,7 @@ class LendingRule:
         if type(value.get("chain_id")) is not int or value["chain_id"] <= 0:
             raise PolicyError("Invalid lending rule chain")
         actions = value.get("allowed_actions")
-        if actions != ["approve", "supply"]:
+        if actions not in (["approve", "supply"], ["withdraw"]):
             raise PolicyError("Invalid lending actions")
         for field in ("max_amount_atomic", "max_total_fee_wei"):
             if not isinstance(value.get(field), str) or DECIMAL_RE.fullmatch(value[field]) is None:

@@ -7,8 +7,9 @@ import pytest
 
 from holon_lending import (
     ACTION_PROFILES_DIGEST, ActionProfilesState, LendingPreflightService,
-    encode_approve, encode_supply,
+    encode_approve, encode_supply, encode_withdraw,
 )
+from holon_lending.preflight import MAX_UINT256
 from holon_policy import LendingRule, Policy
 from holon_wallet.broadcast import (
     BASE_RPC_ENV, BroadcastReceiptTracker, MainnetBroadcastPolicy,
@@ -29,9 +30,10 @@ SENDER = "0x1111111111111111111111111111111111111111"
 
 
 class Rpc:
-    def __init__(self, profile, allowance=0):
+    def __init__(self, profile, allowance=0, position=999_999):
         self.profile = profile
         self.allowance_value = allowance
+        self.position = position
 
     def begin(self): return 10_000, int(datetime.now(UTC).timestamp()), 10
     def has_code(self, address, block): del address, block; return True
@@ -43,7 +45,11 @@ class Rpc:
     def reserve_caps(self, provider, asset, block): del provider, asset, block; return 0, 0
     def reserve_total_supply(self, provider, asset, block): del provider, asset, block; return 0
     def account_debt(self, pool, account, block): del pool, account, block; return 0
-    def token_balance(self, token, account, block): del token, account, block; return 10_000_000
+    def token_balance(self, token, account, block):
+        del block
+        if token == self.profile.a_token and account.lower() != self.profile.a_token.lower():
+            return self.position
+        return 10_000_000
     def allowance(self, token, owner, spender, block): del token, owner, spender, block; return self.allowance_value
     def pending_nonce(self, account): del account; return 7
     def native_balance(self, account, block): del account, block; return 10**18
@@ -53,10 +59,14 @@ class Rpc:
     def simulate(self, transaction): del transaction; return b""
 
 
-def request(now: datetime) -> dict[str, object]:
+def request(
+    now: datetime, action: str = "supply", amount_mode: str = "exact",
+    amount: str | None = "1",
+) -> dict[str, object]:
     return {
         "kind": "prepare_lending_action", "action_id": "act-lending-one",
-        "amount": "1", "policy_revision": 2, "policy_digest": "c" * 64,
+        "action": action, "amount_mode": amount_mode, "amount": amount,
+        "policy_revision": 2, "policy_digest": "c" * 64,
         "action_profile_digest": ACTION_PROFILES_DIGEST,
         "created_at": now.isoformat().replace("+00:00", "Z"),
         "expires_at": (now + timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),
@@ -86,7 +96,11 @@ class ExecutionRpc:
     def lending_reserve_paused(self, provider, asset, block): del provider, asset, block; return False
     def lending_reserve_total_supply(self, provider, asset, block): del provider, asset, block; return 0
     def lending_account_debt(self, pool, account, block): del pool, account, block; return 0
-    def lending_token_balance(self, token, account, block): del token, account, block; return 10_000_000
+    def lending_token_balance(self, token, account, block):
+        del block
+        if token == self.profile.a_token and account.lower() == self.action.sender.lower():
+            return self.action.amount_atomic
+        return 10_000_000
     def lending_allowance(self, token, owner, spender, block): del token, owner, spender, block; return 0
     def lending_simulate(self, transaction): del transaction; return b""
     def send_raw_transaction(self, raw): self.send_calls += 1; return Web3.to_hex(Web3.keccak(raw))
@@ -119,6 +133,72 @@ def test_fresh_preflight_creates_independent_approve_then_supply_actions() -> No
     )
     assert second.method == "supply"
     assert second.action_id != first.action_id and second.digest != first.digest
+
+
+def test_exact_and_all_withdraw_bind_distinct_calldata_and_mode() -> None:
+    state = ActionProfilesState.load()
+    assert state.profile is not None
+    account = ProfileSummary(
+        "profile-one", "Main", SENDER, "mnemonic", "m", "2026-07-26T00:00:00Z",
+    )
+    now = datetime.now(UTC).replace(microsecond=0)
+    exact = prepare_lending_action(
+        LendingPreflightService(state, lambda: Rpc(state.profile)), state, account,
+        request(now, "withdraw", "exact", "0.5"),
+    )
+    all_request = request(now, "withdraw", "all", None)
+    all_request["action_id"] = "act-lending-all"
+    all_action = prepare_lending_action(
+        LendingPreflightService(state, lambda: Rpc(state.profile)), state, account,
+        all_request,
+    )
+
+    assert exact.method == "withdraw" and exact.amount_mode == "exact"
+    assert exact.amount_atomic == 500_000
+    assert exact.transaction.data == encode_withdraw(state.profile.asset, 500_000, SENDER)
+    assert all_action.method == "withdraw" and all_action.amount_mode == "all"
+    assert all_action.amount_atomic == 999_999
+    assert all_action.transaction.data == encode_withdraw(
+        state.profile.asset, MAX_UINT256, SENDER,
+    )
+    assert exact.digest != all_action.digest
+    assert validate_signing_action(exact, exact.digest, now) is None
+    assert validate_signing_action(all_action, all_action.digest, now) is None
+
+
+def test_withdraw_all_policy_caps_resolved_position_not_sentinel() -> None:
+    rule = LendingRule(
+        "lending", "1", "aave-v3-base-usdc", "1", "base", "usdc", 8453,
+        ("withdraw",), "1010000", "100000000000000", ACTION_PROFILES_DIGEST,
+    )
+    policy = MainnetBroadcastPolicy.from_policy(
+        Policy("3", "2", False, (), True, (rule,)),
+    )
+    state = ActionProfilesState.load()
+    assert state.profile is not None
+    now = datetime.now(UTC).replace(microsecond=0)
+    account = ProfileSummary("p", "Main", SENDER, "mnemonic", "m", "2026-07-26T00:00:00Z")
+    allowed = prepare_lending_action(
+        LendingPreflightService(state, lambda: Rpc(state.profile, position=999_999)),
+        state, account, request(now, "withdraw", "all", None),
+    )
+    allowed = replace(
+        allowed, policy_revision=policy.policy_revision,
+        policy_digest=policy.policy_digest_value,
+    )
+    assert policy.evaluate(allowed) is None
+
+    over_request = request(now, "withdraw", "all", None)
+    over_request["action_id"] = "act-lending-over"
+    over = prepare_lending_action(
+        LendingPreflightService(state, lambda: Rpc(state.profile, position=1_010_001)),
+        state, account, over_request,
+    )
+    over = replace(
+        over, policy_revision=policy.policy_revision,
+        policy_digest=policy.policy_digest_value,
+    )
+    assert policy.evaluate(over) is MainnetTransferCode.AMOUNT_LIMIT_EXCEEDED
 
 
 def test_lending_policy_caps_fee_and_never_enables_send() -> None:
@@ -209,20 +289,77 @@ def test_exact_signed_l1_fee_is_rechecked_before_single_broadcast(tmp_path) -> N
     assert excess_rpc.send_calls == 0
 
 
-@pytest.mark.parametrize("action_type", ["lending_approve", "lending_supply"])
+def test_withdraw_all_revalidates_resolved_position_and_broadcasts_once(tmp_path) -> None:
+    repository = VaultRepository(WalletPaths(tmp_path))
+    password = "correct horse battery staple"
+    record = repository.new_record(generate_mnemonic(), "Main")
+    repository.create_new(password, record)
+    state = ActionProfilesState.load()
+    assert state.profile is not None
+    rule = LendingRule(
+        "lending", "1", "aave-v3-base-usdc", "1", "base", "usdc", 8453,
+        ("withdraw",), "1010000", "100000000000000", ACTION_PROFILES_DIGEST,
+    )
+    policy = MainnetBroadcastPolicy.from_policy(
+        Policy("3", "2", False, (), True, (rule,)),
+    )
+    now = datetime.now(UTC).replace(microsecond=0)
+    raw_request = request(now, "withdraw", "all", None)
+    raw_request.update({
+        "policy_revision": policy.policy_revision,
+        "policy_digest": policy.policy_digest_value,
+    })
+    action = prepare_lending_action(
+        LendingPreflightService(
+            state, lambda: Rpc(state.profile, position=999_999),
+        ),
+        state, record.summary, raw_request,
+    )
+    stamp = now.isoformat().replace("+00:00", "Z")
+    history = HistoryStore(repository.paths)
+    history.append(WalletHistoryRecord(
+        action.action_id, action.profile_id, "lending_withdraw_all", "base", 8453,
+        action.sender, action.recipient, action.transaction.to, "USDC",
+        str(action.amount_atomic), 6, None, HistoryStatus.PREPARED, stamp, stamp,
+        False, str(action.max_total_fee_wei),
+    ))
+    rpc = ExecutionRpc(
+        state.profile, action, action.l1_fee_upper_bound_wei - 1,
+    )
+    result = MainnetTransferExecutor(
+        repository, history, policy, lambda endpoint: rpc,
+        {"HOLON_BASE_RPC_URL": "fixture://base"}, lambda: now,
+    ).execute(action, action.digest, password, SigningPermit())
+    assert result.code is MainnetTransferCode.PENDING
+    assert rpc.send_calls == 1
+
+
+@pytest.mark.parametrize("action_type", [
+    "lending_approve", "lending_supply", "lending_withdraw",
+    "lending_withdraw_all",
+])
 def test_lending_receipt_tracker_fetches_transaction_and_confirms(
     tmp_path, action_type,
 ) -> None:
     state = ActionProfilesState.load()
     assert state.profile is not None
     profile = state.profile
-    transaction_hash = "0x" + ("11" if action_type.endswith("approve") else "22") * 32
+    suffix = {
+        "lending_approve": "11", "lending_supply": "22",
+        "lending_withdraw": "33", "lending_withdraw_all": "44",
+    }[action_type]
+    transaction_hash = "0x" + suffix * 32
     target = profile.asset if action_type.endswith("approve") else profile.pool
-    calldata = (
-        encode_approve(profile.pool, 1_000_000)
-        if action_type.endswith("approve")
-        else encode_supply(profile.asset, 1_000_000, SENDER)
-    )
+    if action_type.endswith("approve"):
+        calldata = encode_approve(profile.pool, 1_000_000)
+    elif action_type.endswith("supply"):
+        calldata = encode_supply(profile.asset, 1_000_000, SENDER)
+    else:
+        calldata = encode_withdraw(
+            profile.asset,
+            MAX_UINT256 if action_type.endswith("_all") else 1_000_000,
+            SENDER,
+        )
     history = HistoryStore(WalletPaths(tmp_path / action_type))
     history.append(WalletHistoryRecord(
         "act-" + action_type, "profile", action_type, "base", 8453,

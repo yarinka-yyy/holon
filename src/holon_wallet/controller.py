@@ -18,6 +18,7 @@ from holon_guard_ipc.policy_control import ControlProtocolError, ControlUnavaila
 from holon_policy import Policy, policy_digest
 from holon_lending import (
     ActionProfilesState, LendingPreflightError, LendingPreflightService,
+    parse_lending_intent,
 )
 
 from .approval import (
@@ -712,6 +713,7 @@ class WalletController(QObject):
             "amount": "" if amount is None else format_atomic_amount(int(amount), 6),
             "fee": "" if fee is None else format_atomic_amount(int(fee), 18),
             "enabled": self._trusted_lending_enabled,
+            "withdrawOnly": self._trusted_working.lending_allowed_actions == ("withdraw",),
         }
 
     @Property("QVariantMap", notify=trustedDraftChanged)
@@ -808,6 +810,7 @@ class WalletController(QObject):
         return bool(
             self.trustedCanApply
             and self.trustedLendingLimits["configured"]
+            and self.trustedLendingLimits["withdrawOnly"]
             and self.trustedDraftMatchesActive
             and not self._trusted_lending_enabled
         )
@@ -1160,7 +1163,15 @@ class WalletController(QObject):
             completion(self._external_refusal(request, "WALLET_BUSY"))
             return
         try:
-            amount_atomic, canonical = parse_transfer_amount(str(request["amount"]), 6)
+            intent = parse_lending_intent({
+                "module_id": "lending", "module_version": "1",
+                "protocol_profile_id": "aave-v3-base-usdc",
+                "protocol_profile_version": "1", "network": "base",
+                "asset": "usdc", "beneficiary_mode": "active_wallet_account",
+                "action": request["action"], "amount_mode": request["amount_mode"],
+                "amount": request["amount"],
+            })
+            amount_atomic = intent.amount_atomic
             created = datetime.fromisoformat(str(request["created_at"]).replace("Z", "+00:00"))
             expires = datetime.fromisoformat(str(request["expires_at"]).replace("Z", "+00:00"))
             if not self._mainnet_executor.policy.matches(
@@ -1168,7 +1179,8 @@ class WalletController(QObject):
             ):
                 raise ValueError("POLICY_REVISION_CHANGED")
             policy_code = self._mainnet_executor.policy.lending_intent_code(
-                amount_atomic, str(request["action_profile_digest"]),
+                intent.action, intent.amount_mode, amount_atomic,
+                str(request["action_profile_digest"]),
                 str(request.get("policy_version", "")),
             )
             if policy_code is not None:
@@ -1177,7 +1189,7 @@ class WalletController(QObject):
             pending = self._transfer_flow.begin_external(
                 str(request["action_id"]), active.profile_id, created, expires,
                 "base", "usdc", amount_atomic, int(request["policy_revision"]),
-                str(request["policy_digest"]),
+                str(request["policy_digest"]), intent.amount_mode,
             )
         except Exception as error:
             completion(self._external_refusal(request, str(error) or "LENDING_ACTION_INVALID"))
@@ -1187,7 +1199,7 @@ class WalletController(QObject):
         self._transfer_network = "base"
         self._transfer_asset = "usdc"
         self._transfer_recipient = "Aave V3 Pool"
-        self._transfer_amount_input = canonical
+        self._transfer_amount_input = intent.amount or "All current position"
         self._transfer_preparing = True
         self._transfer_generation += 1
         generation = self._transfer_generation
@@ -3120,6 +3132,14 @@ class WalletController(QObject):
             self._finish_external_preflight(None, "TRANSFER_PREPARATION_FAILED")
             self._set_screen("send")
             return
+        policy_code = self._mainnet_executor.policy.evaluate(result)
+        if result.action_type == "lending" and policy_code is not None:
+            self._transfer_flow.close()
+            self._set_transfer_error("Aave action exceeds the active policy")
+            self.transferChanged.emit()
+            self._finish_external_preflight(None, policy_code.value)
+            self._set_screen("send")
+            return
         if (
             active.profile_id != result.profile_id
             or active.address != result.sender
@@ -3181,7 +3201,8 @@ class WalletController(QObject):
                 "authority_version": AUTHORITY_VERSION, "kind": "lending_action_prepared",
                 "flow_id": context["flow_id"], "action_id": action.action_id,
                 "profile_id": action.profile_id, "sender": action.sender,
-                "requested_action": "supply", "next_action": action.method,
+                "requested_action": context["action"],
+                "amount_mode": action.amount_mode, "next_action": action.method,
                 "network": "base", "asset": "usdc",
                 "amount_atomic": str(action.amount_atomic),
                 "target": action.transaction.to, "method": action.method,
@@ -3675,10 +3696,15 @@ def _display_local_time(timestamp: str) -> str:
 
 def _history_record(action: PreparedTransferAction) -> WalletHistoryRecord:
     created_at = _utc_timestamp(action.created_at)
+    lending_action_type = (
+        "lending_withdraw_all"
+        if action.method == "withdraw" and action.amount_mode == "all"
+        else f"lending_{action.method}"
+    )
     return WalletHistoryRecord(
         action_id=action.action_id,
         profile_id=action.profile_id,
-        action_type=(f"lending_{action.method}" if action.action_type == "lending" else "transfer"),
+        action_type=(lending_action_type if action.action_type == "lending" else "transfer"),
         network=action.network_id,
         chain_id=action.chain_id,
         sender=action.sender,

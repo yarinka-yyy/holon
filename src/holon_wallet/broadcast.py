@@ -30,7 +30,8 @@ from holon_policy import (
 )
 from holon_lending import ActionProfilesState
 from holon_lending.preflight import (
-    BASE_GAS_PRICE_ORACLE, Web3AavePreflightRpc, encode_approve, encode_supply,
+    BASE_GAS_PRICE_ORACLE, MAX_UINT256, Web3AavePreflightRpc, encode_approve,
+    encode_supply, encode_withdraw,
 )
 
 from .approval import (
@@ -268,7 +269,8 @@ class MainnetBroadcastPolicy:
         return None
 
     def lending_intent_code(
-        self, amount_atomic: int, action_profile_digest: str,
+        self, action: str, amount_mode: str, amount_atomic: int | None,
+        action_profile_digest: str,
         policy_version: str | None = None,
     ) -> MainnetTransferCode | None:
         """Reject a semantic Lending intent before Wallet performs any RPC."""
@@ -281,8 +283,8 @@ class MainnetBroadcastPolicy:
             return MainnetTransferCode.POLICY_VERSION_MISMATCH
         decision, _rule = self.shared_engine.evaluate_lending_intent({
             "module_id": "lending", "protocol_profile_id": "aave-v3-base-usdc",
-            "network": "base", "asset": "usdc", "action": "supply",
-            "amount_mode": "exact", "amount_atomic": amount_atomic,
+            "network": "base", "asset": "usdc", "action": action,
+            "amount_mode": amount_mode, "amount_atomic": amount_atomic,
         }, action_profile_digest)
         return self._shared_code(decision.code) if not decision.allowed else None
 
@@ -320,10 +322,14 @@ class MainnetBroadcastPolicy:
             return MainnetTransferCode.REVALIDATION_FAILED
         if self.shared_engine is not None:
             if action.action_type == "lending":
+                requested_action = (
+                    "withdraw" if action.method == "withdraw" else "supply"
+                )
                 decision, rule = self.shared_engine.evaluate_lending_intent({
                     "module_id": "lending", "protocol_profile_id": "aave-v3-base-usdc",
-                    "network": "base", "asset": "usdc", "action": "supply",
-                    "amount_mode": "exact", "amount_atomic": action.amount_atomic,
+                    "network": "base", "asset": "usdc", "action": requested_action,
+                    "amount_mode": action.amount_mode,
+                    "amount_atomic": action.amount_atomic,
                 }, action.action_profile_digest)
                 if decision.allowed and rule is not None:
                     decision = self.shared_engine.evaluate_lending_prepared(
@@ -1114,14 +1120,25 @@ def _final_lending_revalidation(rpc: MainnetRpc, action: PreparedTransferAction)
             or rpc.lending_account_debt(profile.pool, action.sender, block) != 0
         ):
             return False
-        allowance = int(rpc.lending_allowance(
-            profile.asset, action.sender, profile.pool, block,
-        ))
-        expected_data = (
-            encode_approve(profile.pool, action.amount_atomic)
-            if action.method == "approve"
-            else encode_supply(profile.asset, action.amount_atomic, action.sender)
+        allowance = (
+            int(rpc.lending_allowance(
+                profile.asset, action.sender, profile.pool, block,
+            ))
+            if action.method in {"approve", "supply"}
+            else None
         )
+        if action.method == "approve":
+            expected_data = encode_approve(profile.pool, action.amount_atomic)
+        elif action.method == "supply":
+            expected_data = encode_supply(
+                profile.asset, action.amount_atomic, action.sender,
+            )
+        else:
+            expected_data = encode_withdraw(
+                profile.asset,
+                MAX_UINT256 if action.amount_mode == "all" else action.amount_atomic,
+                action.sender,
+            )
         expected_target = profile.asset if action.method == "approve" else profile.pool
         estimate = int(rpc.estimate_gas({
             "from": action.sender, "to": tx.to, "value": 0, "data": tx.data,
@@ -1133,12 +1150,22 @@ def _final_lending_revalidation(rpc: MainnetRpc, action: PreparedTransferAction)
         balance = int(rpc.lending_token_balance(
             profile.asset, action.sender, block,
         ))
-        _borrow_cap, supply_cap = rpc.lending_reserve_caps(
-            profile.data_provider, profile.asset, block,
-        )
-        total_supply = rpc.lending_reserve_total_supply(
-            profile.data_provider, profile.asset, block,
-        )
+        if action.method == "withdraw":
+            position = int(rpc.lending_token_balance(
+                profile.a_token, action.sender, block,
+            ))
+            liquidity = int(rpc.lending_token_balance(
+                profile.asset, profile.a_token, block,
+            ))
+            supply_cap = total_supply = 0
+        else:
+            position = liquidity = 0
+            _borrow_cap, supply_cap = rpc.lending_reserve_caps(
+                profile.data_provider, profile.asset, block,
+            )
+            total_supply = rpc.lending_reserve_total_supply(
+                profile.data_provider, profile.asset, block,
+            )
         native = int(rpc.native_balance(action.sender))
         rpc.lending_simulate({
             "from": action.sender, "to": tx.to, "value": 0, "data": tx.data,
@@ -1148,16 +1175,28 @@ def _final_lending_revalidation(rpc: MainnetRpc, action: PreparedTransferAction)
         })
     except Exception:
         return False
-    return (
-        rpc.chain_id() == profile.chain_id and block >= action.block_number
-        and rpc.token_decimals(profile.asset) == 6
-        and balance >= action.amount_atomic
+    supply_state = (
+        balance >= action.amount_atomic
         and (
             supply_cap == 0
             or total_supply + action.amount_atomic <= supply_cap * 10**profile.decimals
         )
         and ((action.method == "approve" and allowance == 0)
              or (action.method == "supply" and allowance == action.amount_atomic))
+    )
+    withdraw_state = (
+        action.method == "withdraw"
+        and liquidity >= action.amount_atomic
+        and (
+            position == action.amount_atomic
+            if action.amount_mode == "all"
+            else position >= action.amount_atomic
+        )
+    )
+    return (
+        rpc.chain_id() == profile.chain_id and block >= action.block_number
+        and rpc.token_decimals(profile.asset) == 6
+        and (withdraw_state if action.method == "withdraw" else supply_state)
         and tx.to.lower() == expected_target.lower() and tx.data == expected_data
         and rpc.pending_nonce(action.sender) == tx.nonce
         and 0 < estimate <= tx.gas and 0 <= priority <= tx.max_priority_fee_per_gas
@@ -1356,6 +1395,17 @@ def _public_transaction_matches(
             if profile is None:
                 return False
             expected_data = encode_supply(profile.asset, int(record.amount_atomic), record.sender)
+            expected_value = 0
+        elif record.action_type in {"lending_withdraw", "lending_withdraw_all"}:
+            profile = ActionProfilesState.load().profile
+            if profile is None:
+                return False
+            amount = (
+                MAX_UINT256
+                if record.action_type == "lending_withdraw_all"
+                else int(record.amount_atomic)
+            )
+            expected_data = encode_withdraw(profile.asset, amount, record.sender)
             expected_value = 0
         elif record.token == "ETH":
             expected_data = "0x"

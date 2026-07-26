@@ -201,9 +201,10 @@ class GuardLifecycle(GuardCore):
     def start_lending_intent(
         self, owner_pid: int, action_id: str, fingerprint: str,
         intent: dict[str, object], policy_version: str, fee_cap_wei: str,
+        amount_cap_atomic: str,
         policy_revision: int, policy_digest: str, action_profile_digest: str,
     ) -> tuple[GuardResult, dict[str, object] | None]:
-        """Start one fresh approve or supply action; never chains the second action."""
+        """Start one fresh Aave action; never chains another action."""
         with self._lock:
             try:
                 self.ledger.preflight(action_id, fingerprint)
@@ -252,8 +253,12 @@ class GuardLifecycle(GuardCore):
             payload = prepared.payload
             try:
                 fee = int(str(payload["max_total_fee_wei"]))
+                amount = int(str(payload["amount_atomic"]))
                 digest = str(payload["prepared_digest"])
-                if fee <= 0 or fee > int(fee_cap_wei):
+                if (
+                    fee <= 0 or fee > int(fee_cap_wei)
+                    or amount <= 0 or amount > int(amount_cap_atomic)
+                ):
                     raise ValueError
             except (KeyError, TypeError, ValueError):
                 cancel = {
@@ -265,11 +270,11 @@ class GuardLifecycle(GuardCore):
                     self.wallet_handle = prepared.handle
                     return self._recover("WALLET_CALLBACK_FAILED"), None
                 try:
-                    self.ledger.terminalize(ActionState.FAILED, "MAX_FEE_EXCEEDED")
+                    self.ledger.terminalize(ActionState.FAILED, "POLICY_LIMIT_EXCEEDED")
                 except ActionLedgerFailure:
                     return self.disable_signing(SecurityCode.ACTION_STATE_INVALID.value), None
-                self._persist(idle_snapshot(GuardState.NORMAL, "MAX_FEE_EXCEEDED", self.clock()))
-                return self._result(False, "MAX_FEE_EXCEEDED", "Maximum fee exceeds policy."), None
+                self._persist(idle_snapshot(GuardState.NORMAL, "POLICY_LIMIT_EXCEEDED", self.clock()))
+                return self._result(False, "POLICY_LIMIT_EXCEEDED", "Lending limits exceed policy."), None
             self.wallet_handle = prepared.handle
             active = GuardSnapshot(
                 GuardState.ACTIVE, flow_id, owner_pid, prepared.handle.pid,

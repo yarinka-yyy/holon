@@ -176,9 +176,10 @@ class PendingTransferRequest:
     expires_at: datetime
     network_id: str = BASE_NETWORK_ID
     asset_id: str = USDC_ASSET_ID
-    amount_atomic: int = USDC_AMOUNT_ATOMIC
+    amount_atomic: int | None = USDC_AMOUNT_ATOMIC
     policy_revision: int = 0
     policy_digest: str = ""
+    amount_mode: str = "exact"
 
 
 @dataclass(frozen=True, slots=True)
@@ -248,9 +249,10 @@ class PreparedTransferAction:
     action_profile_digest: str = ""
     l2_fee_ceiling_wei: int = 0
     l1_fee_upper_bound_wei: int = 0
+    amount_mode: str = "exact"
 
     def material_fields(self) -> dict[str, object]:
-        return {
+        material = {
             "schema_version": self.schema_version,
             "action_id": self.action_id,
             "profile_id": self.profile_id,
@@ -279,6 +281,9 @@ class PreparedTransferAction:
             "l2_fee_ceiling_wei": self.l2_fee_ceiling_wei,
             "l1_fee_upper_bound_wei": self.l1_fee_upper_bound_wei,
         }
+        if self.action_type == "lending":
+            material["amount_mode"] = self.amount_mode
+        return material
 
     @property
     def digest(self) -> str:
@@ -677,8 +682,8 @@ class TransferFlowCoordinator:
 
     def begin_external(
         self, action_id: str, profile_id: str, created_at: datetime,
-        expires_at: datetime, network_id: str, asset_id: str, amount_atomic: int,
-        policy_revision: int = 0, policy_digest: str = "",
+        expires_at: datetime, network_id: str, asset_id: str, amount_atomic: int | None,
+        policy_revision: int = 0, policy_digest: str = "", amount_mode: str = "exact",
     ) -> PendingTransferRequest:
         if self._state is not TransferFlowState.LOCKED:
             raise TransferFlowError("A transfer flow is already active")
@@ -688,9 +693,16 @@ class TransferFlowCoordinator:
             not isinstance(action_id, str)
             or not action_id.startswith("act-")
             or action_id in self._terminal_ids
-            or type(amount_atomic) is not int
-            or amount_atomic <= 0
-            or amount_atomic >= 2**256
+            or amount_mode not in {"exact", "all"}
+            or (
+                amount_mode == "exact"
+                and (
+                    type(amount_atomic) is not int
+                    or amount_atomic <= 0
+                    or amount_atomic >= 2**256
+                )
+            )
+            or (amount_mode == "all" and amount_atomic is not None)
             or created_at.tzinfo is None
             or expires_at.tzinfo is None
             or expires_at - created_at != ACTION_LIFETIME
@@ -708,6 +720,7 @@ class TransferFlowCoordinator:
             amount_atomic,
             policy_revision,
             policy_digest,
+            amount_mode,
         )
         self._pending = request
         self._state = TransferFlowState.PREPARING
@@ -723,7 +736,13 @@ class TransferFlowCoordinator:
             pending.profile_id != action.profile_id
             or pending.network_id != action.network_id
             or pending.asset_id != action.asset_id
-            or pending.amount_atomic != action.amount_atomic
+            or (
+                pending.amount_mode == "exact"
+                and pending.amount_atomic != action.amount_atomic
+            )
+            or pending.amount_mode != action.amount_mode
+            or type(action.amount_atomic) is not int
+            or action.amount_atomic <= 0
             or pending.created_at != action.created_at
             or pending.expires_at != action.expires_at
             or pending.policy_revision != action.policy_revision
@@ -920,6 +939,7 @@ def transfer_action_to_map(action: PreparedTransferAction) -> dict[str, object]:
         "l1FeeUpperBoundWei": str(action.l1_fee_upper_bound_wei),
         "actionType": action.action_type,
         "method": action.method,
+        "amountMode": action.amount_mode,
         "actionProfileDigest": action.action_profile_digest,
         "maxFeeDisplay": f"≤ {_format_wei(action.max_total_fee_wei)} ETH",
         "expiresAt": action.expires_at.strftime("%H:%M:%S UTC"),

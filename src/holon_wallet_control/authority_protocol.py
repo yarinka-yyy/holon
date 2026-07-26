@@ -49,7 +49,7 @@ LENDING_PREPARED_FIELDS = frozenset({
     "asset", "amount_atomic", "target", "method", "max_total_fee_wei",
     "l2_fee_ceiling_wei", "l1_fee_upper_bound_wei", "prepared_digest",
     "created_at", "expires_at", "code", "policy_revision", "policy_digest",
-    "action_profile_digest",
+    "action_profile_digest", "amount_mode",
 })
 REFUSED_FIELDS = frozenset({
     "authority_version", "kind", "flow_id", "action_id", "wallet_pid", "code",
@@ -126,9 +126,16 @@ def validate_request(value: Mapping[str, object]) -> dict[str, object]:
             or HEX_RE.fullmatch(value["policy_digest"]) is None
             or not isinstance(value.get("action_profile_digest"), str)
             or HEX_RE.fullmatch(value["action_profile_digest"]) is None
-            or value.get("action") != "supply"
-            or value.get("amount_mode") != "exact"
-            or not isinstance(value.get("amount"), str)
+            or value.get("action") not in {"supply", "withdraw"}
+            or value.get("amount_mode") not in {"exact", "all"}
+            or (
+                value.get("amount_mode") == "exact"
+                and not isinstance(value.get("amount"), str)
+            )
+            or (
+                value.get("amount_mode") == "all"
+                and (value.get("action") != "withdraw" or value.get("amount") is not None)
+            )
         ):
             raise ControlProtocolError("Invalid lending authority request")
         for field in ("created_at", "expires_at"):
@@ -183,15 +190,23 @@ def validate_response(
     if kind == "lending_action_prepared":
         for field in (
             "requested_action", "created_at", "expires_at", "policy_revision",
-            "policy_digest", "action_profile_digest",
+            "policy_digest", "action_profile_digest", "amount_mode",
         ):
             expected_field = "action" if field == "requested_action" else field
             if value.get(field) != request.get(expected_field):
                 raise ControlProtocolError("Authority response mismatch")
         if (
-            value.get("next_action") not in {"approve", "supply"}
+            value.get("next_action") not in {"approve", "supply", "withdraw"}
             or value.get("network") != "base" or value.get("asset") != "usdc"
             or value.get("method") != value.get("next_action")
+            or (
+                request.get("action") == "withdraw"
+                and value.get("next_action") != "withdraw"
+            )
+            or (
+                request.get("action") == "supply"
+                and value.get("next_action") not in {"approve", "supply"}
+            )
             or not isinstance(value.get("target"), str)
             or ADDRESS_RE.fullmatch(value["target"]) is None
         ):

@@ -80,6 +80,20 @@ def test_envelope_is_disabled_canonical_and_round_trips() -> None:
     assert TrustedPolicyDraft.from_envelope(envelope) == draft
 
 
+def test_new_lending_limits_are_withdraw_only_and_legacy_supply_round_trips() -> None:
+    withdraw = TrustedPolicyDraft().with_lending_limits("1.01", "0.0001")
+    rule = withdraw.to_envelope()["policy"]["lending_rules"][0]
+    assert rule["allowed_actions"] == ["withdraw"]
+    assert rule["max_amount_atomic"] == "1010000"
+    assert rule["max_total_fee_wei"] == "100000000000000"
+
+    legacy = TrustedPolicyDraft(
+        (), "5000000", "100000000000000", ("approve", "supply"),
+    )
+    envelope = legacy.to_envelope()
+    assert TrustedPolicyDraft.from_envelope(envelope) == legacy
+
+
 def test_envelope_rejects_digest_authority_labels_and_noncanonical_order() -> None:
     envelope = TrustedPolicyDraft((route(),)).to_envelope()
     cases = []

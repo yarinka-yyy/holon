@@ -130,6 +130,7 @@ class TrustedPolicyDraft:
     routes: tuple[TrustedRouteDraft, ...] = ()
     lending_max_amount_atomic: str | None = None
     lending_max_total_fee_wei: str | None = None
+    lending_allowed_actions: tuple[str, ...] = ("withdraw",)
 
     def canonical(self) -> "TrustedPolicyDraft":
         if any(route.key not in ROUTE_ORDER for route in self.routes):
@@ -145,6 +146,7 @@ class TrustedPolicyDraft:
         )
         return TrustedPolicyDraft(
             routes, self.lending_max_amount_atomic, self.lending_max_total_fee_wei,
+            self.lending_allowed_actions,
         )
 
     def route(self, network: str, asset: str) -> TrustedRouteDraft | None:
@@ -173,18 +175,22 @@ class TrustedPolicyDraft:
             raise TrustedDraftError("Too many transfer routes")
         return TrustedPolicyDraft(
             routes, self.lending_max_amount_atomic, self.lending_max_total_fee_wei,
+            self.lending_allowed_actions,
         ).canonical()
 
     def without_route(self, network: str, asset: str) -> "TrustedPolicyDraft":
         return TrustedPolicyDraft(
             tuple(item for item in self.routes if item.key != (network, asset)),
             self.lending_max_amount_atomic, self.lending_max_total_fee_wei,
+            self.lending_allowed_actions,
         ).canonical()
 
     def with_lending_limits(self, amount: str, fee: str) -> "TrustedPolicyDraft":
         amount_atomic = parse_cap(amount, "usdc")
         fee_wei = parse_fee_cap(fee)
-        return TrustedPolicyDraft(self.routes, amount_atomic, fee_wei).canonical()
+        return TrustedPolicyDraft(
+            self.routes, amount_atomic, fee_wei, ("withdraw",),
+        ).canonical()
 
     def without_lending_limits(self) -> "TrustedPolicyDraft":
         return TrustedPolicyDraft(self.routes).canonical()
@@ -229,7 +235,7 @@ class TrustedPolicyDraft:
                     raise TrustedDraftError("Lending limits are incomplete")
                 lending_rules = (LendingRule(
                     "lending", "1", "aave-v3-base-usdc", "1", "base", "usdc",
-                    8453, ("approve", "supply"), self.lending_max_amount_atomic,
+                    8453, self.lending_allowed_actions, self.lending_max_amount_atomic,
                     self.lending_max_total_fee_wei, ACTION_PROFILES_DIGEST,
                 ),)
             policy = Policy.from_dict(Policy(
@@ -327,10 +333,14 @@ class TrustedPolicyDraft:
             raise TrustedDraftError("Recipient label has no policy recipient")
         lending_amount = None
         lending_fee = None
+        lending_actions = ("withdraw",)
         if policy.lending_rules:
             lending_amount = policy.lending_rules[0].max_amount_atomic
             lending_fee = policy.lending_rules[0].max_total_fee_wei
-        draft = cls(tuple(routes), lending_amount, lending_fee).canonical()
+            lending_actions = policy.lending_rules[0].allowed_actions
+        draft = cls(
+            tuple(routes), lending_amount, lending_fee, lending_actions,
+        ).canonical()
         if draft_version == DRAFT_SCHEMA_VERSION and draft.to_envelope() != dict(value):
             raise TrustedDraftError("Draft is not canonical")
         return draft

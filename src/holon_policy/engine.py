@@ -101,11 +101,24 @@ class PolicyEngine:
             return PolicyDecision.refuse(
                 RefusalCode.ACTION_NOT_ALLOWED, "Lending profile is not allowed.",
             ), None
-        if payload.get("action") != "supply" or payload.get("amount_mode") != "exact":
+        action = payload.get("action")
+        mode = payload.get("amount_mode")
+        action_allowed = (
+            action == "supply"
+            and mode == "exact"
+            and rule.allowed_actions == ("approve", "supply")
+        ) or (
+            action == "withdraw"
+            and mode in {"exact", "all"}
+            and rule.allowed_actions == ("withdraw",)
+        )
+        if not action_allowed:
             return PolicyDecision.refuse(
                 RefusalCode.ACTION_NOT_ALLOWED, "Lending action is not allowed.",
             ), None
         amount = payload.get("amount_atomic")
+        if mode == "all" and amount is None:
+            return PolicyDecision.allow(), rule
         if type(amount) is not int or amount <= 0:
             return PolicyDecision.refuse(
                 RefusalCode.AMOUNT_INVALID, "Lending amount is invalid.",

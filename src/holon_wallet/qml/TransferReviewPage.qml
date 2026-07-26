@@ -8,6 +8,8 @@ TransactionFlowShell {
     activeStep: 0; onBackRequested: walletController.editTransfer()
     property bool detailsOpen: false
     property var action: walletController.transferAction
+    property string lendingMethod: action.method === "withdraw" && action.amountMode === "all"
+        ? "withdraw all" : (action.method || "action")
     property url assetIcon: action.assetId === "eth"
         ? "assets/ethereum.svg" : "assets/usdc.png"
     property url networkIcon: action.networkId === "ethereum"
@@ -54,7 +56,7 @@ TransactionFlowShell {
             }
             Text {
                 x: 52; y: 14
-                text: root.action.actionType === "lending" ? "Target · " + root.action.method : "To"
+                text: root.action.actionType === "lending" ? "Target · " + root.lendingMethod : "To"
                 color: Design.textMuted
                 font.family: Design.fontFamily; font.pixelSize: 13
             }
@@ -106,6 +108,7 @@ TransactionFlowShell {
                     model: [
                         ["Transaction target", root.action.shortTransactionTarget || ""],
                         ["Method", root.action.method || "transfer"],
+                        ["Amount mode", root.action.amountMode || "exact"],
                         ["Action profile", root.action.actionProfileDigest || ""],
                         ["Contract", root.action.shortContract || "Native asset"],
                         ["Data hash", root.action.calldataHash || ""],

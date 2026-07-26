@@ -32,7 +32,9 @@ PageState {
         Text { x: 16; y: 12; text: "AAVE · BASE · USDC"; color: Design.text; font.family: Design.fontFamily; font.pixelSize: 14; font.weight: Font.DemiBold }
         DraftField {
             id: lendingAmount; x: 16; y: 38; width: 170; height: 72
-            label: "Supply cap (USDC)"; placeholderText: "5"
+            label: walletController.trustedLendingLimits.withdrawOnly
+                ? "Withdraw cap (USDC)" : "Legacy supply cap (USDC)"
+            placeholderText: "1.01"
             text: walletController.trustedLendingLimits.amount
             fieldObjectName: "trustedLendingAmountInput"
         }
@@ -47,7 +49,13 @@ PageState {
             label: "Set Limits"; primary: false
             onTriggered: walletController.saveTrustedLendingLimits(lendingAmount.text, lendingFee.text)
         }
-        Text { x: 16; y: 116; text: "Only exact approve and supply · Send remains separate"; color: Design.textFaint; font.family: Design.fontFamily; font.pixelSize: 10 }
+        Text {
+            x: 16; y: 116
+            text: walletController.trustedLendingLimits.withdrawOnly
+                ? "Only exact or all-position withdraw · Send remains separate"
+                : "Legacy approve/supply draft · Set Limits to replace it with withdraw-only"
+            color: Design.textFaint; font.family: Design.fontFamily; font.pixelSize: 10
+        }
     }
     Text {
         x: 28; y: 392; text: "TRANSFER ROUTES"; color: Design.textFaint

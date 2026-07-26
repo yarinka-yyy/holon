@@ -241,6 +241,9 @@ class HistoryStore:
 def history_record_to_map(record: WalletHistoryRecord) -> dict[str, object]:
     amount = _format_amount(record.amount_atomic, record.decimals, record.token)
     is_revoke = record.action_type == "revoke"
+    is_lending = record.action_type.startswith("lending_")
+    is_withdraw = record.action_type.startswith("lending_withdraw")
+    is_approve = record.action_type == "lending_approve"
     return {
         "actionId": record.action_id,
         "profileId": record.profile_id,
@@ -267,9 +270,19 @@ def history_record_to_map(record: WalletHistoryRecord) -> dict[str, object]:
         "maxFeeDisplay": _format_fee(record.max_total_fee_wei, maximum=True),
         "actualFeeDisplay": _format_fee(record.actual_fee_wei, maximum=False),
         "isRevoke": is_revoke,
-        "summaryTitle": "Revoked USDC" if is_revoke else f"Sent {record.token}",
-        "counterpartyLabel": "Spender" if is_revoke else "To",
-        "amountLabel": "Allowance → 0" if is_revoke else f"−{amount}",
+        "summaryTitle": (
+            "Revoked USDC" if is_revoke
+            else "Withdrew USDC" if is_withdraw
+            else "Aave approval" if is_approve
+            else "Aave supplied USDC" if is_lending
+            else f"Sent {record.token}"
+        ),
+        "counterpartyLabel": "Spender" if is_revoke else "Protocol" if is_lending else "To",
+        "amountLabel": (
+            "Allowance → 0" if is_revoke
+            else f"+{amount}" if is_withdraw
+            else f"−{amount}"
+        ),
     }
 
 
@@ -280,6 +293,7 @@ def _validate_record(record: WalletHistoryRecord) -> None:
         raise HistoryValidationError("History profile ID is invalid")
     if record.action_type not in {
         "transfer", "revoke", "lending_approve", "lending_supply",
+        "lending_withdraw", "lending_withdraw_all",
     }:
         raise HistoryValidationError("History action type is invalid")
     expected_chain = {"ethereum": 1, "base": 8453}.get(record.network)

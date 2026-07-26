@@ -6,8 +6,8 @@ from datetime import UTC, datetime
 
 from holon_lending import ActionProfilesState
 from holon_lending.preflight import (
-    LendingPreflightError, LendingPreflightService, encode_approve,
-    encode_supply, parse_lending_intent,
+    MAX_UINT256, LendingPreflightError, LendingPreflightService, encode_approve,
+    encode_supply, encode_withdraw, parse_lending_intent,
 )
 
 from .model import ProfileSummary
@@ -31,10 +31,10 @@ def prepare_lending_action(
         "module_id": "lending", "module_version": "1",
         "protocol_profile_id": "aave-v3-base-usdc",
         "protocol_profile_version": "1", "network": "base", "asset": "usdc",
-        "beneficiary_mode": "active_wallet_account", "action": "supply",
-        "amount_mode": "exact", "amount": str(request["amount"]),
+        "beneficiary_mode": "active_wallet_account", "action": request["action"],
+        "amount_mode": request["amount_mode"], "amount": request["amount"],
     }
-    parse_lending_intent(raw_intent)
+    intent = parse_lending_intent(raw_intent)
     preview = service.prepare(
         raw_intent, {"label": profile.label, "address": profile.address},
         expected_profile_digest=action_profile.digest,
@@ -43,11 +43,18 @@ def prepare_lending_action(
         raise LendingPreflightError(str(preview.get("code", "LENDING_ACTION_UNAVAILABLE")))
     amount = int(str(preview["amount_atomic"]))
     next_action = str(preview["next_action"])
-    calldata = (
-        encode_approve(action_profile.pool, amount)
-        if next_action == "approve"
-        else encode_supply(action_profile.asset, amount, profile.address)
-    )
+    if next_action == "approve":
+        calldata = encode_approve(action_profile.pool, amount)
+    elif next_action == "supply":
+        calldata = encode_supply(action_profile.asset, amount, profile.address)
+    elif next_action == "withdraw":
+        calldata = encode_withdraw(
+            action_profile.asset,
+            MAX_UINT256 if intent.amount_mode == "all" else amount,
+            profile.address,
+        )
+    else:
+        raise LendingPreflightError("LENDING_ACTION_UNAVAILABLE")
     target = action_profile.asset if next_action == "approve" else action_profile.pool
     created = datetime.fromisoformat(str(request["created_at"]).replace("Z", "+00:00")).astimezone(UTC)
     expires = datetime.fromisoformat(str(request["expires_at"]).replace("Z", "+00:00")).astimezone(UTC)
@@ -68,4 +75,5 @@ def prepare_lending_action(
         str(request["policy_digest"]), "lending", next_action,
         action_profile.digest, int(str(preview["l2_fee_ceiling_wei"])),
         int(str(preview["l1_fee_upper_bound_wei"])),
+        intent.amount_mode,
     )

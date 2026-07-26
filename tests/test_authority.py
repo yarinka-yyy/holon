@@ -35,6 +35,7 @@ class Wallet:
         self.open_calls = 0
         self.balance_calls = 0
         self.preview_calls = 0
+        self.preview_payload = None
         self.lending_prepare_calls = 0
         self.handle = Handle()
 
@@ -80,6 +81,8 @@ class Wallet:
         from holon_lending.preflight import unavailable_preview
 
         self.preview_calls += 1
+        if self.preview_payload is not None:
+            return WalletLendingPreviewResult(True, dict(self.preview_payload))
         return WalletLendingPreviewResult(
             True,
             unavailable_preview(
@@ -91,6 +94,7 @@ class Wallet:
     def prepare_lending_action(self, request) -> WalletPreparedResult:
         self.lending_prepare_calls += 1
         return WalletPreparedResult(True, "LENDING_ACTION_PREPARED", {
+            "amount_atomic": "1000000",
             "max_total_fee_wei": "90000000000000",
             "prepared_digest": "a" * 64,
         }, self.handle)
@@ -291,6 +295,40 @@ class AuthorityTests(unittest.TestCase):
         self.assertEqual(
             service.handle(request, owner_pid=101).payload["code"], "ACTION_REPLAYED",
         )
+
+    def test_withdraw_all_resolves_position_before_starting_protected_flow(self) -> None:
+        rule = LendingRule(
+            "lending", "1", "aave-v3-base-usdc", "1", "base", "usdc", 8453,
+            ("withdraw",), "1010000", "100000000000000",
+            ACTION_PROFILES_DIGEST,
+        )
+        policy = Policy("3", "2", False, (), True, (rule,))
+        snapshot = PolicySnapshot(3, policy_digest(policy.to_dict()), policy, "d" * 64)
+        service = AuthorityService(
+            self.lifecycle, PolicyEngine(policy), self.audit,
+            policy_snapshot=snapshot, lending_actions=ActionProfilesState.load(),
+        )
+        self.wallet.preview_payload = {
+            "status": "PREVIEW_READY", "requested_action": "withdraw",
+            "amount_mode": "all", "amount_atomic": "999999",
+        }
+        request = make_envelope(
+            MessageKind.LENDING_AUTHORITY_INTENT,
+            {
+                "module_id": "lending", "module_version": "1",
+                "protocol_profile_id": "aave-v3-base-usdc",
+                "protocol_profile_version": "1", "network": "base", "asset": "usdc",
+                "beneficiary_mode": "active_wallet_account", "action": "withdraw",
+                "amount_mode": "all", "amount": None,
+            }, action_id=ACTION_ID,
+        )
+        response = service.handle(request, owner_pid=101)
+        self.assertEqual(response.kind, MessageKind.PROTECTED_FLOW_STARTED)
+        self.assertEqual(self.wallet.preview_calls, 1)
+        self.assertEqual(self.wallet.lending_prepare_calls, 1)
+        replay = service.handle(request, owner_pid=101)
+        self.assertEqual(replay.payload["code"], "ACTION_REPLAYED")
+        self.assertEqual(self.wallet.preview_calls, 1)
 
 
 if __name__ == "__main__":

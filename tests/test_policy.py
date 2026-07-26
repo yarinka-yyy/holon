@@ -71,6 +71,42 @@ class PolicyTests(unittest.TestCase):
         }, ACTION_PROFILES_DIGEST)
         self.assertEqual(over.code, RefusalCode.AMOUNT_LIMIT_EXCEEDED.value)
 
+    def test_withdraw_only_policy_accepts_exact_and_resolved_all_but_not_supply(self) -> None:
+        rule = LendingRule(
+            "lending", "1", "aave-v3-base-usdc", "1", "base", "usdc", 8453,
+            ("withdraw",), "1010000", "100000000000000",
+            ACTION_PROFILES_DIGEST,
+        )
+        parsed = Policy.from_dict(
+            Policy("3", "2", False, (), True, (rule,)).to_dict(),
+        )
+        engine = PolicyEngine(parsed)
+        base = {
+            "module_id": "lending", "protocol_profile_id": "aave-v3-base-usdc",
+            "network": "base", "asset": "usdc", "action": "withdraw",
+        }
+        exact, _ = engine.evaluate_lending_intent(
+            dict(base, amount_mode="exact", amount_atomic=500_000),
+            ACTION_PROFILES_DIGEST,
+        )
+        all_unresolved, selected = engine.evaluate_lending_intent(
+            dict(base, amount_mode="all", amount_atomic=None),
+            ACTION_PROFILES_DIGEST,
+        )
+        over, _ = engine.evaluate_lending_intent(
+            dict(base, amount_mode="all", amount_atomic=1_010_001),
+            ACTION_PROFILES_DIGEST,
+        )
+        supply, _ = engine.evaluate_lending_intent(
+            dict(base, action="supply", amount_mode="exact", amount_atomic=1),
+            ACTION_PROFILES_DIGEST,
+        )
+        self.assertTrue(exact.allowed)
+        self.assertTrue(all_unresolved.allowed)
+        self.assertIsNotNone(selected)
+        self.assertEqual(over.code, RefusalCode.AMOUNT_LIMIT_EXCEEDED.value)
+        self.assertEqual(supply.code, RefusalCode.ACTION_NOT_ALLOWED.value)
+
     def test_production_baseline_is_pinned_and_authority_disabled(self) -> None:
         policy = load_baseline_policy()
         self.assertFalse(policy.authority_enabled)

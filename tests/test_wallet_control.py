@@ -271,7 +271,7 @@ def test_lending_authority_protocol_has_only_semantics_and_material_digests() ->
         "flow_id": request["flow_id"], "action_id": request["action_id"],
         "wallet_pid": 202, "profile_id": "profile-one",
         "sender": "0x2222222222222222222222222222222222222222",
-        "requested_action": "supply", "next_action": "approve",
+        "requested_action": "supply", "amount_mode": "exact", "next_action": "approve",
         "network": "base", "asset": "usdc", "amount_atomic": "1000000",
         "target": "0x3333333333333333333333333333333333333333",
         "method": "approve", "max_total_fee_wei": "100000000000000",
@@ -286,3 +286,15 @@ def test_lending_authority_protocol_has_only_semantics_and_material_digests() ->
     wire = _authority_encode(response)
     for secret_field in (b"password", b"calldata", b"private", b"rawSigned"):
         assert secret_field not in wire
+
+    withdraw_request = dict(
+        request, action="withdraw", amount_mode="all", amount=None,
+    )
+    checked_withdraw = validate_authority_request(withdraw_request)
+    withdraw_response = dict(
+        response, requested_action="withdraw", amount_mode="all",
+        next_action="withdraw", method="withdraw",
+    )
+    assert validate_authority_response(
+        withdraw_response, checked_withdraw, 202,
+    ) == withdraw_response

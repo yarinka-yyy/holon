@@ -9,6 +9,8 @@ TransactionFlowShell {
     activeStep: 1; onBackRequested: walletController.cancelMainnetExecution()
     property bool explicitlyConfirmed: false
     property var action: walletController.transferAction
+    property string lendingMethod: action.method === "withdraw" && action.amountMode === "all"
+        ? "withdraw all" : (action.method || "action")
     property url assetIcon: action.assetId === "eth"
         ? "assets/ethereum.svg" : "assets/usdc.png"
     property bool readyToSign: passwordField.text.length >= 4
@@ -34,7 +36,7 @@ TransactionFlowShell {
         Text {
             x: 18; y: 48; width: 350
             text: (root.action.actionType === "lending"
-                ? "Aave " + (root.action.method || "action") + " · "
+                ? "Aave " + root.lendingMethod + " · "
                 : "To ") + (root.action.transactionTarget || root.action.recipient || "")
             color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 11
             wrapMode: Text.WrapAnywhere
@@ -100,7 +102,7 @@ TransactionFlowShell {
     FormButton {
         objectName: "mainnetSendButton"; x: 0; y: 468; width: 458; height: 56
         label: root.action.actionType === "lending"
-            ? "Sign and submit " + (root.action.method || "action")
+            ? "Sign and submit " + root.lendingMethod
             : "Sign and send " + (root.action.token || "asset")
         controlEnabled: root.readyToSign
         onTriggered: root.submit()

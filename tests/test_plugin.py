@@ -91,6 +91,20 @@ class StaticConnector:
             ),
         )
 
+    def lending_action_execute(self, payload, action_id):
+        self.last_lending_execute = (payload, action_id)
+        return make_envelope(
+            MessageKind.PROTECTED_FLOW_STARTED,
+            {
+                "guard_state": "ACTIVE",
+                "action_state": "AWAITING_LOCAL_CONFIRMATION",
+                "flow_id": "11111111-1111-4111-8111-111111111111",
+                "code": "AWAITING_LOCAL_CONFIRMATION",
+                "message": "Action status is available.",
+            },
+            action_id=action_id,
+        )
+
     def prepare_transfer(self, payload, action_id):
         self.last_transfer = (payload, action_id)
         return make_envelope(
@@ -366,6 +380,26 @@ class PluginTests(unittest.TestCase):
         }))
         self.assertEqual(result["code"], "LENDING_ACTION_UNAVAILABLE")
         self.assertFalse(hasattr(connector, "last_lending_action"))
+
+    def test_lending_execute_allows_only_withdraw_exact_or_all(self) -> None:
+        connector = StaticConnector(GuardHealth.available(GuardState.NORMAL))
+        runtime = plugin.PluginRuntime(connector)
+        result = json.loads(runtime.handle_lending_execute({
+            "action": "withdraw", "amount_mode": "all", "amount": None,
+        }))
+        self.assertEqual(result["status"], "AWAITING_LOCAL_CONFIRMATION")
+        self.assertEqual(result["action"], "withdraw")
+        self.assertEqual(result["amount_mode"], "all")
+        intent, action_id = connector.last_lending_execute
+        self.assertEqual(intent["beneficiary_mode"], "active_wallet_account")
+        self.assertEqual(intent["amount"], None)
+        self.assertEqual(result["action_id"], action_id)
+        self.assertEqual(result["turn_state"], "END_REQUIRED")
+
+        rejected = json.loads(plugin.PluginRuntime(connector).handle_lending_execute({
+            "action": "supply", "amount_mode": "exact", "amount": "1",
+        }))
+        self.assertEqual(rejected["status"], "DEGRADED")
 
     def test_status_and_cancel_expose_no_internal_flow(self) -> None:
         runtime = plugin.PluginRuntime(

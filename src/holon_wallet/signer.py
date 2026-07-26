@@ -35,7 +35,9 @@ from .transfer import (
     transfer_route,
 )
 from holon_lending import ActionProfilesState
-from holon_lending.preflight import encode_approve, encode_supply
+from holon_lending.preflight import (
+    MAX_UINT256, encode_approve, encode_supply, encode_withdraw,
+)
 from .vault import (
     AuthenticationFailedError,
     VaultRepository,
@@ -293,16 +295,26 @@ def _validate_lending_action(
     if profile is None:
         return OfflineSigningCode.ACTION_INVALID
     tx = action.transaction
-    expected_data = (
-        encode_approve(profile.pool, action.amount_atomic)
-        if action.method == "approve"
-        else encode_supply(profile.asset, action.amount_atomic, action.sender)
-    )
+    if action.method == "approve":
+        expected_data = encode_approve(profile.pool, action.amount_atomic)
+    elif action.method == "supply":
+        expected_data = encode_supply(profile.asset, action.amount_atomic, action.sender)
+    else:
+        expected_data = encode_withdraw(
+            profile.asset,
+            MAX_UINT256 if action.amount_mode == "all" else action.amount_atomic,
+            action.sender,
+        )
     expected_target = profile.asset if action.method == "approve" else profile.pool
+    valid_mode = (
+        action.method in {"approve", "supply"} and action.amount_mode == "exact"
+    ) or (
+        action.method == "withdraw" and action.amount_mode in {"exact", "all"}
+    )
     valid = (
         action.digest == expected_digest and now < action.expires_at
         and action.expires_at - action.created_at == ACTION_LIFETIME
-        and action.method in {"approve", "supply"}
+        and valid_mode
         and action.action_profile_digest == profile.digest
         and action.network_id == "base" and action.asset_id == "usdc"
         and action.chain_id == profile.chain_id and action.token_contract == profile.asset

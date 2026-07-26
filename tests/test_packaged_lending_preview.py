@@ -107,6 +107,8 @@ class RpcFixture(BaseHTTPRequestHandler):
         if data.startswith(_selector("getUserAccountData(address)")):
             return _result(["uint256"] * 6, [0] * 6)
         if data.startswith(_selector("balanceOf(address)")):
+            if target == AAVE_CONTRACTS["a_token"].lower():
+                return _result(["uint256"], [999_999])
             return _result(["uint256"], [10_000_000])
         if data.startswith(_selector("allowance(address,address)")):
             return _result(["uint256"], [0])
@@ -114,6 +116,10 @@ class RpcFixture(BaseHTTPRequestHandler):
             return _result(["uint256"], [20_000])
         if target == BASE_USDC.lower() and data.startswith(_selector("approve(address,uint256)")):
             return _result(["bool"], [True])
+        if target == AAVE_CONTRACTS["pool"].lower() and data.startswith(
+            _selector("withdraw(address,uint256,address)")
+        ):
+            return _result(["uint256"], [999_999])
         raise AssertionError(f"Unexpected eth_call: {target} {data[:8]}")
 
 
@@ -198,7 +204,7 @@ def test_packaged_lending_authority_starts_and_cancels_without_signing(tmp_path:
     baseline = Policy("2", "1", False, ())
     rule = LendingRule(
         "lending", "1", "aave-v3-base-usdc", "1", "base", "usdc", 8453,
-        ("approve", "supply"), "5000000", "100000000000000",
+        ("withdraw",), "1010000", "100000000000000",
         ACTION_PROFILES_DIGEST,
     )
     active = Policy("3", "2", False, (), True, (rule,))
@@ -233,8 +239,8 @@ def test_packaged_lending_authority_starts_and_cancels_without_signing(tmp_path:
                 "module_id": "lending", "module_version": "1",
                 "protocol_profile_id": "aave-v3-base-usdc",
                 "protocol_profile_version": "1", "network": "base", "asset": "usdc",
-                "beneficiary_mode": "active_wallet_account", "action": "supply",
-                "amount_mode": "exact", "amount": "1",
+                "beneficiary_mode": "active_wallet_account", "action": "withdraw",
+                "amount_mode": "all", "amount": None,
             },
             action_id=action_id, owner_pid=os.getpid(), response_timeout=40.0,
         )

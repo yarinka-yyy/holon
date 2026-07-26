@@ -306,8 +306,16 @@ class PluginRuntime:
         if not isinstance(params, dict) or set(params) != {"action", "amount_mode", "amount"}:
             return self._safe_transfer_failure()
         if (
-            params.get("action") != "supply" or params.get("amount_mode") != "exact"
-            or not isinstance(params.get("amount"), str)
+            params.get("action") != "withdraw"
+            or params.get("amount_mode") not in {"exact", "all"}
+            or (
+                params.get("amount_mode") == "exact"
+                and not isinstance(params.get("amount"), str)
+            )
+            or (
+                params.get("amount_mode") == "all"
+                and params.get("amount") is not None
+            )
         ):
             return self._safe_transfer_failure()
         action_id = new_action_id()
@@ -326,7 +334,8 @@ class PluginRuntime:
             self._protected_action_id = action_id
             return json.dumps({
                 "status": "AWAITING_LOCAL_CONFIRMATION", "authority_available": True,
-                "action_id": action_id, "action": "supply", "amount": params["amount"],
+                "action_id": action_id, "action": "withdraw",
+                "amount_mode": params["amount_mode"], "amount": params["amount"],
                 "code": response.payload["code"],
                 "message": "Review and confirm the independent Aave action in Wallet.",
                 "turn_state": "END_REQUIRED",
@@ -700,14 +709,14 @@ def register(ctx: Any) -> None:
             "description": "Prepare one independently reviewed Aave V3 Base USDC authority action.",
             "parameters": {
                 "type": "object", "properties": {
-                    "action": {"type": "string", "enum": ["supply"]},
-                    "amount_mode": {"type": "string", "enum": ["exact"]},
+                    "action": {"type": "string", "enum": ["withdraw"]},
+                    "amount_mode": {"type": "string", "enum": ["exact", "all"]},
                     "amount": {"type": "string"},
                 }, "required": ["action", "amount_mode", "amount"],
                 "additionalProperties": False,
             },
         }, handler=_handle_lending_execute,
-        description="Prepare one Aave supply authority action.",
+        description="Prepare one Aave withdraw authority action.",
     )
     transfer_properties = {
         "network": {"type": "string", "enum": ["ethereum", "base"]},
