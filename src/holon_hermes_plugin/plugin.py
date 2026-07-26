@@ -280,7 +280,7 @@ class PluginRuntime:
         action, mode, amount = params.get("action"), params.get("amount_mode"), params.get("amount")
         if (
             action not in {"supply", "withdraw"} or mode not in {"exact", "all"}
-            or mode == "all" and (action != "withdraw" or amount is not None)
+            or mode == "all" and amount is not None
             or mode == "exact" and not isinstance(amount, str)
         ):
             return json.dumps(_unavailable_lending_preview(), separators=(",", ":"))
@@ -306,15 +306,14 @@ class PluginRuntime:
         if not isinstance(params, dict) or set(params) != {"action", "amount_mode", "amount"}:
             return self._safe_transfer_failure()
         if (
-            params.get("action") != "withdraw"
+            params.get("action") not in {"supply", "withdraw"}
             or params.get("amount_mode") not in {"exact", "all"}
             or (
                 params.get("amount_mode") == "exact"
                 and not isinstance(params.get("amount"), str)
             )
             or (
-                params.get("amount_mode") == "all"
-                and params.get("amount") is not None
+                params.get("amount_mode") == "all" and params.get("amount") is not None
             )
         ):
             return self._safe_transfer_failure()
@@ -334,7 +333,7 @@ class PluginRuntime:
             self._protected_action_id = action_id
             return json.dumps({
                 "status": "AWAITING_LOCAL_CONFIRMATION", "authority_available": True,
-                "action_id": action_id, "action": "withdraw",
+                "action_id": action_id, "action": params["action"],
                 "amount_mode": params["amount_mode"], "amount": params["amount"],
                 "code": response.payload["code"],
                 "message": "Review and confirm the independent Aave action in Wallet.",
@@ -706,17 +705,17 @@ def register(ctx: Any) -> None:
         name=LENDING_EXECUTE_TOOL, toolset="holon",
         schema={
             "name": LENDING_EXECUTE_TOOL,
-            "description": "Prepare one independently reviewed Aave V3 Base USDC authority action.",
+            "description": "Prepare one protected Aave V3 Base USDC supply or withdraw operation.",
             "parameters": {
                 "type": "object", "properties": {
-                    "action": {"type": "string", "enum": ["withdraw"]},
+                    "action": {"type": "string", "enum": ["supply", "withdraw"]},
                     "amount_mode": {"type": "string", "enum": ["exact", "all"]},
-                    "amount": {"type": "string"},
+                    "amount": {"type": ["string", "null"]},
                 }, "required": ["action", "amount_mode", "amount"],
                 "additionalProperties": False,
             },
         }, handler=_handle_lending_execute,
-        description="Prepare one Aave withdraw authority action.",
+        description="Prepare one protected Aave supply or withdraw operation.",
     )
     transfer_properties = {
         "network": {"type": "string", "enum": ["ethereum", "base"]},

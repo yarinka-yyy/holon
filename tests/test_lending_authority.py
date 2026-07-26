@@ -366,6 +366,7 @@ def test_lending_receipt_tracker_fetches_transaction_and_confirms(
         SENDER, profile.pool, target, "USDC", "1000000", 6,
         transaction_hash, HistoryStatus.UNKNOWN, "2026-07-26T00:00:00Z",
         "2026-07-26T00:00:00Z", False, "100000000000000",
+        position_before_atomic=("0" if action_type == "lending_supply" else None),
     ))
 
     class ReceiptRpc:
@@ -378,7 +379,7 @@ def test_lending_receipt_tracker_fetches_transaction_and_confirms(
             return {
                 "transactionHash": transaction_hash, "from": SENDER, "to": target,
                 "status": 1, "gasUsed": 100, "effectiveGasPrice": 2,
-                "l1Fee": "0x3", "logs": [],
+                "l1Fee": "0x3", "logs": [], "blockNumber": 100,
             }
 
         def transaction(self, _transaction_hash):
@@ -387,6 +388,14 @@ def test_lending_receipt_tracker_fetches_transaction_and_confirms(
                 "hash": transaction_hash, "from": SENDER, "to": target,
                 "value": 0, "input": calldata, "chainId": 8453,
             }
+
+        def lending_allowance(self, token, owner, spender, block):
+            del token, owner, spender, block
+            return 0
+
+        def lending_token_balance(self, token, owner, block):
+            del token, owner, block
+            return 1_000_000
 
     rpc = ReceiptRpc()
     result = BroadcastReceiptTracker(

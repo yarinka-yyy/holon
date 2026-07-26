@@ -354,13 +354,20 @@ def test_profile_failure_and_digest_mismatch_make_no_rpc_call(setup_service) -> 
 @pytest.mark.parametrize(
     "bad",
     [
-        intent("supply", "all", None), intent("withdraw", "all", "1"),
+        intent("withdraw", "all", "1"),
         intent(amount="0"), intent(amount="1.0000001"), intent(amount="1e3"),
     ],
 )
 def test_semantic_contract_rejects_invalid_amount_combinations(bad) -> None:
     with pytest.raises((ContractViolation, LendingPreflightError)):
         make_envelope(MessageKind.LENDING_ACTION_INTENT, bad)
+
+
+def test_semantic_contract_accepts_supply_all_without_amount() -> None:
+    message = make_envelope(
+        MessageKind.LENDING_ACTION_INTENT, intent("supply", "all", None),
+    )
+    assert message.payload["amount"] is None
 
 
 def test_unavailable_preview_is_strict_and_contains_no_action_material() -> None:

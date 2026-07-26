@@ -55,7 +55,14 @@ class ResponseMixin:
         )
 
     def _status(self, request: ContractEnvelope, kind: MessageKind, code: str) -> ContractEnvelope:
-        record = self.lifecycle.ledger.find(request.action_id or "")
+        requested_id = request.action_id or ""
+        operation = self.lifecycle.lending_operation_snapshot.current
+        lookup_id = (
+            operation.phase_action_id
+            if operation is not None and operation.operation_id == requested_id
+            else requested_id
+        )
+        record = self.lifecycle.ledger.find(lookup_id)
         if record is None:
             return self.refusal(request, RefusalCode.ACTION_ID_INVALID.value, "Action was not found.")
         snapshot = self.lifecycle.snapshot

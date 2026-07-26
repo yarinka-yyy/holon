@@ -57,6 +57,11 @@ try {
     if (-not (Test-Path -LiteralPath $artifact -PathType Leaf)) {
         throw "Wallet artifact was not created"
     }
+    $policyArtifactRoot = Join-Path $distRoot "holon_policy"
+    New-Item -ItemType Directory -Force -Path $policyArtifactRoot | Out-Null
+    Copy-Item -LiteralPath $baselinePolicy `
+        -Destination (Join-Path $policyArtifactRoot "baseline-policy.json") `
+        -Force
     Write-Output $artifact
 }
 finally {

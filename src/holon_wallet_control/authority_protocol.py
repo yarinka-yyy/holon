@@ -32,7 +32,8 @@ PREPARE_FIELDS = frozenset({
 LENDING_PREPARE_FIELDS = frozenset({
     "authority_version", "kind", "flow_id", "action_id", "policy_version",
     "policy_revision", "policy_digest", "action_profile_digest", "action",
-    "amount_mode", "amount", "created_at", "expires_at",
+    "amount_mode", "amount", "resolved_amount_atomic", "operation_id",
+    "phase_action_id", "phase", "created_at", "expires_at",
 })
 CANCEL_FIELDS = frozenset({
     "authority_version", "kind", "flow_id", "action_id", "prepared_digest",
@@ -50,6 +51,7 @@ LENDING_PREPARED_FIELDS = frozenset({
     "l2_fee_ceiling_wei", "l1_fee_upper_bound_wei", "prepared_digest",
     "created_at", "expires_at", "code", "policy_revision", "policy_digest",
     "action_profile_digest", "amount_mode",
+    "operation_id", "phase_action_id", "phase",
 })
 REFUSED_FIELDS = frozenset({
     "authority_version", "kind", "flow_id", "action_id", "wallet_pid", "code",
@@ -119,31 +121,37 @@ def validate_request(value: Mapping[str, object]) -> dict[str, object]:
         return dict(value)
     if kind == "prepare_lending_action":
         if (
-            value.get("policy_version") != "2"
+            value.get("policy_version") not in {"2", "3"}
             or type(value.get("policy_revision")) is not int
-            or value["policy_revision"] <= 0
+            or value["policy_revision"] < 0
             or not isinstance(value.get("policy_digest"), str)
             or HEX_RE.fullmatch(value["policy_digest"]) is None
             or not isinstance(value.get("action_profile_digest"), str)
             or HEX_RE.fullmatch(value["action_profile_digest"]) is None
             or value.get("action") not in {"supply", "withdraw"}
             or value.get("amount_mode") not in {"exact", "all"}
+            or value.get("operation_id") is None
+            or value.get("phase_action_id") != value.get("action_id")
+            or value.get("phase") not in {"approve_or_supply", "supply", "withdraw"}
+            or not isinstance(value.get("resolved_amount_atomic"), str)
+            or DECIMAL_RE.fullmatch(value["resolved_amount_atomic"]) is None
             or (
                 value.get("amount_mode") == "exact"
                 and not isinstance(value.get("amount"), str)
             )
             or (
                 value.get("amount_mode") == "all"
-                and (value.get("action") != "withdraw" or value.get("amount") is not None)
+                and value.get("amount") is not None
             )
         ):
             raise ControlProtocolError("Invalid lending authority request")
+        _action(value.get("operation_id"))
         for field in ("created_at", "expires_at"):
             if not isinstance(value.get(field), str) or len(value[field]) > 40:
                 raise ControlProtocolError("Invalid authority request")
         return dict(value)
     if (
-        value.get("policy_version") != "1"
+        value.get("policy_version") not in {"1", "3"}
         or type(value.get("policy_revision")) is not int
         or value["policy_revision"] < 0
         or not isinstance(value.get("policy_digest"), str)
@@ -191,6 +199,7 @@ def validate_response(
         for field in (
             "requested_action", "created_at", "expires_at", "policy_revision",
             "policy_digest", "action_profile_digest", "amount_mode",
+            "operation_id", "phase_action_id", "phase",
         ):
             expected_field = "action" if field == "requested_action" else field
             if value.get(field) != request.get(expected_field):

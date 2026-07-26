@@ -30,6 +30,9 @@ from .lifecycle import GuardLifecycle
 from .policy_control import GuardPolicyControl
 from .provisioning import AuthorityStateProvisioner
 from .lock import GuardAlreadyRunning, SingleInstanceLock
+from holon_wallet_control.lending_operation import (
+    LendingOperationSnapshot, LendingOperationStateError, LendingOperationStore,
+)
 from .runtime_security import load_authority_audit
 from .server import GuardServer
 from .store import SnapshotStore
@@ -81,7 +84,12 @@ def _policy_path(args: argparse.Namespace) -> Path | None:
 
 
 def _any_authority_enabled(policy: Policy) -> bool:
-    return policy.authority_enabled or policy.lending_authority_enabled
+    """Compatibility helper: schema v4 always exposes protected Aave actions."""
+    return (
+        policy.schema_version == "4"
+        or policy.authority_enabled
+        or policy.lending_authority_enabled
+    )
 
 
 def _wallet_controller(
@@ -106,12 +114,21 @@ def main(argv: list[str] | None = None) -> int:
         with SingleInstanceLock(data_dir / "guard.lock"):
             store = SnapshotStore(data_dir / "guard-state.json")
             action_store = ActionStateStore(data_dir / "action-state.json")
+            lending_operation_store = LendingOperationStore(
+                data_dir / "lending-operation-state.json",
+            )
             action_failure: str | None = None
             try:
                 action_snapshot = action_store.load()
             except (MissingActionState, InvalidActionState):
                 action_snapshot = ActionStateSnapshot(None, ())
                 action_failure = SecurityCode.ACTION_STATE_INVALID.value
+            operation_failure: str | None = None
+            try:
+                lending_operation_snapshot = lending_operation_store.load()
+            except LendingOperationStateError:
+                lending_operation_snapshot = LendingOperationSnapshot()
+                operation_failure = "LENDING_OPERATION_STATE_INVALID"
             policy_failure: str | None = None
             try:
                 baseline_policy = load_baseline_policy(_policy_path(args))
@@ -121,7 +138,7 @@ def main(argv: list[str] | None = None) -> int:
             revision_store = PolicyRevisionStore(data_dir, baseline_policy)
             revision_invalid = False
             try:
-                policy_snapshot = revision_store.load()
+                policy_snapshot, _migrated = revision_store.migrate_to_v4()
             except PolicyRevisionUnavailable:
                 policy_snapshot = revision_store.recoverable_snapshot()
                 revision_invalid = True
@@ -133,18 +150,27 @@ def main(argv: list[str] | None = None) -> int:
                 wallet,
                 WindowsOwnerProbe(),
                 ledger,
+                lending_operation_store,
+                lending_operation_snapshot,
             )
             audit, audit_failure = load_authority_audit(data_dir)
             promotion_blocker = (
                 install_failure or audit_failure or policy_failure or action_failure
+                or operation_failure
             )
             failure = promotion_blocker or (
                 SecurityCode.POLICY_STATE_INVALID.value if revision_invalid else None
             )
             if failure is not None:
                 lifecycle.disable_signing(failure)
-            elif not _any_authority_enabled(policy_snapshot.policy):
-                lifecycle.disable_signing(RefusalCode.POLICY_AUTHORITY_DISABLED.value)
+            elif (
+                lifecycle.snapshot.state.value == "SIGNING_DISABLED"
+                and lifecycle.snapshot.reason in {
+                    RefusalCode.POLICY_AUTHORITY_DISABLED.value,
+                    "LENDING_AUTHORITY_DISABLED",
+                }
+            ):
+                lifecycle.enable_signing("AAVE_CAPABILITY_READY")
             authority = AuthorityService(
                 lifecycle, PolicyEngine(policy_snapshot.policy), audit,
                 security_failure=failure, policy_snapshot=policy_snapshot,

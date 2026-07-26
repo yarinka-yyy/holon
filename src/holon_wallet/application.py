@@ -57,7 +57,8 @@ def _load_wallet_transfer_policy(data_dir: Path | None = None) -> MainnetBroadca
         if data_dir is None:
             return MainnetBroadcastPolicy.from_policy(baseline)
         store = PolicyRevisionStore(data_dir, baseline)
-        return MainnetBroadcastPolicy.from_snapshot(store.load(), store)
+        snapshot, _changed = store.migrate_to_v4()
+        return MainnetBroadcastPolicy.from_snapshot(snapshot, store)
     except (PolicyLoadError, PolicyRevisionUnavailable) as exc:
         code = getattr(exc, "code", "POLICY_STATE_INVALID")
         return MainnetBroadcastPolicy.unavailable(code)
@@ -71,6 +72,10 @@ class WalletQuickView(QQuickView):
         self._controller = controller
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        if self._controller.hideForLendingReceipt:
+            self.hide()
+            event.ignore()
+            return
         if not self._controller.canCloseWallet:
             event.ignore()
             return

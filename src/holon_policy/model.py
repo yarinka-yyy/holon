@@ -13,6 +13,10 @@ POLICY_V3_FIELDS = frozenset({
     "schema_version", "policy_version", "transfer_authority_enabled",
     "lending_authority_enabled", "transfer_rules", "lending_rules",
 })
+POLICY_V4_FIELDS = frozenset({
+    "schema_version", "policy_version", "transfer_authority_enabled",
+    "transfer_rules",
+})
 RULE_FIELDS = frozenset({
     "network", "asset", "chain_id", "max_amount_atomic", "max_total_fee_wei",
     "recipients",
@@ -200,6 +204,12 @@ class Policy:
             transfer_enabled = value.get("transfer_authority_enabled")
             lending_enabled = value.get("lending_authority_enabled")
             raw_lending = value.get("lending_rules")
+        elif schema == "4":
+            if set(value) != POLICY_V4_FIELDS or value.get("policy_version") != "3":
+                raise PolicyError("Unsupported policy version")
+            transfer_enabled = value.get("transfer_authority_enabled")
+            lending_enabled = False
+            raw_lending = []
         else:
             raise PolicyError("Unsupported policy version")
         if type(transfer_enabled) is not bool or type(lending_enabled) is not bool:
@@ -230,6 +240,14 @@ class Policy:
                 "authority_enabled": self.authority_enabled,
                 "transfer_rules": [rule.to_dict() for rule in self.transfer_rules],
             }
+        if self.schema_version == "4":
+            if self.policy_version != "3" or self.lending_authority_enabled or self.lending_rules:
+                raise PolicyError("Invalid v4 policy")
+            return {
+                "schema_version": "4", "policy_version": "3",
+                "transfer_authority_enabled": self.authority_enabled,
+                "transfer_rules": [rule.to_dict() for rule in self.transfer_rules],
+            }
         if self.schema_version != "3" or self.policy_version != "2":
             raise PolicyError("Invalid policy version")
         return {
@@ -244,4 +262,11 @@ class Policy:
         return Policy(
             "3", "2", False, self.transfer_rules, False,
             self.lending_rules if lending_rules is None else lending_rules,
+        )
+
+    def transfer_only_v4(self, *, enabled: bool | None = None) -> "Policy":
+        """Drop legacy Lending authority while preserving transfer rules."""
+        return Policy(
+            "4", "3", self.authority_enabled if enabled is None else enabled,
+            self.transfer_rules,
         )

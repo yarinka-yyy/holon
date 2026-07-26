@@ -70,9 +70,10 @@ def test_envelope_is_disabled_canonical_and_round_trips() -> None:
     )).canonical()
     envelope = draft.to_envelope()
 
-    assert envelope["draft_schema_version"] == "2"
+    assert envelope["draft_schema_version"] == "3"
     assert envelope["policy"]["transfer_authority_enabled"] is False
-    assert envelope["policy"]["lending_authority_enabled"] is False
+    assert envelope["policy"]["schema_version"] == "4"
+    assert "lending_authority_enabled" not in envelope["policy"]
     assert [
         (item["network"], item["asset"])
         for item in envelope["policy"]["transfer_rules"]
@@ -80,18 +81,14 @@ def test_envelope_is_disabled_canonical_and_round_trips() -> None:
     assert TrustedPolicyDraft.from_envelope(envelope) == draft
 
 
-def test_new_lending_limits_are_withdraw_only_and_legacy_supply_round_trips() -> None:
-    withdraw = TrustedPolicyDraft().with_lending_limits("1.01", "0.0001")
-    rule = withdraw.to_envelope()["policy"]["lending_rules"][0]
-    assert rule["allowed_actions"] == ["withdraw"]
-    assert rule["max_amount_atomic"] == "1010000"
-    assert rule["max_total_fee_wei"] == "100000000000000"
-
-    legacy = TrustedPolicyDraft(
-        (), "5000000", "100000000000000", ("approve", "supply"),
-    )
-    envelope = legacy.to_envelope()
-    assert TrustedPolicyDraft.from_envelope(envelope) == legacy
+def test_lending_limits_are_not_part_of_transfer_policy_draft() -> None:
+    with pytest.raises(TrustedDraftError):
+        TrustedPolicyDraft().with_lending_limits("1.01", "0.0001")
+    envelope = TrustedPolicyDraft().to_envelope()
+    assert envelope["policy"] == {
+        "schema_version": "4", "policy_version": "3",
+        "transfer_authority_enabled": False, "transfer_rules": [],
+    }
 
 
 def test_envelope_rejects_digest_authority_labels_and_noncanonical_order() -> None:
@@ -174,7 +171,7 @@ def test_store_rejects_oversized_and_incompatible_draft(tmp_path) -> None:
         store.load()
 
     value = TrustedPolicyDraft().to_envelope()
-    value["draft_schema_version"] = "3"
+    value["draft_schema_version"] = "4"
     paths.authority_policy_draft.write_text(json.dumps(value), encoding="utf-8")
     with pytest.raises(TrustedDraftUnavailable):
         store.load()

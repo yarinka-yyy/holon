@@ -195,9 +195,9 @@ def test_lending_runtime_stays_out_of_hermes_and_ordinary_wallet() -> None:
     source_root = Path(__file__).parents[1] / "src"
     allowed = {
         "holon_hermes_plugin": set(),
-        "holon_wallet": {
-            "broadcast.py", "controller.py", "lending_action.py", "lending_worker.py",
-            "signer.py", "trusted_recipients.py",
+            "holon_wallet": {
+                "broadcast.py", "controller.py", "lending_action.py", "lending_worker.py",
+                "signer.py",
         },
     }
     for package, expected in allowed.items():
@@ -223,7 +223,10 @@ def test_only_guard_runtime_imports_lending() -> None:
         if any(isinstance(node, ast.ImportFrom) and node.module == "holon_lending"
                for node in ast.walk(tree)):
             importing.append(path.name)
-    assert sorted(importing) == ["__main__.py", "authority.py", "authority_audit.py"]
+    assert sorted(importing) == [
+        "__main__.py", "authority.py", "authority_audit.py",
+        "lending_authority.py", "lifecycle.py",
+    ]
 
 
 def test_read_profiles_contain_no_authority_fields() -> None:

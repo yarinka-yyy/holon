@@ -18,8 +18,8 @@ TransactionFlowShell {
 
     function actionTitle() {
         if (!root.isLending) return (root.action.amount || "Transfer") + " on " + (root.action.network || "")
-        if (root.action.method === "approve") return "Approve Aave V3"
-        if (root.action.method === "supply") return "Supply to Aave V3"
+        if (root.action.method === "approve") return "Step 1 of 2 · Approve Aave V3"
+        if (root.action.method === "supply") return "Step 2 of 2 · Supply to Aave V3"
         if (root.action.amountMode === "all") return "Withdraw all from Aave V3"
         return "Withdraw from Aave V3"
     }

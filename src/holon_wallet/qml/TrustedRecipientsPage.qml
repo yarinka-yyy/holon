@@ -28,41 +28,24 @@ PageState {
         }
     }
     SurfaceCard {
-        x: 28; y: 230; width: 458; height: 142
-        Text { x: 16; y: 12; text: "AAVE · BASE · USDC"; color: Design.text; font.family: Design.fontFamily; font.pixelSize: 14; font.weight: Font.DemiBold }
-        DraftField {
-            id: lendingAmount; x: 16; y: 38; width: 170; height: 72
-            label: walletController.trustedLendingLimits.withdrawOnly
-                ? "Withdraw cap (USDC)" : "Legacy supply cap (USDC)"
-            placeholderText: "1.01"
-            text: walletController.trustedLendingLimits.amount
-            fieldObjectName: "trustedLendingAmountInput"
-        }
-        DraftField {
-            id: lendingFee; x: 196; y: 38; width: 150; height: 72
-            label: "Fee cap (ETH)"; placeholderText: "0.0001"
-            text: walletController.trustedLendingLimits.fee
-            fieldObjectName: "trustedLendingFeeInput"
-        }
-        FormButton {
-            objectName: "trustedSaveLendingButton"; x: 354; y: 58; width: 88; height: 48
-            label: "Set Limits"; primary: false
-            onTriggered: walletController.saveTrustedLendingLimits(lendingAmount.text, lendingFee.text)
+        x: 28; y: 230; width: 458; height: 92
+        Text { x: 16; y: 14; text: "AAVE V3 · BASE · NATIVE USDC"; color: Design.text; font.family: Design.fontFamily; font.pixelSize: 14; font.weight: Font.DemiBold }
+        Text {
+            x: 16; y: 42; width: 426; wrapMode: Text.Wrap
+            text: "Built-in route · exact allowance · fee ceiling 0.0001 ETH per transaction"
+            color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 11
         }
         Text {
-            x: 16; y: 116
-            text: walletController.trustedLendingLimits.withdrawOnly
-                ? "Only exact or all-position withdraw · Send remains separate"
-                : "Legacy approve/supply draft · Set Limits to replace it with withdraw-only"
+            x: 16; y: 70; text: "Every blockchain action still requires a fresh Wallet password."
             color: Design.textFaint; font.family: Design.fontFamily; font.pixelSize: 10
         }
     }
     Text {
-        x: 28; y: 392; text: "TRANSFER ROUTES"; color: Design.textFaint
+        x: 28; y: 342; text: "TRANSFER ROUTES"; color: Design.textFaint
         font.family: Design.fontFamily; font.pixelSize: 11; font.weight: Font.Medium
     }
     Text {
-        visible: root.routes.length === 0; x: 52; y: 475; width: 410
+        visible: root.routes.length === 0; x: 52; y: 445; width: 410
         horizontalAlignment: Text.AlignHCenter; wrapMode: Text.Wrap
         text: walletController.trustedDraftAvailable
             ? "No routes in this draft. Add one of the supported Ethereum or Base routes."
@@ -71,7 +54,7 @@ PageState {
     }
     ListView {
         id: routeList; objectName: "trustedRouteList"
-        x: 28; y: 416; width: 458; height: 178; clip: true; spacing: 10
+        x: 28; y: 366; width: 458; height: 228; clip: true; spacing: 10
         model: root.routes; boundsBehavior: Flickable.StopAtBounds
         delegate: SurfaceCard {
             required property var modelData
@@ -122,27 +105,15 @@ PageState {
             ? walletController.showTrustedInitializationReview()
             : walletController.showTrustedApplyReview()
     }
-    FormButton {
-        objectName: "trustedActivateLendingButton"; x: 28; y: 684; width: 220; height: 48
-        label: walletController.trustedLendingLimits.enabled ? "Lending Active" : "Activate Lending"
-        controlEnabled: walletController.trustedCanActivateLending
-        onTriggered: walletController.showTrustedCapabilityReview(true)
-    }
-    FormButton {
-        objectName: "trustedDeactivateLendingButton"; x: 266; y: 684; width: 220; height: 48
-        label: "Deactivate Lending"; primary: false
-        controlEnabled: walletController.trustedCanDeactivateLending
-        onTriggered: walletController.showTrustedCapabilityReview(false)
-    }
     Text {
-        objectName: "trustedDraftError"; x: 48; y: 742; width: 418
+        objectName: "trustedDraftError"; x: 48; y: 690; width: 418
         horizontalAlignment: Text.AlignHCenter; wrapMode: Text.Wrap
         text: walletController.errorMessage; color: Design.danger
         font.family: Design.fontFamily; font.pixelSize: 12
     }
     Text {
-        x: 48; y: 786; width: 418; horizontalAlignment: Text.AlignHCenter
-        text: "Draft limits do not authorize signing until Guard activation"
+        x: 48; y: 734; width: 418; horizontalAlignment: Text.AlignHCenter
+        text: "Transfer drafts never alter the built-in Aave route"
         color: Design.textFaint; font.family: Design.fontFamily; font.pixelSize: 11
     }
 }

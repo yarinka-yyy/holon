@@ -69,6 +69,8 @@ def test_v1_loads_without_fee_fields_and_migrates_on_next_mutation(tmp_path) -> 
     legacy = record().to_dict()
     legacy.pop("max_total_fee_wei")
     legacy.pop("actual_fee_wei")
+    legacy.pop("operation_id")
+    legacy.pop("position_before_atomic")
     atomic_write_json(store.path, {"schema_version": 1, "records": [legacy]})
 
     loaded = store.load()
@@ -80,7 +82,7 @@ def test_v1_loads_without_fee_fields_and_migrates_on_next_mutation(tmp_path) -> 
         "act-1", HistoryStatus.PENDING, "2026-07-20T12:01:00Z", HASH,
     )
     migrated = store.path.read_text(encoding="utf-8")
-    assert '"schema_version": 2' in migrated
+    assert f'"schema_version": {HISTORY_SCHEMA_VERSION}' in migrated
     assert '"max_total_fee_wei": null' in migrated
 
 

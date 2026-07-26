@@ -8,6 +8,9 @@ from typing import Callable
 from holon_contracts import ActionState, SecurityCode
 from holon_guard_ipc import GuardState
 from holon_wallet_control import AUTHORITY_VERSION
+from holon_wallet_control.lending_operation import (
+    LendingOperationSnapshot, LendingOperationStateError, LendingOperationStore,
+)
 
 from .actions import ActionLedger, ActionLedgerFailure
 from .model import GuardResult, GuardSnapshot
@@ -15,6 +18,8 @@ from .reconcile import reconcile_action_state
 from .startup import best_effort_save, idle_snapshot, restore_snapshot
 from .store import SnapshotStore
 from .wallet import OwnerProbe, WalletController, WalletHandle
+
+
 class GuardCore:
     def __init__(
         self,
@@ -23,6 +28,8 @@ class GuardCore:
         wallet: WalletController,
         owner_probe: OwnerProbe,
         ledger: ActionLedger,
+        lending_operation_store: LendingOperationStore | None = None,
+        lending_operation_snapshot: LendingOperationSnapshot | None = None,
         id_factory: Callable[[], str] | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
@@ -31,6 +38,10 @@ class GuardCore:
         self.wallet = wallet
         self.owner_probe = owner_probe
         self.ledger = ledger
+        self.lending_operation_store = lending_operation_store
+        self.lending_operation_snapshot = (
+            lending_operation_snapshot or LendingOperationSnapshot()
+        )
         self.id_factory = id_factory or (lambda: str(uuid.uuid4()))
         self.clock = clock
         self.wallet_handle: WalletHandle | None = None
@@ -42,11 +53,48 @@ class GuardCore:
     def restore(
         cls, store: SnapshotStore, wallet: WalletController, owner_probe: OwnerProbe,
         ledger: ActionLedger,
+        lending_operation_store: LendingOperationStore | None = None,
+        lending_operation_snapshot: LendingOperationSnapshot | None = None,
     ) -> "GuardCore":
         snapshot = restore_snapshot(store)
-        guard = cls(store, snapshot, wallet, owner_probe, ledger)
+        guard = cls(
+            store, snapshot, wallet, owner_probe, ledger,
+            lending_operation_store, lending_operation_snapshot,
+        )
         reconcile_action_state(guard)
+        operation = guard.lending_operation_snapshot.current
+        if (
+            guard.snapshot.state is GuardState.NORMAL
+            and guard.ledger.snapshot.current is None
+            and operation is not None
+            and operation.phase != "resume_or_revoke"
+        ):
+            if operation.phase == "approve_review":
+                cancelled = operation.with_phase("cancelled")
+                guard._save_lending_operations(LendingOperationSnapshot(
+                    None, guard.lending_operation_snapshot.terminal + (cancelled,),
+                ))
+            elif operation.phase in {
+                "approve_receipt", "prepare_supply", "supply_review",
+                "supply_receipt",
+            }:
+                guard._save_lending_operations(LendingOperationSnapshot(
+                    operation.with_phase("resume_or_revoke"),
+                    guard.lending_operation_snapshot.terminal,
+                ))
         return guard
+
+    def _save_lending_operations(self, snapshot: LendingOperationSnapshot) -> bool:
+        if self.lending_operation_store is None:
+            self.lending_operation_snapshot = snapshot
+            return True
+        try:
+            self.lending_operation_store.save(snapshot)
+        except (OSError, LendingOperationStateError, TypeError, ValueError):
+            self.disable_signing("LENDING_OPERATION_STATE_INVALID")
+            return False
+        self.lending_operation_snapshot = snapshot
+        return True
 
     def _result(self, ok: bool, code: str, message: str) -> GuardResult:
         return GuardResult(ok, code, self.snapshot.state, message, self.snapshot.flow_id)
@@ -81,6 +129,24 @@ class GuardCore:
         self.wallet_handle = None
         self.prepared_digest = None
         self.authority_expires_at = None
+        operation = self.lending_operation_snapshot.current
+        if operation is not None:
+            if operation.phase == "approve_review":
+                cancelled = operation.with_phase("cancelled")
+                saved = self._save_lending_operations(LendingOperationSnapshot(
+                    None, self.lending_operation_snapshot.terminal + (cancelled,),
+                ))
+            elif operation.phase in {
+                "approve_receipt", "prepare_supply", "supply_review", "supply_receipt",
+            }:
+                saved = self._save_lending_operations(LendingOperationSnapshot(
+                    operation.with_phase("resume_or_revoke"),
+                    self.lending_operation_snapshot.terminal,
+                ))
+            else:
+                saved = True
+            if not saved:
+                return self.disable_signing("LENDING_OPERATION_STATE_INVALID")
         self._persist(recovery)
         return self._result(False, code, "Protected flow requires recovery.")
 

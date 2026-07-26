@@ -759,7 +759,7 @@ def test_trusted_recipients_qml_initializes_authority_before_apply(
         assert app.controller.currentScreen == "trusted_recipients"
         assert policy_control.authority_state == "READY"
         assert "Send disabled" in app.controller.trustedAuthorityStatus
-        assert "Lending disabled" in app.controller.trustedAuthorityStatus
+        assert "Aave protected route ready" in app.controller.trustedAuthorityStatus
         assert app._test_mainnet_rpc.send_calls == 0
     finally:
         app.close()

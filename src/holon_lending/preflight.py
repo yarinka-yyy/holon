@@ -165,7 +165,7 @@ def parse_lending_intent(value: Mapping[str, object]) -> LendingIntent:
     if action not in {"supply", "withdraw"} or mode not in {"exact", "all"}:
         raise LendingPreflightError(LendingPreflightCode.REQUEST_INVALID)
     if mode == "all":
-        if action != "withdraw" or amount is not None:
+        if amount is not None:
             raise LendingPreflightError(LendingPreflightCode.REQUEST_INVALID)
         return LendingIntent(action, mode, None, None)
     if not isinstance(amount, str) or len(amount) > 80 or AMOUNT_RE.fullmatch(amount) is None:
@@ -300,7 +300,7 @@ class LendingPreflightService:
 
     def prepare(
         self, raw_intent: Mapping[str, object], account: Mapping[str, object],
-        *, expected_profile_digest: str,
+        *, expected_profile_digest: str, frozen_amount_atomic: int | None = None,
     ) -> dict[str, object]:
         if self.profiles.profile is None:
             raise LendingPreflightError(self.profiles.error_code or LendingPreflightCode.PROFILE_UNAVAILABLE.value)
@@ -315,7 +315,10 @@ class LendingPreflightService:
         ):
             raise LendingPreflightError(LendingPreflightCode.ACCOUNT_UNAVAILABLE)
         try:
-            return self._prepare(profile, intent, label, sender)
+            return self._prepare(
+                profile, intent, label, sender,
+                frozen_amount_atomic=frozen_amount_atomic,
+            )
         except LendingPreflightError:
             raise
         except Exception as exc:
@@ -323,7 +326,7 @@ class LendingPreflightService:
 
     def _prepare(
         self, profile: AaveActionProfile, intent: LendingIntent,
-        label: str, sender: str,
+        label: str, sender: str, *, frozen_amount_atomic: int | None = None,
     ) -> dict[str, object]:
         rpc = self._rpc_factory()
         block, block_time, base_fee = rpc.begin()
@@ -354,9 +357,16 @@ class LendingPreflightService:
         checks = ["ACTION_PROFILE_VERIFIED", "AAVE_IDENTITY_VERIFIED", "AAVE_RESERVE_AVAILABLE", "AAVE_ACCOUNT_DEBT_ZERO"]
         call_amount = intent.amount_atomic
         expected_amount = intent.amount_atomic
+        position_before = 0
         if intent.action == "supply":
-            assert call_amount is not None
-            if rpc.token_balance(profile.asset, sender, block) < call_amount:
+            position_before = rpc.token_balance(profile.a_token, sender, block)
+            balance = rpc.token_balance(profile.asset, sender, block)
+            if intent.amount_mode == "all":
+                expected_amount = (
+                    frozen_amount_atomic if frozen_amount_atomic is not None else balance
+                )
+                call_amount = expected_amount
+            if call_amount is None or call_amount <= 0 or balance < call_amount:
                 raise LendingPreflightError(LendingPreflightCode.INSUFFICIENT_USDC)
             _borrow_cap, supply_cap = rpc.reserve_caps(profile.data_provider, profile.asset, block)
             total_supply = rpc.reserve_total_supply(profile.data_provider, profile.asset, block)
@@ -457,6 +467,7 @@ class LendingPreflightService:
             "caveats": ["FEE_NOT_POLICY_AUTHORIZED", "PREVIEW_ONLY"],
             "code": "LENDING_ACTION_PREVIEW_READY",
             "message": "Preview ready. Execution requires a new authority action and fresh preflight.",
+            "position_before_atomic": str(position_before),
         }
 
     def _default_rpc(self) -> AavePreflightRpc:
@@ -534,6 +545,7 @@ def unavailable_preview(
         "l2_fee_ceiling_wei": None, "l1_fee_upper_bound_wei": None,
         "max_total_fee_wei": None, "block_number": None, "observed_at": None,
         "expires_at": None, "preview_digest": None, "checks": [],
+        "position_before_atomic": None,
         "caveats": [reason],
         "code": "LENDING_ACTION_UNAVAILABLE" if status == "UNAVAILABLE" else "LENDING_ACTION_REFUSED",
         "message": (

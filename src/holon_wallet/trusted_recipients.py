@@ -10,8 +10,7 @@ from typing import Any, Mapping
 
 from web3 import Web3
 
-from holon_lending.action_profiles import ACTION_PROFILES_DIGEST
-from holon_policy import LendingRule, Policy, RecipientRule, TransferRule, policy_digest
+from holon_policy import Policy, RecipientRule, TransferRule, policy_digest
 
 from .public_data import BASE_USDC, ETHEREUM_USDC, NETWORK_BY_ID
 from .storage import StorageError, WalletPaths, atomic_write_json, read_json
@@ -24,7 +23,7 @@ from .transfer import (
     parse_transfer_amount,
 )
 
-DRAFT_SCHEMA_VERSION = "2"
+DRAFT_SCHEMA_VERSION = "3"
 MAX_DRAFT_BYTES = 64 * 1024
 ENVELOPE_FIELDS = frozenset({
     "draft_schema_version", "policy", "policy_digest", "recipient_labels",
@@ -144,10 +143,7 @@ class TrustedPolicyDraft:
             )
             for route in sorted(self.routes, key=lambda item: ROUTE_ORDER[item.key])
         )
-        return TrustedPolicyDraft(
-            routes, self.lending_max_amount_atomic, self.lending_max_total_fee_wei,
-            self.lending_allowed_actions,
-        )
+        return TrustedPolicyDraft(routes)
 
     def route(self, network: str, asset: str) -> TrustedRouteDraft | None:
         return next(
@@ -173,24 +169,16 @@ class TrustedPolicyDraft:
         routes = tuple(item for item in self.routes if item.key != route.key) + (route,)
         if len(routes) > len(ROUTE_ORDER):
             raise TrustedDraftError("Too many transfer routes")
-        return TrustedPolicyDraft(
-            routes, self.lending_max_amount_atomic, self.lending_max_total_fee_wei,
-            self.lending_allowed_actions,
-        ).canonical()
+        return TrustedPolicyDraft(routes).canonical()
 
     def without_route(self, network: str, asset: str) -> "TrustedPolicyDraft":
         return TrustedPolicyDraft(
             tuple(item for item in self.routes if item.key != (network, asset)),
-            self.lending_max_amount_atomic, self.lending_max_total_fee_wei,
-            self.lending_allowed_actions,
         ).canonical()
 
     def with_lending_limits(self, amount: str, fee: str) -> "TrustedPolicyDraft":
-        amount_atomic = parse_cap(amount, "usdc")
-        fee_wei = parse_fee_cap(fee)
-        return TrustedPolicyDraft(
-            self.routes, amount_atomic, fee_wei, ("withdraw",),
-        ).canonical()
+        del amount, fee
+        raise TrustedDraftError("Aave uses a built-in exact-action safety profile")
 
     def without_lending_limits(self) -> "TrustedPolicyDraft":
         return TrustedPolicyDraft(self.routes).canonical()
@@ -229,17 +217,8 @@ class TrustedPolicyDraft:
             for route in canonical.routes
         )
         try:
-            lending_rules = ()
-            if self.lending_max_amount_atomic is not None or self.lending_max_total_fee_wei is not None:
-                if self.lending_max_amount_atomic is None or self.lending_max_total_fee_wei is None:
-                    raise TrustedDraftError("Lending limits are incomplete")
-                lending_rules = (LendingRule(
-                    "lending", "1", "aave-v3-base-usdc", "1", "base", "usdc",
-                    8453, self.lending_allowed_actions, self.lending_max_amount_atomic,
-                    self.lending_max_total_fee_wei, ACTION_PROFILES_DIGEST,
-                ),)
             policy = Policy.from_dict(Policy(
-                "3", "2", False, rules, False, lending_rules,
+                "4", "3", False, rules,
             ).to_dict())
         except ValueError as exc:
             raise TrustedDraftError("Invalid draft policy") from exc
@@ -269,7 +248,7 @@ class TrustedPolicyDraft:
         if not isinstance(value, Mapping) or set(value) != ENVELOPE_FIELDS:
             raise TrustedDraftError("Invalid draft fields")
         draft_version = value.get("draft_schema_version")
-        if draft_version not in {"1", DRAFT_SCHEMA_VERSION}:
+        if draft_version not in {"1", "2", DRAFT_SCHEMA_VERSION}:
             raise TrustedDraftError("Unsupported draft version")
         raw_policy = value.get("policy")
         if not isinstance(raw_policy, Mapping):
@@ -331,16 +310,7 @@ class TrustedPolicyDraft:
             ))
         if labels:
             raise TrustedDraftError("Recipient label has no policy recipient")
-        lending_amount = None
-        lending_fee = None
-        lending_actions = ("withdraw",)
-        if policy.lending_rules:
-            lending_amount = policy.lending_rules[0].max_amount_atomic
-            lending_fee = policy.lending_rules[0].max_total_fee_wei
-            lending_actions = policy.lending_rules[0].allowed_actions
-        draft = cls(
-            tuple(routes), lending_amount, lending_fee, lending_actions,
-        ).canonical()
+        draft = cls(tuple(routes)).canonical()
         if draft_version == DRAFT_SCHEMA_VERSION and draft.to_envelope() != dict(value):
             raise TrustedDraftError("Draft is not canonical")
         return draft

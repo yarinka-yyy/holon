@@ -9,6 +9,7 @@ from holon_contracts import MessageKind, RefusalCode
 from holon_guard_ipc import GuardState
 from holon_journal import EventType
 from holon_lending.preflight import parse_lending_intent
+from holon_lending import AAVE_MAX_TOTAL_FEE_WEI
 
 from .actions import ActionLedgerFailure
 
@@ -21,8 +22,16 @@ def prepare_lending_authority(service, request, owner_pid: int):
     profile = service.lending_actions.profile
     if profile is None:
         return service.refusal(request, "ACTION_PROFILES_UNAVAILABLE", "Lending profile is unavailable.")
+    existing = service.lifecycle.ledger.find(request.action_id or "")
+    if existing is not None and intent.amount_mode == "all":
+        return service.refusal(
+            request, RefusalCode.ACTION_REPLAYED.value,
+            "Action identifier was already used.",
+        )
     material = {
         "schema": "lending-authority-1", "action": intent.action,
+        "operation_id": request.action_id, "phase_action_id": request.action_id,
+        "phase": "withdraw" if intent.action == "withdraw" else "approve_or_supply",
         "amount_mode": intent.amount_mode,
         "amount_atomic": (
             str(intent.amount_atomic) if intent.amount_atomic is not None else None
@@ -31,23 +40,20 @@ def prepare_lending_authority(service, request, owner_pid: int):
         "policy_digest": service.policy_snapshot.policy_digest,
         "action_profile_digest": profile.digest,
     }
-    fingerprint = hashlib.sha256(
+    request_fingerprint = hashlib.sha256(
         json.dumps(material, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
-    try:
-        service.lifecycle.ledger.check_identity(request.action_id or "", fingerprint)
-    except ActionLedgerFailure as error:
-        return service.refusal(request, error.code, "Action cannot be prepared.")
     preliminary_payload = dict(request.payload)
     if intent.amount_atomic is not None:
         preliminary_payload["amount_atomic"] = intent.amount_atomic
     preliminary, rule = service.policy.evaluate_lending_intent(
         preliminary_payload, profile.digest,
     )
-    if not preliminary.allowed or rule is None:
+    builtin = service.policy.policy.schema_version == "4"
+    if not preliminary.allowed or (rule is None and not builtin):
         try:
             service.lifecycle.ledger.refuse(
-                request.action_id or "", fingerprint, preliminary.code,
+                request.action_id or "", request_fingerprint, preliminary.code,
             )
         except ActionLedgerFailure:
             pass
@@ -71,17 +77,25 @@ def prepare_lending_authority(service, request, owner_pid: int):
         except Exception:
             try:
                 service.lifecycle.ledger.refuse(
-                    request.action_id or "", fingerprint, "LENDING_PREFLIGHT_FAILED",
+                    request.action_id or "", request_fingerprint, "LENDING_PREFLIGHT_FAILED",
                 )
             except ActionLedgerFailure:
                 pass
             return service.refusal(
                 request, "LENDING_PREFLIGHT_FAILED", "Lending preflight is unavailable.",
             )
+    material["amount_atomic"] = str(resolved_amount)
+    fingerprint = hashlib.sha256(
+        json.dumps(material, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    try:
+        service.lifecycle.ledger.check_identity(request.action_id or "", fingerprint)
+    except ActionLedgerFailure as error:
+        return service.refusal(request, error.code, "Action cannot be prepared.")
     payload = dict(request.payload)
     payload["amount_atomic"] = resolved_amount
     decision, rule = service.policy.evaluate_lending_intent(payload, profile.digest)
-    if not decision.allowed or rule is None:
+    if not decision.allowed or (rule is None and not builtin):
         try:
             service.lifecycle.ledger.refuse(request.action_id or "", fingerprint, decision.code)
         except ActionLedgerFailure:
@@ -99,10 +113,13 @@ def prepare_lending_authority(service, request, owner_pid: int):
             "action": intent.action, "amount_mode": intent.amount_mode,
             "amount": intent.amount,
         },
-        service.policy.policy.policy_version, rule.max_total_fee_wei,
-        rule.max_amount_atomic,
+        resolved_amount,
+        service.policy.policy.policy_version,
+        str(AAVE_MAX_TOTAL_FEE_WEI) if rule is None else rule.max_total_fee_wei,
+        None if rule is None else rule.max_amount_atomic,
         service.policy_snapshot.policy_revision, service.policy_snapshot.policy_digest,
         profile.digest,
+        phase=("withdraw" if intent.action == "withdraw" else "approve_or_supply"),
     )
     if not result.ok:
         if result.state is GuardState.RECOVERY_REQUIRED:

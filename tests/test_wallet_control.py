@@ -259,9 +259,13 @@ def test_lending_authority_protocol_has_only_semantics_and_material_digests() ->
         "authority_version": AUTHORITY_VERSION, "kind": "prepare_lending_action",
         "flow_id": "11111111-1111-4111-8111-111111111111",
         "action_id": "act-22222222-2222-4222-8222-222222222222",
-        "policy_version": "2", "policy_revision": 4,
+        "policy_version": "3", "policy_revision": 4,
         "policy_digest": "c" * 64, "action_profile_digest": "d" * 64,
         "action": "supply", "amount_mode": "exact", "amount": "1",
+        "resolved_amount_atomic": "1000000",
+        "operation_id": "act-22222222-2222-4222-8222-222222222222",
+        "phase_action_id": "act-22222222-2222-4222-8222-222222222222",
+        "phase": "approve_or_supply",
         "created_at": "2026-07-26T12:00:00Z",
         "expires_at": "2026-07-26T12:05:00Z",
     }
@@ -281,6 +285,9 @@ def test_lending_authority_protocol_has_only_semantics_and_material_digests() ->
         "expires_at": request["expires_at"], "code": "LENDING_ACTION_PREPARED",
         "policy_revision": 4, "policy_digest": "c" * 64,
         "action_profile_digest": "d" * 64,
+        "operation_id": request["operation_id"],
+        "phase_action_id": request["phase_action_id"],
+        "phase": request["phase"],
     }
     assert validate_authority_response(response, checked, 202) == response
     wire = _authority_encode(response)
@@ -289,11 +296,12 @@ def test_lending_authority_protocol_has_only_semantics_and_material_digests() ->
 
     withdraw_request = dict(
         request, action="withdraw", amount_mode="all", amount=None,
+        phase="withdraw",
     )
     checked_withdraw = validate_authority_request(withdraw_request)
     withdraw_response = dict(
         response, requested_action="withdraw", amount_mode="all",
-        next_action="withdraw", method="withdraw",
+        next_action="withdraw", method="withdraw", phase="withdraw",
     )
     assert validate_authority_response(
         withdraw_response, checked_withdraw, 202,

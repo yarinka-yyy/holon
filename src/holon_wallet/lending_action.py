@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from holon_lending import ActionProfilesState
+from holon_lending import AAVE_SAFETY_DIGEST, ActionProfilesState
 from holon_lending.preflight import (
     MAX_UINT256, LendingPreflightError, LendingPreflightService, encode_approve,
     encode_supply, encode_withdraw, parse_lending_intent,
@@ -35,13 +35,26 @@ def prepare_lending_action(
         "amount_mode": request["amount_mode"], "amount": request["amount"],
     }
     intent = parse_lending_intent(raw_intent)
+    raw_resolved = request.get("resolved_amount_atomic")
+    resolved_amount = (
+        int(str(raw_resolved)) if raw_resolved is not None
+        else intent.amount_atomic
+    )
+    if resolved_amount is not None and (
+        resolved_amount <= 0
+        or intent.amount_mode == "exact" and intent.amount_atomic != resolved_amount
+    ):
+        raise LendingPreflightError("LENDING_AMOUNT_MISMATCH")
     preview = service.prepare(
         raw_intent, {"label": profile.label, "address": profile.address},
         expected_profile_digest=action_profile.digest,
+        frozen_amount_atomic=resolved_amount,
     )
     if preview.get("status") != "PREVIEW_READY":
         raise LendingPreflightError(str(preview.get("code", "LENDING_ACTION_UNAVAILABLE")))
     amount = int(str(preview["amount_atomic"]))
+    if resolved_amount is not None and amount != resolved_amount:
+        raise LendingPreflightError("LENDING_AMOUNT_MISMATCH")
     next_action = str(preview["next_action"])
     if next_action == "approve":
         calldata = encode_approve(action_profile.pool, amount)
@@ -76,4 +89,9 @@ def prepare_lending_action(
         action_profile.digest, int(str(preview["l2_fee_ceiling_wei"])),
         int(str(preview["l1_fee_upper_bound_wei"])),
         intent.amount_mode,
+        str(request.get("operation_id", request["action_id"])),
+        str(request.get("phase_action_id", request["action_id"])),
+        str(request.get("phase", "withdraw" if intent.action == "withdraw" else "approve_or_supply")),
+        AAVE_SAFETY_DIGEST,
+        int(str(preview.get("position_before_atomic", "0"))),
     )

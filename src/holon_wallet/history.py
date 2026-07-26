@@ -11,8 +11,10 @@ from typing import Any, Mapping
 from .public_data import NETWORK_BY_ID
 from .storage import StorageError, WalletPaths, atomic_write_json, read_json
 
-HISTORY_SCHEMA_VERSION = 2
+HISTORY_SCHEMA_VERSION = 4
 LEGACY_HISTORY_SCHEMA_VERSION = 1
+FEE_HISTORY_SCHEMA_VERSION = 2
+OPERATION_HISTORY_SCHEMA_VERSION = 3
 MAX_HISTORY_RECORDS = 500
 MONTH_LABELS = (
     "Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -83,6 +85,8 @@ class WalletHistoryRecord:
     simulated: bool
     max_total_fee_wei: str | None = None
     actual_fee_wei: str | None = None
+    operation_id: str | None = None
+    position_before_atomic: str | None = None
 
     def __post_init__(self) -> None:
         _validate_record(self)
@@ -107,6 +111,8 @@ class WalletHistoryRecord:
             "simulated": self.simulated,
             "max_total_fee_wei": self.max_total_fee_wei,
             "actual_fee_wei": self.actual_fee_wei,
+            "operation_id": self.operation_id,
+            "position_before_atomic": self.position_before_atomic,
         }
 
     @classmethod
@@ -118,11 +124,13 @@ class WalletHistoryRecord:
             "sender", "recipient", "contract", "token", "amount_atomic", "decimals",
             "transaction_hash", "status", "created_at", "updated_at", "simulated",
         }
-        expected = (
-            legacy_fields
-            if schema_version == LEGACY_HISTORY_SCHEMA_VERSION
-            else legacy_fields | {"max_total_fee_wei", "actual_fee_wei"}
-        )
+        expected = legacy_fields
+        if schema_version >= FEE_HISTORY_SCHEMA_VERSION:
+            expected |= {"max_total_fee_wei", "actual_fee_wei"}
+        if schema_version >= OPERATION_HISTORY_SCHEMA_VERSION:
+            expected |= {"operation_id"}
+        if schema_version >= HISTORY_SCHEMA_VERSION:
+            expected |= {"position_before_atomic"}
         if set(value) != expected:
             raise HistoryValidationError("History record fields are invalid")
         try:
@@ -149,6 +157,8 @@ class WalletHistoryRecord:
                 simulated=value["simulated"],
                 max_total_fee_wei=value.get("max_total_fee_wei"),
                 actual_fee_wei=value.get("actual_fee_wei"),
+                operation_id=value.get("operation_id"),
+                position_before_atomic=value.get("position_before_atomic"),
             )
         except (TypeError, ValueError) as error:
             if isinstance(error, HistoryValidationError):
@@ -173,7 +183,9 @@ class HistoryStore:
                 raise HistoryValidationError("History envelope is invalid")
             schema_version = value["schema_version"]
             if schema_version not in {
-                LEGACY_HISTORY_SCHEMA_VERSION, HISTORY_SCHEMA_VERSION,
+                LEGACY_HISTORY_SCHEMA_VERSION, FEE_HISTORY_SCHEMA_VERSION,
+                OPERATION_HISTORY_SCHEMA_VERSION,
+                HISTORY_SCHEMA_VERSION,
             }:
                 raise HistoryValidationError("History schema is unsupported")
             records = value["records"]
@@ -247,6 +259,7 @@ def history_record_to_map(record: WalletHistoryRecord) -> dict[str, object]:
     is_supply = record.action_type == "lending_supply"
     return {
         "actionId": record.action_id,
+        "operationId": record.operation_id or record.action_id,
         "profileId": record.profile_id,
         "actionType": record.action_type,
         "network": record.network,
@@ -295,6 +308,15 @@ def history_record_to_map(record: WalletHistoryRecord) -> dict[str, object]:
 def _validate_record(record: WalletHistoryRecord) -> None:
     if not isinstance(record.action_id, str) or not 1 <= len(record.action_id) <= 128:
         raise HistoryValidationError("History action ID is invalid")
+    if record.operation_id is not None and (
+        not isinstance(record.operation_id, str) or not 1 <= len(record.operation_id) <= 128
+    ):
+        raise HistoryValidationError("History operation ID is invalid")
+    if record.position_before_atomic is not None and (
+        not isinstance(record.position_before_atomic, str)
+        or DECIMAL_RE.fullmatch(record.position_before_atomic) is None
+    ):
+        raise HistoryValidationError("History lending position is invalid")
     if not isinstance(record.profile_id, str) or not 1 <= len(record.profile_id) <= 128:
         raise HistoryValidationError("History profile ID is invalid")
     if record.action_type not in {

@@ -145,6 +145,21 @@ class RevokePolicy:
             }),
         )
 
+    def with_builtin_base(self, spender: str, fee_cap_wei: int) -> RevokePolicy:
+        """Pin one caller-owned Base revoke route without environment policy."""
+        if not ADDRESS_RE.fullmatch(spender) or fee_cap_wei <= 0:
+            raise ValueError("Invalid built-in revoke route")
+        enabled = dict(self.enabled)
+        spenders = dict(self.spenders)
+        fee_caps = dict(self.fee_caps)
+        enabled["base"] = True
+        spenders["base"] = Web3.to_checksum_address(spender)
+        fee_caps["base"] = fee_cap_wei
+        return RevokePolicy(
+            MappingProxyType(enabled), MappingProxyType(spenders),
+            MappingProxyType(fee_caps),
+        )
+
     def spender_for(self, network_id: str, owner: str) -> str | None:
         spender = self.spenders.get(network_id)
         if spender is None or spender.lower() == owner.lower():

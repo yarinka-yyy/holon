@@ -15,10 +15,11 @@ from PySide6.QtCore import Property, QLocale, QObject, QTime, QTimer, Signal, Sl
 from PySide6.QtGui import QGuiApplication
 from holon_wallet_control import AUTHORITY_VERSION
 from holon_guard_ipc.policy_control import ControlProtocolError, ControlUnavailable
+from holon_wallet_control.lending_operation import LendingOperationStateError, LendingOperationStore
 from holon_policy import Policy, policy_digest
 from holon_lending import (
-    ActionProfilesState, LendingPreflightError, LendingPreflightService,
-    parse_lending_intent,
+    AAVE_CONTRACTS, AAVE_MAX_TOTAL_FEE_WEI, ActionProfilesState,
+    LendingPreflightError, LendingPreflightService, parse_lending_intent,
 )
 
 from .approval import (
@@ -178,6 +179,7 @@ class WalletController(QObject):
     recoveryChanged = Signal()
     approvalChanged = Signal()
     guardNoticeChanged = Signal()
+    lendingRecoveryChanged = Signal()
     _publicDataReady = Signal(int, object)
     _transferReady = Signal(int, object)
     _maximumReady = Signal(int, object, str, str, str)
@@ -241,6 +243,15 @@ class WalletController(QObject):
         revoke_policy = getattr(
             self._mainnet_executor, "revoke_policy", RevokePolicy.from_environment(),
         )
+        shared_policy = getattr(self._mainnet_executor.policy, "shared_engine", None)
+        if (
+            shared_policy is not None
+            and shared_policy.policy.schema_version == "4"
+        ):
+            revoke_policy = revoke_policy.with_builtin_base(
+                AAVE_CONTRACTS["pool"], AAVE_MAX_TOTAL_FEE_WEI,
+            )
+            self._mainnet_executor.revoke_policy = revoke_policy
         self._revoke_policy = revoke_policy
         revoke_environ = getattr(self._mainnet_executor, "_environ", None)
         revoke_rpc_factory = getattr(self._mainnet_executor, "_rpc_factory", None)
@@ -339,6 +350,12 @@ class WalletController(QObject):
         self._approval_error = ""
         self._approval_generation = 0
         self._guard_open_notice = ""
+        self._lending_operation_store = LendingOperationStore(
+            self._repository.paths.data_dir / "lending-operation-state.json",
+        )
+        self._lending_recovery: dict[str, object] = {}
+        self._lending_resume_action_id = ""
+        self._lending_recovery_revoke = False
         self._closed = False
         self._copied_phrase: str | None = None
         self._clipboard_timer = QTimer(self)
@@ -400,6 +417,14 @@ class WalletController(QObject):
     @Property(str, notify=guardNoticeChanged)
     def guardOpenNotice(self) -> str:
         return self._guard_open_notice
+
+    @Property("QVariantMap", notify=lendingRecoveryChanged)
+    def lendingRecovery(self) -> dict[str, object]:
+        return dict(self._lending_recovery)
+
+    @Property(bool, notify=lendingRecoveryChanged)
+    def lendingRecoveryChecking(self) -> bool:
+        return bool(self._lending_resume_action_id and self._receipt_checking)
 
     @Property(str, notify=errorMessageChanged)
     def errorMessage(self) -> str:
@@ -581,6 +606,17 @@ class WalletController(QObject):
     def canCloseWallet(self) -> bool:
         return not self._mainnet_in_progress
 
+    @Property(bool, notify=transferChanged)
+    def hideForLendingReceipt(self) -> bool:
+        return bool(
+            self._external_transfer is not None
+            and self._external_transfer.get("executed_phase") == "approve"
+            and self._mainnet_result is not None
+            and self._mainnet_result.history_status in {
+                HistoryStatus.PENDING, HistoryStatus.UNKNOWN,
+            }
+        )
+
     @Property(str, notify=selectedNetworkChanged)
     def selectedNetwork(self) -> str:
         return self._selected_network
@@ -722,14 +758,9 @@ class WalletController(QObject):
 
     @Property("QVariantMap", notify=trustedDraftChanged)
     def trustedLendingLimits(self) -> dict[str, object]:
-        amount = self._trusted_working.lending_max_amount_atomic
-        fee = self._trusted_working.lending_max_total_fee_wei
         return {
-            "configured": amount is not None and fee is not None,
-            "amount": "" if amount is None else format_atomic_amount(int(amount), 6),
-            "fee": "" if fee is None else format_atomic_amount(int(fee), 18),
-            "enabled": self._trusted_lending_enabled,
-            "withdrawOnly": self._trusted_working.lending_allowed_actions == ("withdraw",),
+            "mode": "built_in", "configured": True, "amount": "Exact action amount",
+            "fee": "0.0001", "enabled": True, "withdrawOnly": False,
         }
 
     @Property("QVariantMap", notify=trustedDraftChanged)
@@ -823,27 +854,17 @@ class WalletController(QObject):
 
     @Property(bool, notify=trustedDraftChanged)
     def trustedCanActivateLending(self) -> bool:
-        return bool(
-            self.trustedCanApply
-            and self.trustedLendingLimits["configured"]
-            and self.trustedLendingLimits["withdrawOnly"]
-            and self.trustedDraftMatchesActive
-            and not self._trusted_lending_enabled
-        )
+        return False
 
     @Property(bool, notify=trustedDraftChanged)
     def trustedCanDeactivateLending(self) -> bool:
-        return bool(
-            self._trusted_lending_enabled and self._policy_control_client is not None
-            and not self._critical_flow_active()
-        )
+        return False
 
     @Property(str, notify=trustedDraftChanged)
     def trustedAuthorityStatus(self) -> str:
         return (
             ("Send enabled" if self._trusted_transfer_enabled else "Send disabled")
-            + " · "
-            + ("Lending enabled" if self._trusted_lending_enabled else "Lending disabled")
+            + " · Aave protected route ready"
         )
 
     @Property(str, notify=trustedDraftChanged)
@@ -1195,6 +1216,11 @@ class WalletController(QObject):
                 "amount": request["amount"],
             })
             amount_atomic = intent.amount_atomic
+            resolved_amount_atomic = int(str(request["resolved_amount_atomic"]))
+            if resolved_amount_atomic <= 0 or (
+                amount_atomic is not None and amount_atomic != resolved_amount_atomic
+            ):
+                raise ValueError("LENDING_AMOUNT_MISMATCH")
             created = datetime.fromisoformat(str(request["created_at"]).replace("Z", "+00:00"))
             expires = datetime.fromisoformat(str(request["expires_at"]).replace("Z", "+00:00"))
             if not self._mainnet_executor.policy.matches(
@@ -1211,7 +1237,7 @@ class WalletController(QObject):
                 return
             pending = self._transfer_flow.begin_external(
                 str(request["action_id"]), active.profile_id, created, expires,
-                "base", "usdc", amount_atomic, int(request["policy_revision"]),
+                "base", "usdc", resolved_amount_atomic, int(request["policy_revision"]),
                 str(request["policy_digest"]), intent.amount_mode,
             )
         except Exception as error:
@@ -1657,6 +1683,7 @@ class WalletController(QObject):
             return False
         if self._state.select_profile(profile_id):
             recovery_open = self._current_screen.startswith("recovery_")
+            lending_recovery_open = self._current_screen == "lending_recovery"
             approval_open = self._current_screen == "approvals" or self._current_screen.startswith("revoke_")
             invalidated = self._transfer_flow.profile_changed(profile_id)
             recovery_invalidated = self._recovery_flow.profile_changed(profile_id)
@@ -1670,9 +1697,10 @@ class WalletController(QObject):
             self.activeProfileChanged.emit()
             self._load_public_cache()
             self.historyChanged.emit()
+            lending_recovery_loaded = self._load_lending_recovery()
             if (
                 invalidated or recovery_invalidated or recovery_open
-                or revoke_invalidated or approval_open
+                or revoke_invalidated or approval_open or lending_recovery_open
             ):
                 self._transfer_generation += 1
                 self._transfer_preparing = False
@@ -1681,7 +1709,8 @@ class WalletController(QObject):
                 self._transfer_recipient = ""
                 self._set_transfer_error("")
                 self.transferChanged.emit()
-                self._set_screen("main")
+                if not lending_recovery_loaded:
+                    self._set_screen("main")
             elif self._current_screen in {"main", "history"}:
                 self.refreshPublicData()
             return True
@@ -1847,28 +1876,14 @@ class WalletController(QObject):
 
     @Slot(str, str, result=bool)
     def saveTrustedLendingLimits(self, amount: str, fee: str) -> bool:
-        if not self._trusted_available or self._current_screen != "trusted_recipients":
-            return False
-        try:
-            self._trusted_working = self._trusted_working.with_lending_limits(amount, fee)
-        except TrustedDraftError as exc:
-            self._set_error(str(exc))
-            return False
-        self._trusted_review_digest = ""
-        self._trusted_status = "Unsaved draft changes"
-        self._set_error("")
-        self.trustedDraftChanged.emit()
-        return True
+        del amount, fee
+        self._set_error("Aave limits are built in and cannot be edited here")
+        return False
 
     @Slot(result=bool)
     def removeTrustedLendingLimits(self) -> bool:
-        if not self._trusted_available or self._current_screen != "trusted_recipients":
-            return False
-        self._trusted_working = self._trusted_working.without_lending_limits()
-        self._trusted_review_digest = ""
-        self._trusted_status = "Unsaved draft changes"
-        self.trustedDraftChanged.emit()
-        return True
+        self._set_error("Aave limits are built in and cannot be removed")
+        return False
 
     @Slot()
     def beginTrustedRoute(self) -> None:
@@ -2782,7 +2797,8 @@ class WalletController(QObject):
             self._replace_profiles(profiles)
             self._flow = "none"
             self.flowChanged.emit()
-            self._set_screen("main")
+            if not self._load_lending_recovery():
+                self._set_screen("main")
         except VaultUnavailableError:
             self._state = WalletShellState()
             self.profilesChanged.emit()
@@ -2790,6 +2806,127 @@ class WalletController(QObject):
             self._flow = "none"
             self.flowChanged.emit()
             self._set_screen("unavailable")
+
+    def _load_lending_recovery(self) -> bool:
+        self._lending_recovery = {}
+        try:
+            operation = self._lending_operation_store.load().current
+        except LendingOperationStateError:
+            self.lendingRecoveryChanged.emit()
+            return False
+        active = self._state.active_profile
+        if (
+            operation is None or operation.phase != "resume_or_revoke"
+            or active is None or operation.account_profile_id != active.profile_id
+            or operation.account_address.lower() != active.address.lower()
+        ):
+            self.lendingRecoveryChanged.emit()
+            return False
+        self._lending_recovery = {
+            "operationId": operation.operation_id,
+            "phaseActionId": operation.phase_action_id,
+            "amount": format_atomic_amount(operation.resolved_amount_atomic, 6),
+            "amountAtomic": str(operation.resolved_amount_atomic),
+            "receiptState": operation.receipt_state,
+            "transactionHash": operation.transaction_hash or "",
+            "status": (
+                "Approval confirmed · resume with a fresh live preflight"
+                if operation.receipt_state == "confirmed"
+                else "Approval status must be checked before supply can resume"
+            ),
+        }
+        self.lendingRecoveryChanged.emit()
+        self._set_screen("lending_recovery")
+        return True
+
+    @Slot(result=bool)
+    def resumeLendingOperation(self) -> bool:
+        if (
+            not self._lending_recovery or self._policy_control_client is None
+            or self._receipt_checking
+        ):
+            return False
+        action_id = str(self._lending_recovery["phaseActionId"])
+        self._lending_resume_action_id = action_id
+        self._lending_recovery["status"] = "Checking confirmed approval receipt…"
+        self.lendingRecoveryChanged.emit()
+        if not self._start_receipt_check(action_id, track=False):
+            self._lending_resume_action_id = ""
+            return False
+        return True
+
+    def _finish_lending_resume_check(self, result: ReceiptTrackingResult) -> None:
+        self._lending_resume_action_id = ""
+        if result.status is not HistoryStatus.CONFIRMED:
+            self._lending_recovery["status"] = (
+                "Approval failed · revoke or cancel the operation"
+                if result.status is HistoryStatus.FAILED
+                else "Approval is not confirmed · use Resume supply to check again"
+            )
+            self.lendingRecoveryChanged.emit()
+            return
+        try:
+            response = self._policy_control_client.resume_lending_operation(
+                str(self._lending_recovery["operationId"]),
+                str(self._lending_recovery["phaseActionId"]),
+                result.transaction_hash,
+            )
+        except (ControlProtocolError, ControlUnavailable):
+            self._lending_recovery["status"] = "Guard could not resume this operation"
+            self.lendingRecoveryChanged.emit()
+            return
+        if response.get("kind") != "lending_operation_resumed":
+            self._lending_recovery["status"] = "Guard refused to resume this operation"
+            self.lendingRecoveryChanged.emit()
+            return
+        self._lending_recovery = {}
+        self.lendingRecoveryChanged.emit()
+        self._set_screen("main")
+
+    @Slot()
+    def revokeLendingOperation(self) -> None:
+        if not self._lending_recovery:
+            return
+        self._lending_recovery_revoke = True
+        self.showApprovals()
+
+    @Slot(result=bool)
+    def cancelLendingOperation(self) -> bool:
+        return self._cancel_lending_recovery(after_revoke=False)
+
+    def _cancel_lending_recovery(self, *, after_revoke: bool) -> bool:
+        if not self._lending_recovery or self._policy_control_client is None:
+            return False
+        try:
+            response = self._policy_control_client.cancel_lending_operation(
+                str(self._lending_recovery["operationId"]),
+            )
+        except (ControlProtocolError, ControlUnavailable):
+            self._lending_recovery["status"] = "Guard could not cancel this operation"
+            self.lendingRecoveryChanged.emit()
+            return False
+        if response.get("kind") != "lending_operation_cancelled":
+            self._lending_recovery["status"] = "Guard refused to cancel this operation"
+            self.lendingRecoveryChanged.emit()
+            return False
+        self._lending_recovery = {}
+        self._lending_recovery_revoke = False
+        self.lendingRecoveryChanged.emit()
+        if not after_revoke:
+            self._set_screen("main")
+        return True
+
+    def _is_recovery_revoke(self, action_id: str) -> bool:
+        profile = self._lending_action_profiles.profile
+        record = next(
+            (item for item in self._history_records if item.action_id == action_id),
+            None,
+        )
+        return bool(
+            profile is not None and record is not None
+            and record.action_type == "revoke" and record.network == "base"
+            and record.recipient.lower() == profile.pool.lower()
+        )
 
     def _trusted_route_map(
         self, route: TrustedRouteDraft,
@@ -3001,9 +3138,19 @@ class WalletController(QObject):
                 HistoryStatus.PENDING, HistoryStatus.CONFIRMED, HistoryStatus.UNKNOWN,
             }
         ):
-            self._notify_external_transfer(
-                "COMPLETED", result.code.value, result.history_status.value,
-            )
+            if action.action_type == "lending" and action.method in {"approve", "supply"}:
+                self._notify_external_transfer(
+                    "BROADCASTED", result.code.value, result.history_status.value,
+                    keep=True,
+                )
+                if result.history_status is HistoryStatus.CONFIRMED:
+                    self._notify_external_transfer(
+                        "RECEIPT_CONFIRMED", result.code.value,
+                    )
+            else:
+                self._notify_external_transfer(
+                    "COMPLETED", result.code.value, result.history_status.value,
+                )
         else:
             self._notify_external_transfer("FAILED", result.code.value)
         self._load_history()
@@ -3041,6 +3188,26 @@ class WalletController(QObject):
                     result,
                 )
             self._load_history()
+            current = self._mainnet_result
+            if current is not None and self._external_transfer is not None:
+                if current.history_status is HistoryStatus.CONFIRMED:
+                    self._notify_external_transfer(
+                        "RECEIPT_CONFIRMED", current.code.value,
+                    )
+                elif current.history_status is HistoryStatus.FAILED:
+                    self._notify_external_transfer(
+                        "RECEIPT_FAILED", current.code.value,
+                    )
+            if result.action_id == self._lending_resume_action_id:
+                self._finish_lending_resume_check(result)
+            if (
+                self._lending_recovery_revoke
+                and result.status is HistoryStatus.CONFIRMED
+                and self._mainnet_result is not None
+                and self._mainnet_result.action_type == "revoke"
+                and self._is_recovery_revoke(result.action_id)
+            ):
+                self._cancel_lending_recovery(after_revoke=True)
         self.transferChanged.emit()
         self.approvalChanged.emit()
 
@@ -3132,6 +3299,12 @@ class WalletController(QObject):
         self.approvalChanged.emit()
         self.transferChanged.emit()
         self._set_screen("revoke_result")
+        if (
+            self._lending_recovery_revoke
+            and result.history_status is HistoryStatus.CONFIRMED
+            and self._is_recovery_revoke(result.action_id)
+        ):
+            self._cancel_lending_recovery(after_revoke=True)
         if (
             result.transaction_hash
             and result.history_status in {HistoryStatus.PENDING, HistoryStatus.UNKNOWN}
@@ -3229,6 +3402,7 @@ class WalletController(QObject):
             return
         self._external_transfer["prepared_digest"] = action.digest
         if action.action_type == "lending":
+            self._external_transfer["executed_phase"] = action.method
             completion({
                 "authority_version": AUTHORITY_VERSION, "kind": "lending_action_prepared",
                 "flow_id": context["flow_id"], "action_id": action.action_id,
@@ -3246,6 +3420,9 @@ class WalletController(QObject):
                 "policy_revision": action.policy_revision,
                 "policy_digest": action.policy_digest,
                 "action_profile_digest": action.action_profile_digest,
+                "operation_id": action.operation_id,
+                "phase_action_id": action.phase_action_id,
+                "phase": action.phase,
                 "code": "LENDING_ACTION_PREPARED",
             })
             return
@@ -3395,7 +3572,7 @@ class WalletController(QObject):
         self._set_screen("transfer_result")
 
     def _notify_external_transfer(
-        self, event: str, code: str, outcome: str | None = None,
+        self, event: str, code: str, outcome: str | None = None, *, keep: bool = False,
     ) -> None:
         context = self._external_transfer
         sender = self._guard_status_sender
@@ -3406,13 +3583,30 @@ class WalletController(QObject):
             "kind": "transfer_status",
             "flow_id": context["flow_id"],
             "action_id": context["action_id"],
+            "operation_id": context.get("operation_id", context["action_id"]),
+            "phase_action_id": context.get("phase_action_id", context["action_id"]),
+            "phase": (
+                str(context.get("executed_phase", "transfer"))
+            ),
             "prepared_digest": context["prepared_digest"],
             "event": event,
             "code": code,
             "outcome": outcome,
+            "transaction_hash": (
+                self._mainnet_result.transaction_hash.lower()
+                if self._mainnet_result is not None
+                and self._mainnet_result.transaction_hash else None
+            ),
+            "receipt_state": (
+                self._mainnet_result.history_status.value
+                if self._mainnet_result is not None
+                and self._mainnet_result.transaction_hash
+                and self._mainnet_result.history_status is not None else "none"
+            ),
         }
-        self._external_transfer = None
-        self._external_completion = None
+        if not keep:
+            self._external_transfer = None
+            self._external_completion = None
         try:
             sender(update)
         except Exception:
@@ -3824,6 +4018,11 @@ def _history_record(action: PreparedTransferAction) -> WalletHistoryRecord:
         updated_at=created_at,
         simulated=action.simulation,
         max_total_fee_wei=str(action.max_total_fee_wei),
+        operation_id=(action.operation_id or action.action_id),
+        position_before_atomic=(
+            str(action.position_before_atomic)
+            if action.action_type == "lending" and action.method == "supply" else None
+        ),
     )
 
 

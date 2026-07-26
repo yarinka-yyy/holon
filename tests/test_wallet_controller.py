@@ -36,6 +36,11 @@ from holon_wallet.trusted_recipients import (
 from holon_wallet.vault import VaultRepository
 from holon_wallet.wallet_crypto import generate_mnemonic, import_private_key
 from holon_guard_ipc.policy_control import ControlUnavailable
+from holon_wallet_control.lending_operation import (
+    LendingOperation,
+    LendingOperationSnapshot,
+    LendingOperationStore,
+)
 from wallet_public_support import (
     DeferredExecutor,
     ImmediateExecutor,
@@ -140,6 +145,8 @@ class StubPolicyControl:
         self.lending_enabled = False
         self.authority_state = "READY"
         self.initializations = []
+        self.operation_resumes = []
+        self.operation_cancels = []
 
     def status(self):
         if not self.available:
@@ -195,6 +202,24 @@ class StubPolicyControl:
             "policy_revision": self.revision, "policy_digest": self.digest,
             "transfer_authority_enabled": False,
             "lending_authority_enabled": False, "authority_state": "READY",
+        }
+
+    def resume_lending_operation(
+        self, operation_id, phase_action_id, transaction_hash,
+    ):
+        self.operation_resumes.append((
+            operation_id, phase_action_id, transaction_hash,
+        ))
+        return {
+            "kind": "lending_operation_resumed",
+            "code": "LENDING_OPERATION_RESUMED",
+        }
+
+    def cancel_lending_operation(self, operation_id):
+        self.operation_cancels.append(operation_id)
+        return {
+            "kind": "lending_operation_cancelled",
+            "code": "LENDING_OPERATION_CANCELLED",
         }
 
 
@@ -254,6 +279,52 @@ def test_create_persists_only_after_backup_acknowledgement(tmp_path) -> None:
     assert item.profiles[0]["typeLabel"] == "Seed phrase"
 
 
+def test_confirmed_approval_recovery_is_account_bound_and_cancelled_via_guard(
+    tmp_path,
+) -> None:
+    policy_control = StubPolicyControl()
+    item = controller(tmp_path, policy_control)
+    secret = password()
+    item.beginCreate()
+    assert item.submitPassword(secret, secret)
+    assert item.finishBackup()
+    profile_id = item.activeProfileId
+    address = item.activeProfile["address"]
+
+    operation = LendingOperation(
+        operation_id="act-11111111-1111-4111-8111-111111111111",
+        requested_action="supply",
+        amount_mode="exact",
+        amount="2",
+        resolved_amount_atomic=2_000_000,
+        owner_pid=42,
+        policy_version="3",
+        policy_revision=7,
+        policy_digest="1" * 64,
+        action_profile_digest="2" * 64,
+        safety_digest="3" * 64,
+        phase="resume_or_revoke",
+        phase_action_id="act-22222222-2222-4222-8222-222222222222",
+        phase_fingerprint="4" * 64,
+        created_at="2026-07-26T00:00:00Z",
+        account_profile_id=profile_id,
+        account_address=address,
+        transaction_hash="0x" + "5" * 64,
+        receipt_state="confirmed",
+        updated_at="2026-07-26T00:01:00Z",
+    )
+    LendingOperationStore(tmp_path / "lending-operation-state.json").save(
+        LendingOperationSnapshot(operation),
+    )
+
+    restarted = controller(tmp_path, policy_control)
+    assert restarted.currentScreen == "lending_recovery"
+    assert restarted.lendingRecovery["amount"] == "2"
+    assert restarted.cancelLendingOperation()
+    assert restarted.currentScreen == "main"
+    assert policy_control.operation_cancels == [operation.operation_id]
+
+
 def test_trusted_recipients_draft_review_password_restart_and_cancel(tmp_path) -> None:
     item = controller(tmp_path)
     secret = password()
@@ -310,7 +381,8 @@ def test_trusted_recipients_draft_review_password_restart_and_cancel(tmp_path) -
     )
     stored = (tmp_path / "authority-policy-draft.json").read_text(encoding="utf-8")
     assert '"transfer_authority_enabled": false' in stored
-    assert '"lending_authority_enabled": false' in stored
+    assert '"schema_version": "4"' in stored
+    assert '"lending_authority_enabled"' not in stored
     assert '"max_amount_atomic": "100000000"' in stored
     assert "$" not in stored and "USD" not in stored
 
@@ -431,7 +503,7 @@ def test_trusted_apply_rejects_post_review_change_and_unavailable_guard(tmp_path
     assert "Guard is unavailable" in item.errorMessage
 
 
-def test_lending_limits_apply_activate_and_deactivate_need_separate_password_reviews(tmp_path) -> None:
+def test_aave_capability_is_built_in_and_has_no_settings_controls(tmp_path) -> None:
     policy_control = StubPolicyControl()
     item = controller(tmp_path, policy_control)
     secret = password()
@@ -439,26 +511,12 @@ def test_lending_limits_apply_activate_and_deactivate_need_separate_password_rev
     assert item.submitPassword(secret, secret)
     assert item.finishBackup()
     item.showTrustedRecipients()
-    assert item.saveTrustedLendingLimits("5", "0.0001")
-    assert item.trustedLendingLimits["amount"] == "5"
-    assert item.trustedLendingLimits["fee"] == "0.0001"
-    assert item.showTrustedDraftReview()
-    item.beginTrustedDraftPassword()
-    assert item.submitTrustedDraft(secret)
-    assert item.showTrustedApplyReview()
-    item.beginTrustedApplyPassword()
-    assert item.submitTrustedApply(secret)
-    assert item.trustedCanActivateLending
-    assert item.showTrustedCapabilityReview(True)
-    item.beginTrustedApplyPassword()
-    assert item.submitTrustedApply(secret)
-    assert item.trustedAuthorityStatus == "Send disabled · Lending enabled"
-    assert policy_control.capability_changes[-1][0] is True
-    assert item.showTrustedCapabilityReview(False)
-    item.beginTrustedApplyPassword()
-    assert item.submitTrustedApply(secret)
-    assert item.trustedAuthorityStatus == "Send disabled · Lending disabled"
-    assert policy_control.capability_changes[-1][0] is False
+    assert not item.saveTrustedLendingLimits("5", "0.0001")
+    assert item.trustedLendingLimits["mode"] == "built_in"
+    assert not item.trustedCanActivateLending
+    assert not item.trustedCanDeactivateLending
+    assert not item.showTrustedCapabilityReview(True)
+    assert policy_control.capability_changes == []
 
 
 def test_corrupt_trusted_draft_does_not_block_public_wallet(tmp_path) -> None:
@@ -507,7 +565,7 @@ def test_trusted_draft_cannot_enable_direct_or_guard_transfer(tmp_path) -> None:
         "authority_version": "2", "kind": "prepare_transfer",
         "flow_id": "11111111-1111-4111-8111-111111111111",
         "action_id": "act-22222222-2222-4222-8222-222222222222",
-        "policy_version": "1", "network": "base", "asset": "usdc",
+        "policy_version": "3", "network": "base", "asset": "usdc",
         "policy_revision": item._mainnet_executor.policy.policy_revision,
         "policy_digest": item._mainnet_executor.policy.policy_digest_value,
         "amount_atomic": "1000000", "recipient": recipient,

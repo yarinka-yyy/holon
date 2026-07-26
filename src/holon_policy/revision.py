@@ -190,6 +190,27 @@ class PolicyRevisionStore:
         except (OSError, UnicodeError, json.JSONDecodeError, PolicyRevisionError) as exc:
             raise PolicyRevisionUnavailable("Active transfer policy is unavailable") from exc
 
+    def migrate_to_v4(self) -> tuple[PolicySnapshot, bool]:
+        """Atomically remove legacy Lending authority from an active revision.
+
+        The migration never preserves an enabled transfer switch. Re-enabling ordinary
+        transfers remains a separate reviewed policy-control action.
+        """
+        current = self.load()
+        if current.policy.schema_version == "4":
+            return current, False
+        if current.policy_revision == 0:
+            if self.baseline_policy.schema_version != "4":
+                raise PolicyRevisionUnavailable("Legacy baseline cannot be migrated")
+            return PolicySnapshot.baseline(self.baseline_policy), False
+        source = current.source_draft_digest
+        if source is None:
+            raise PolicyRevisionUnavailable("Legacy policy source is unavailable")
+        return self.apply(
+            current.policy.transfer_only_v4(enabled=False), source,
+            current.policy_revision, current.policy_digest,
+        )
+
     def apply(
         self, policy: Policy, source_draft_digest: str,
         expected_revision: int, expected_policy_digest: str, *, repair: bool = False,

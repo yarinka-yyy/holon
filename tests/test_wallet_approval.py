@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from requests import exceptions as request_errors
 from web3 import Web3
+from holon_lending import AAVE_CONTRACTS, AAVE_MAX_TOTAL_FEE_WEI
 
 from holon_wallet.approval import (
     APPROVAL_ROUTES,
@@ -55,6 +56,16 @@ def policy_env(*, enabled: bool = True, network_id: str = "base") -> dict[str, s
         route.fee_cap_env: str(10**18),
         route.endpoint_env: f"fixture://{network_id}",
     }
+
+
+def test_builtin_aave_revoke_overrides_legacy_base_environment() -> None:
+    policy = RevokePolicy.from_environment(policy_env()).with_builtin_base(
+        AAVE_CONTRACTS["pool"], AAVE_MAX_TOTAL_FEE_WEI,
+    )
+
+    assert policy.enabled["base"]
+    assert policy.spenders["base"] == Web3.to_checksum_address(AAVE_CONTRACTS["pool"])
+    assert policy.fee_caps["base"] == AAVE_MAX_TOTAL_FEE_WEI
 
 
 class ApprovalRpcStub:

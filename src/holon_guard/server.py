@@ -124,6 +124,7 @@ class GuardServer:
                 result = self.authority.lifecycle.monitor_once()
                 if result.state is not snapshot.state or result.code not in {"OK", snapshot.reason}:
                     self.authority.audit_monitor(result, snapshot.action_id, snapshot.flow_id)
+                self.authority.lifecycle.advance_lending_operation()
         finally:
             self._stop.set()
             if self._status_server is not None:

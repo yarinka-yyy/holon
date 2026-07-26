@@ -21,10 +21,8 @@ from holon_guard.action_store import ActionStateStore
 from holon_guard.request_store import RequestStateStore
 from holon_guard.store import SnapshotStore
 from holon_journal import JournalStore
-from holon_lending import (
-    AAVE_CONTRACTS, ACTION_PROFILES_DIGEST, BASE_USDC,
-)
-from holon_policy import LendingRule, Policy, PolicyRevisionStore, policy_digest
+from holon_lending import AAVE_CONTRACTS, BASE_USDC
+from holon_wallet_control.lending_operation import LendingOperationStore
 from holon_wallet.settings import SettingsStore
 from holon_wallet.prices import AssetPrice, PriceSnapshot, PriceStatus
 from holon_wallet.public_cache import PublicCacheStore
@@ -230,7 +228,11 @@ def test_packaged_guard_wallet_preview_with_offline_rpc(tmp_path: Path) -> None:
             },
         )
         assert response.kind is MessageKind.LENDING_ACTION_PREVIEW
-        assert response.payload["status"] == "PREVIEW_READY"
+        assert response.payload["status"] == "PREVIEW_READY", (
+            response.payload.get("status"), response.payload.get("reason"),
+            response.payload.get("code"), response.payload.get("message"),
+            response.payload.get("caveats"),
+        )
         assert response.payload["next_action"] == "approve"
         assert response.payload["amount_atomic"] == "1000000"
         assert response.payload["authority_available"] is False
@@ -250,7 +252,7 @@ def test_packaged_guard_wallet_preview_with_offline_rpc(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Packaged Windows executables")
-def test_packaged_lending_authority_starts_and_cancels_without_signing(tmp_path: Path) -> None:
+def test_packaged_composite_supply_starts_approve_and_cancels_without_signing(tmp_path: Path) -> None:
     guard = Path(os.environ.get("HOLON_TEST_GUARD_EXE", ""))
     wallet = Path(os.environ.get("HOLON_TEST_WALLET_EXE", ""))
     if not guard.is_file() or not wallet.is_file():
@@ -267,17 +269,6 @@ def test_packaged_lending_authority_starts_and_cancels_without_signing(tmp_path:
         paths.data_dir / "request-control-state.json",
     ).bootstrap_empty_for_test()
     JournalStore(paths.data_dir / "journal.jsonl").bootstrap_empty_for_test()
-    baseline = Policy("2", "1", False, ())
-    rule = LendingRule(
-        "lending", "1", "aave-v3-base-usdc", "1", "base", "usdc", 8453,
-        ("withdraw",), "1010000", "100000000000000",
-        ACTION_PROFILES_DIGEST,
-    )
-    active = Policy("3", "2", False, (), True, (rule,))
-    PolicyRevisionStore(paths.data_dir, baseline).apply(
-        active, "d" * 64, 0, policy_digest(baseline.to_dict()),
-        require_disabled=False,
-    )
 
     RpcFixture.calls = []
     server = ThreadingHTTPServer(("127.0.0.1", 0), RpcFixture)
@@ -305,16 +296,26 @@ def test_packaged_lending_authority_starts_and_cancels_without_signing(tmp_path:
                 "module_id": "lending", "module_version": "1",
                 "protocol_profile_id": "aave-v3-base-usdc",
                 "protocol_profile_version": "1", "network": "base", "asset": "usdc",
-                "beneficiary_mode": "active_wallet_account", "action": "withdraw",
-                "amount_mode": "all", "amount": None,
+                "beneficiary_mode": "active_wallet_account", "action": "supply",
+                "amount_mode": "exact", "amount": "2",
             },
             action_id=action_id, owner_pid=os.getpid(), response_timeout=40.0,
         )
         assert response.kind is MessageKind.PROTECTED_FLOW_STARTED, response.payload
         assert response.payload["code"] == "AWAITING_LOCAL_CONFIRMATION"
+        operation = LendingOperationStore(
+            paths.data_dir / "lending-operation-state.json",
+        ).load().current
+        assert operation is not None
+        assert operation.operation_id == action_id
+        assert operation.phase == "approve_review"
+        assert operation.resolved_amount_atomic == 2_000_000
         cancelled = client.request(MessageKind.CANCEL_ACTION, action_id=action_id)
         assert cancelled.kind is MessageKind.ACTION_STATUS
         assert cancelled.payload["code"] == "ACTION_CANCELLED"
+        assert LendingOperationStore(
+            paths.data_dir / "lending-operation-state.json",
+        ).load().current is None
         assert "eth_sendRawTransaction" not in RpcFixture.calls
     finally:
         subprocess.run(

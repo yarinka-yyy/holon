@@ -372,16 +372,17 @@ class PluginTests(unittest.TestCase):
             self.assertNotIn(forbidden, serialized)
         self.assertNotIn('"calldata":', serialized)
 
-    def test_lending_prepare_rejects_invalid_combinations_without_guard_call(self) -> None:
+    def test_lending_prepare_accepts_supply_all_and_calls_guard(self) -> None:
         connector = StaticConnector(GuardHealth.available(GuardState.NORMAL))
         runtime = plugin.PluginRuntime(connector)
         result = json.loads(runtime.handle_lending_prepare({
             "action": "supply", "amount_mode": "all", "amount": None,
         }))
         self.assertEqual(result["code"], "LENDING_ACTION_UNAVAILABLE")
-        self.assertFalse(hasattr(connector, "last_lending_action"))
+        self.assertEqual(connector.last_lending_action["action"], "supply")
+        self.assertIsNone(connector.last_lending_action["amount"])
 
-    def test_lending_execute_allows_only_withdraw_exact_or_all(self) -> None:
+    def test_lending_execute_allows_supply_and_withdraw_exact_or_all(self) -> None:
         connector = StaticConnector(GuardHealth.available(GuardState.NORMAL))
         runtime = plugin.PluginRuntime(connector)
         result = json.loads(runtime.handle_lending_execute({
@@ -396,10 +397,11 @@ class PluginTests(unittest.TestCase):
         self.assertEqual(result["action_id"], action_id)
         self.assertEqual(result["turn_state"], "END_REQUIRED")
 
-        rejected = json.loads(plugin.PluginRuntime(connector).handle_lending_execute({
+        supply = json.loads(plugin.PluginRuntime(connector).handle_lending_execute({
             "action": "supply", "amount_mode": "exact", "amount": "1",
         }))
-        self.assertEqual(rejected["status"], "DEGRADED")
+        self.assertEqual(supply["status"], "AWAITING_LOCAL_CONFIRMATION")
+        self.assertEqual(supply["action"], "supply")
 
     def test_status_and_cancel_expose_no_internal_flow(self) -> None:
         runtime = plugin.PluginRuntime(

@@ -109,6 +109,7 @@ PAYLOAD_FIELDS = {
             "l2_fee_ceiling_wei", "l1_fee_upper_bound_wei",
             "max_total_fee_wei", "block_number", "observed_at", "expires_at",
             "preview_digest", "checks", "caveats", "code", "message",
+            "position_before_atomic",
         }
     ),
     MessageKind.PROTECTED_FLOW_STARTED: frozenset(

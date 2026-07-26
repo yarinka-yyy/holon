@@ -93,10 +93,13 @@ class Wallet:
 
     def prepare_lending_action(self, request) -> WalletPreparedResult:
         self.lending_prepare_calls += 1
+        next_action = "withdraw" if request["action"] == "withdraw" else "approve"
         return WalletPreparedResult(True, "LENDING_ACTION_PREPARED", {
             "amount_atomic": "1000000",
             "max_total_fee_wei": "90000000000000",
             "prepared_digest": "a" * 64,
+            "next_action": next_action, "profile_id": "profile-one",
+            "sender": "0x1111111111111111111111111111111111111111",
         }, self.handle)
 
 
@@ -266,13 +269,8 @@ class AuthorityTests(unittest.TestCase):
         self.assertIsNone(self.lifecycle.ledger.snapshot.current)
         self.assertNotIn("action_id", response.to_dict())
 
-    def test_lending_authority_starts_one_protected_action_under_v3_only(self) -> None:
-        rule = LendingRule(
-            "lending", "1", "aave-v3-base-usdc", "1", "base", "usdc", 8453,
-            ("approve", "supply"), "5000000", "100000000000000",
-            ACTION_PROFILES_DIGEST,
-        )
-        policy = Policy("3", "2", False, (), True, (rule,))
+    def test_lending_authority_starts_built_in_protected_action_under_v4(self) -> None:
+        policy = Policy("4", "3", False, ())
         snapshot = PolicySnapshot(2, policy_digest(policy.to_dict()), policy, "d" * 64)
         service = AuthorityService(
             self.lifecycle, PolicyEngine(policy), self.audit,

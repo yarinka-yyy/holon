@@ -3,6 +3,8 @@
 from .action_profiles import (
     ACTION_PROFILES_DIGEST,
     ACTION_PROFILES_PATH,
+    AAVE_MAX_TOTAL_FEE_WEI,
+    AAVE_SAFETY_DIGEST,
     ActionProfilesLoadError,
     ActionProfilesState,
     AaveActionProfile,
@@ -54,6 +56,8 @@ __all__ = [
     "AAVE_CONTRACTS",
     "ACTION_PROFILES_DIGEST",
     "ACTION_PROFILES_PATH",
+    "AAVE_MAX_TOTAL_FEE_WEI",
+    "AAVE_SAFETY_DIGEST",
     "ActionProfilesLoadError",
     "ActionProfilesState",
     "AaveActionProfile",

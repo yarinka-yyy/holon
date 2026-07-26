@@ -82,7 +82,14 @@ class AuthorityService(ResponseMixin):
         code = self.security_failure or "SIGNING_DISABLED"
         if (
             self.lifecycle.snapshot.state is GuardState.RECOVERY_REQUIRED
-            and self.lifecycle.ledger.find(request.action_id or "") is not None
+            and (
+                self.lifecycle.ledger.find(request.action_id or "") is not None
+                or (
+                    self.lifecycle.lending_operation_snapshot.current is not None
+                    and self.lifecycle.lending_operation_snapshot.current.operation_id
+                    == (request.action_id or "")
+                )
+            )
         ):
             return self._status(request, MessageKind.RECOVERY_REQUIRED, code)
         return self._signing_disabled(request, code)

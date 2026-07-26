@@ -201,7 +201,7 @@ def validate_lending_action_intent(payload: Mapping[str, Any]) -> None:
     if action not in {"supply", "withdraw"} or mode not in {"exact", "all"}:
         raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending action.")
     if mode == "all":
-        if action != "withdraw" or amount is not None:
+        if amount is not None:
             raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending amount.")
         return
     if (
@@ -552,6 +552,7 @@ def validate_lending_action_preview(payload: Mapping[str, Any]) -> None:
         "next_action", "amount_atomic", "display_amount", "target", "method",
         "calldata_hash", "nonce", "gas", "max_total_fee_wei", "block_number",
         "observed_at", "expires_at", "preview_digest",
+        "position_before_atomic",
     )
     if status != "PREVIEW_READY":
         if any(payload.get(field) is not None for field in material) or payload.get("checks") != []:
@@ -574,6 +575,12 @@ def validate_lending_action_preview(payload: Mapping[str, Any]) -> None:
     atomic = payload.get("amount_atomic")
     if not isinstance(atomic, str) or DECIMAL_RE.fullmatch(atomic) is None:
         raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending amount.")
+    position_before = payload.get("position_before_atomic")
+    if (
+        not isinstance(position_before, str)
+        or not position_before.isdigit() or len(position_before) > 78
+    ):
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending position.")
     if payload.get("display_amount") != _display_units(int(atomic), 6, "USDC"):
         raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending display amount.")
     for field, pattern in (

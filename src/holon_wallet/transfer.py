@@ -250,6 +250,11 @@ class PreparedTransferAction:
     l2_fee_ceiling_wei: int = 0
     l1_fee_upper_bound_wei: int = 0
     amount_mode: str = "exact"
+    operation_id: str = ""
+    phase_action_id: str = ""
+    phase: str = ""
+    safety_profile_digest: str = ""
+    position_before_atomic: int = 0
 
     def material_fields(self) -> dict[str, object]:
         material = {
@@ -283,6 +288,11 @@ class PreparedTransferAction:
         }
         if self.action_type == "lending":
             material["amount_mode"] = self.amount_mode
+            material["operation_id"] = self.operation_id
+            material["phase_action_id"] = self.phase_action_id
+            material["phase"] = self.phase
+            material["safety_profile_digest"] = self.safety_profile_digest
+            material["position_before_atomic"] = self.position_before_atomic
         return material
 
     @property
@@ -702,7 +712,14 @@ class TransferFlowCoordinator:
                     or amount_atomic >= 2**256
                 )
             )
-            or (amount_mode == "all" and amount_atomic is not None)
+            or (
+                amount_mode == "all" and amount_atomic is not None
+                and (
+                    type(amount_atomic) is not int
+                    or amount_atomic <= 0
+                    or amount_atomic >= 2**256
+                )
+            )
             or created_at.tzinfo is None
             or expires_at.tzinfo is None
             or expires_at - created_at != ACTION_LIFETIME
@@ -737,7 +754,7 @@ class TransferFlowCoordinator:
             or pending.network_id != action.network_id
             or pending.asset_id != action.asset_id
             or (
-                pending.amount_mode == "exact"
+                pending.amount_atomic is not None
                 and pending.amount_atomic != action.amount_atomic
             )
             or pending.amount_mode != action.amount_mode
@@ -941,6 +958,14 @@ def transfer_action_to_map(action: PreparedTransferAction) -> dict[str, object]:
         "method": action.method,
         "amountMode": action.amount_mode,
         "actionProfileDigest": action.action_profile_digest,
+        "safetyProfileDigest": action.safety_profile_digest,
+        "operationId": action.operation_id,
+        "phaseActionId": action.phase_action_id,
+        "phase": action.phase,
+        "operationStep": (
+            "Step 1 of 2" if action.method == "approve"
+            else "Step 2 of 2" if action.method == "supply" else ""
+        ),
         "maxFeeDisplay": f"≤ {_format_wei(action.max_total_fee_wei)} ETH",
         "expiresAt": action.expires_at.strftime("%H:%M:%S UTC"),
         "digest": action.digest,

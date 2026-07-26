@@ -28,7 +28,7 @@ from holon_policy import (
     Policy, PolicyEngine, PolicyRevisionStore, PolicyRevisionUnavailable,
     PolicySnapshot, policy_digest,
 )
-from holon_lending import ActionProfilesState
+from holon_lending import AAVE_MAX_TOTAL_FEE_WEI, ActionProfilesState
 from holon_lending.preflight import (
     BASE_GAS_PRICE_ORACLE, MAX_UINT256, Web3AavePreflightRpc, encode_approve,
     encode_supply, encode_withdraw,
@@ -220,7 +220,8 @@ class MainnetBroadcastPolicy:
                 rule = next(iter(self.shared_engine.policy.lending_rules), None)
                 return (
                     OfflineSigningPolicy(int(rule.max_total_fee_wei)).display
-                    if rule is not None else "Not configured"
+                    if rule is not None
+                    else OfflineSigningPolicy(AAVE_MAX_TOTAL_FEE_WEI).display
                 )
             rule = self._shared_rule(action.network_id, action.asset_id)
             return (
@@ -233,7 +234,7 @@ class MainnetBroadcastPolicy:
         if self.shared_engine is not None:
             if action.action_type == "lending":
                 rule = next(iter(self.shared_engine.policy.lending_rules), None)
-                return str(rule.max_amount_atomic) if rule is not None else "Not configured"
+                return str(rule.max_amount_atomic) if rule is not None else "Exact action amount"
             rule = self._shared_rule(action.network_id, action.asset_id)
             recipient = self._shared_recipient_limit(rule, action.recipient)
             if rule is None or recipient is None:
@@ -331,7 +332,7 @@ class MainnetBroadcastPolicy:
                     "amount_mode": action.amount_mode,
                     "amount_atomic": action.amount_atomic,
                 }, action.action_profile_digest)
-                if decision.allowed and rule is not None:
+                if decision.allowed:
                     decision = self.shared_engine.evaluate_lending_prepared(
                         action.method, action.amount_atomic, action.max_total_fee_wei, rule,
                     )
@@ -923,6 +924,23 @@ class BroadcastReceiptTracker:
                     else None
                 )
                 observed = _receipt_status(receipt, record, transaction)
+                if (
+                    observed is HistoryStatus.CONFIRMED
+                    and record.action_type == "lending_supply"
+                ):
+                    profile = ActionProfilesState.load().profile
+                    block = receipt.get("blockNumber")
+                    if (
+                        profile is None or type(block) is not int
+                        or rpc.lending_allowance(
+                            profile.asset, record.sender, profile.pool, block,
+                        ) != 0
+                        or record.position_before_atomic is None
+                        or rpc.lending_token_balance(
+                            profile.a_token, record.sender, block,
+                        ) < int(record.position_before_atomic) + int(record.amount_atomic) - 1
+                    ):
+                        observed = HistoryStatus.UNKNOWN
                 if observed in {HistoryStatus.CONFIRMED, HistoryStatus.FAILED}:
                     actual_fee_wei = _receipt_fee_wei(receipt)
             elif record.status is HistoryStatus.PENDING:
@@ -1565,7 +1583,7 @@ def _result_text(
             MainnetTransferCode.CONFIRMED: {
                 "approve": (
                     "Aave approval confirmed",
-                    "Aave V3 can use the exact reviewed USDC amount.",
+                    "Approval confirmed · Preparing the separate Supply Review…",
                 ),
                 "supply": (
                     "Supplied to Aave V3",

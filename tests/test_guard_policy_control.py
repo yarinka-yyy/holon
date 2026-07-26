@@ -77,7 +77,7 @@ def test_guard_reloads_exact_draft_applies_and_is_idempotent(tmp_path) -> None:
     assert first["policy_revision"] == 1
     assert authority.snapshot.policy_revision == 1
     assert not authority.snapshot.policy.authority_enabled
-    assert authority.lifecycle.reason == "POLICY_AUTHORITY_DISABLED"
+    assert authority.lifecycle.reason == "AAVE_CAPABILITY_READY"
 
     second = control.handle(request(revision_store, draft_store))
     assert second["code"] == "POLICY_ALREADY_ACTIVE"
@@ -170,11 +170,11 @@ def test_guard_repairs_corrupt_active_pointer_from_reviewed_draft(tmp_path) -> N
     assert authority.security_failure is None
 
 
-def test_lending_activation_and_deactivation_are_separate_cas_revisions(tmp_path) -> None:
+def test_legacy_lending_activation_controls_are_refused_as_built_in(tmp_path) -> None:
     baseline = Policy("2", "1", False, ())
     revision_store = PolicyRevisionStore(tmp_path, baseline)
     draft_store = TrustedPolicyDraftStore(WalletPaths(tmp_path))
-    draft_store.save(draft().with_lending_limits("5000000", "100000000000000"))
+    draft_store.save(draft())
     authority = Authority()
     control = GuardPolicyControl(revision_store, draft_store, authority)
     applied = control.handle(request(revision_store, draft_store))
@@ -189,22 +189,22 @@ def test_lending_activation_and_deactivation_are_separate_cas_revisions(tmp_path
             "candidate_policy_digest": candidate,
         }
 
-    disabled = draft_store.load().to_policy()
-    enabled = Policy("3", "2", False, disabled.transfer_rules, True, disabled.lending_rules)
     activated = control.handle(capability(
         "activate_capability", revision_store.load(),
-        policy_digest(enabled.to_dict()),
+        envelope["policy_digest"],
     ))
-    assert activated["kind"] == "policy_activated"
-    assert activated["lending_authority_enabled"] is True
+    assert activated["kind"] == "policy_refused"
+    assert activated["code"] == "LENDING_CAPABILITY_BUILT_IN"
+    assert activated["lending_authority_enabled"] is False
     assert activated["transfer_authority_enabled"] is False
-    assert activated["policy_revision"] == applied["policy_revision"] + 1
+    assert activated["policy_revision"] == applied["policy_revision"]
     assert authority.lifecycle.snapshot.state is GuardState.NORMAL
 
     deactivated = control.handle(capability(
         "deactivate_capability", revision_store.load(), envelope["policy_digest"],
     ))
-    assert deactivated["kind"] == "policy_deactivated"
+    assert deactivated["kind"] == "policy_refused"
+    assert deactivated["code"] == "LENDING_CAPABILITY_BUILT_IN"
     assert deactivated["lending_authority_enabled"] is False
     assert deactivated["transfer_authority_enabled"] is False
-    assert authority.lifecycle.snapshot.state is GuardState.SIGNING_DISABLED
+    assert authority.lifecycle.snapshot.state is GuardState.NORMAL

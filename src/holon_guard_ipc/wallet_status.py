@@ -20,7 +20,9 @@ STATUS_PIPE_NAME = r"\\.\pipe\Holon.Guard.Wallet.v1"
 MAX_STATUS_BYTES = 8 * 1024
 STATUS_FIELDS = frozenset({
     "status_version", "kind", "flow_id", "action_id", "prepared_digest",
-    "wallet_pid", "event", "code", "outcome",
+    "wallet_pid", "event", "code", "outcome", "operation_id",
+    "phase_action_id", "phase",
+    "transaction_hash", "receipt_state",
 })
 ACK_FIELDS = frozenset({"status_version", "kind", "flow_id", "action_id", "status"})
 ACTION_RE = re.compile(r"^act-[0-9a-f-]{36}$")
@@ -119,19 +121,43 @@ def validate_update(value: Mapping[str, object]) -> dict[str, object]:
     if not isinstance(action, str) or ACTION_RE.fullmatch(action) is None:
         raise WalletStatusError("Invalid status update")
     _uuid(action[4:])
+    operation = value.get("operation_id")
+    phase_action = value.get("phase_action_id")
+    if (
+        not isinstance(operation, str) or ACTION_RE.fullmatch(operation) is None
+        or phase_action != action
+        or value.get("phase") not in {"transfer", "approve", "supply", "withdraw"}
+    ):
+        raise WalletStatusError("Invalid status update")
+    _uuid(operation[4:])
     digest, code = value.get("prepared_digest"), value.get("code")
     if (
         not isinstance(digest, str) or HEX_RE.fullmatch(digest) is None
         or type(value.get("wallet_pid")) is not int or value["wallet_pid"] <= 0
-        or value.get("event") not in {"REJECTED", "FAILED", "COMPLETED"}
+        or value.get("event") not in {
+            "REJECTED", "FAILED", "COMPLETED", "BROADCASTED",
+            "RECEIPT_CONFIRMED", "RECEIPT_FAILED",
+        }
         or not isinstance(code, str) or CODE_RE.fullmatch(code) is None
     ):
         raise WalletStatusError("Invalid status update")
     outcome = value.get("outcome")
-    if value["event"] == "COMPLETED":
+    if value["event"] in {"COMPLETED", "BROADCASTED"}:
         if outcome not in {"pending", "confirmed", "unknown"}:
             raise WalletStatusError("Invalid status update")
     elif outcome is not None:
+        raise WalletStatusError("Invalid status update")
+    transaction_hash = value.get("transaction_hash")
+    receipt_state = value.get("receipt_state")
+    if transaction_hash is not None and (
+        not isinstance(transaction_hash, str) or not transaction_hash.startswith("0x")
+        or len(transaction_hash) != 66
+        or any(character not in "0123456789abcdef" for character in transaction_hash[2:])
+    ):
+        raise WalletStatusError("Invalid status update")
+    if receipt_state not in {"none", "pending", "unknown", "confirmed", "failed"}:
+        raise WalletStatusError("Invalid status update")
+    if (transaction_hash is None) != (receipt_state == "none"):
         raise WalletStatusError("Invalid status update")
     return dict(value)
 

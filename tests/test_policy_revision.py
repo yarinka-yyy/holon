@@ -149,3 +149,28 @@ def test_v3_lending_activation_is_explicit_and_legacy_baseline_stays_disabled(tm
         require_disabled=False,
     )
     assert changed and not restored.policy.lending_authority_enabled
+
+
+def test_active_v3_revision_migrates_atomically_to_transfer_only_v4(tmp_path) -> None:
+    baseline = Policy.transfer_only_v4(Policy("2", "1", False, ()), enabled=False)
+    store = PolicyRevisionStore(tmp_path, baseline)
+    rule = LendingRule(
+        "lending", "1", "aave-v3-base-usdc", "1", "base", "usdc", 8453,
+        ("approve", "supply"), "5000000", "100000000000000",
+        ACTION_PROFILES_DIGEST,
+    )
+    legacy = Policy("3", "2", False, disabled_policy().transfer_rules, True, (rule,))
+    saved, _ = store.apply(
+        legacy, "7" * 64, 0, store.load().policy_digest,
+        require_disabled=False,
+    )
+
+    migrated, changed = store.migrate_to_v4()
+
+    assert changed and migrated.policy_revision == saved.policy_revision + 1
+    assert migrated.policy.schema_version == "4"
+    assert migrated.policy.transfer_rules == legacy.transfer_rules
+    assert not migrated.policy.authority_enabled
+    assert not migrated.policy.lending_authority_enabled
+    assert migrated.policy.lending_rules == ()
+    assert migrated.source_draft_digest == "7" * 64

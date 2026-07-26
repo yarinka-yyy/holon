@@ -1,15 +1,77 @@
 from __future__ import annotations
+
+import hashlib
+import json
+import uuid
 from datetime import UTC, datetime, timedelta
 
 from holon_contracts import ActionState, RefusalCode, SecurityCode
 from holon_guard_ipc import GuardState
+from holon_lending import AAVE_MAX_TOTAL_FEE_WEI, AAVE_SAFETY_DIGEST
 from holon_wallet_control import AUTHORITY_VERSION
+from holon_wallet_control.lending_operation import (
+    LendingOperation,
+    LendingOperationSnapshot,
+)
+
 from .actions import ActionLedgerFailure
 from .core import GuardCore
 from .model import GuardResult, GuardSnapshot
-from .flow_controls import cancel_flow, fail_started_action, interrupt_for_security_block, recover_flow
+from .flow_controls import (
+    cancel_flow,
+    fail_started_action,
+    interrupt_for_security_block,
+    recover_flow,
+)
 from .startup import idle_snapshot
+
+
 class GuardLifecycle(GuardCore):
+    def advance_lending_operation(self) -> GuardResult | None:
+        """Prepare supply only after Wallet reports a confirmed approve receipt."""
+        with self._lock:
+            operation = self.lending_operation_snapshot.current
+            if operation is None or operation.phase != "prepare_supply":
+                return None
+            if self.snapshot.state is not GuardState.NORMAL:
+                return None
+            if not self.owner_probe.is_alive(operation.owner_pid):
+                updated = operation.with_phase("resume_or_revoke")
+                self._save_lending_operations(LendingOperationSnapshot(
+                    updated, self.lending_operation_snapshot.terminal,
+                ))
+                return self._result(False, "OWNER_UNAVAILABLE", "Supply can be resumed locally.")
+            phase_action_id = f"act-{uuid.uuid4()}"
+            material = {
+                "schema": "lending-phase-1", "operation_id": operation.operation_id,
+                "phase_action_id": phase_action_id, "phase": "supply",
+                "amount_mode": operation.amount_mode,
+                "resolved_amount_atomic": str(operation.resolved_amount_atomic),
+                "policy_revision": operation.policy_revision,
+                "policy_digest": operation.policy_digest,
+                "action_profile_digest": operation.action_profile_digest,
+                "safety_digest": operation.safety_digest,
+            }
+            fingerprint = hashlib.sha256(json.dumps(
+                material, sort_keys=True, separators=(",", ":"),
+            ).encode()).hexdigest()
+            result, _prepared = self.start_lending_intent(
+                operation.owner_pid, phase_action_id, fingerprint,
+                {
+                    "action": "supply", "amount_mode": operation.amount_mode,
+                    "amount": operation.amount,
+                }, operation.resolved_amount_atomic, operation.policy_version,
+                str(AAVE_MAX_TOTAL_FEE_WEI), None, operation.policy_revision,
+                operation.policy_digest, operation.action_profile_digest,
+                operation_id=operation.operation_id, phase="supply",
+            )
+            if not result.ok:
+                updated = operation.with_phase("resume_or_revoke")
+                self._save_lending_operations(LendingOperationSnapshot(
+                    updated, self.lending_operation_snapshot.terminal,
+                ))
+            return result
+
     def _fail_started_action(self, code: str) -> GuardResult:
         return fail_started_action(self, code)
     def start_flow(self, owner_pid: int, action_id: str, fingerprint: str) -> GuardResult:
@@ -200,9 +262,11 @@ class GuardLifecycle(GuardCore):
 
     def start_lending_intent(
         self, owner_pid: int, action_id: str, fingerprint: str,
-        intent: dict[str, object], policy_version: str, fee_cap_wei: str,
-        amount_cap_atomic: str,
+        intent: dict[str, object], resolved_amount_atomic: int,
+        policy_version: str, fee_cap_wei: str,
+        amount_cap_atomic: str | None,
         policy_revision: int, policy_digest: str, action_profile_digest: str,
+        operation_id: str | None = None, phase: str = "approve_or_supply",
     ) -> tuple[GuardResult, dict[str, object] | None]:
         """Start one fresh Aave action; never chains another action."""
         with self._lock:
@@ -233,7 +297,11 @@ class GuardLifecycle(GuardCore):
                 "flow_id": flow_id, "action_id": action_id,
                 "policy_version": policy_version, "policy_revision": policy_revision,
                 "policy_digest": policy_digest,
-                "action_profile_digest": action_profile_digest, **intent,
+                "action_profile_digest": action_profile_digest,
+                "operation_id": operation_id or action_id,
+                "phase_action_id": action_id,
+                "phase": phase,
+                "resolved_amount_atomic": str(resolved_amount_atomic), **intent,
                 "created_at": created.isoformat().replace("+00:00", "Z"),
                 "expires_at": expires.isoformat().replace("+00:00", "Z"),
             }
@@ -255,9 +323,13 @@ class GuardLifecycle(GuardCore):
                 fee = int(str(payload["max_total_fee_wei"]))
                 amount = int(str(payload["amount_atomic"]))
                 digest = str(payload["prepared_digest"])
+                prepared_profile_id = str(payload["profile_id"])
+                prepared_sender = str(payload["sender"])
                 if (
                     fee <= 0 or fee > int(fee_cap_wei)
-                    or amount <= 0 or amount > int(amount_cap_atomic)
+                    or amount <= 0
+                    or not prepared_profile_id or not prepared_sender
+                    or amount_cap_atomic is not None and amount > int(amount_cap_atomic)
                 ):
                     raise ValueError
             except (KeyError, TypeError, ValueError):
@@ -304,6 +376,36 @@ class GuardLifecycle(GuardCore):
                 return self.disable_signing(SecurityCode.ACTION_STATE_INVALID.value), None
             self.prepared_digest = digest
             self.authority_expires_at = expires.timestamp()
+            if intent.get("action") == "supply":
+                current_operation = self.lending_operation_snapshot.current
+                operation_phase = (
+                    "approve_review" if payload.get("next_action") == "approve"
+                    else "supply_review"
+                )
+                if current_operation is None:
+                    operation = LendingOperation(
+                        operation_id or action_id, "supply", str(intent["amount_mode"]),
+                        intent.get("amount") if isinstance(intent.get("amount"), str) else None,
+                        resolved_amount_atomic, owner_pid, policy_version, policy_revision,
+                        policy_digest, action_profile_digest, AAVE_SAFETY_DIGEST,
+                        operation_phase, action_id, fingerprint,
+                        created.isoformat().replace("+00:00", "Z"),
+                        prepared_profile_id, prepared_sender,
+                    )
+                else:
+                    if (
+                        current_operation.operation_id != (operation_id or action_id)
+                        or current_operation.resolved_amount_atomic != resolved_amount_atomic
+                    ):
+                        return self._recover("LENDING_OPERATION_MISMATCH"), None
+                    operation = current_operation.with_phase(
+                        operation_phase, phase_action_id=action_id,
+                        phase_fingerprint=fingerprint,
+                    )
+                if not self._save_lending_operations(LendingOperationSnapshot(
+                    operation, self.lending_operation_snapshot.terminal,
+                )):
+                    return self._result(False, "LENDING_OPERATION_STATE_INVALID", "Operation state failed."), None
             return self._result(True, "AWAITING_LOCAL_CONFIRMATION", "Protected flow started."), payload
 
     def accept_wallet_status(self, update: dict[str, object]) -> bool:
@@ -317,12 +419,85 @@ class GuardLifecycle(GuardCore):
             ):
                 return False
             event = update.get("event")
+            operation = self.lending_operation_snapshot.current
+            is_lending = (
+                operation is not None
+                and update.get("operation_id") == operation.operation_id
+                and update.get("phase_action_id") == operation.phase_action_id
+            )
             try:
-                if event == "COMPLETED":
+                if event == "BROADCASTED" and is_lending:
+                    self.ledger.transition(ActionState.APPROVED, "SUBMISSION_STARTED")
+                    receipt_phase = (
+                        "approve_receipt" if update.get("phase") == "approve"
+                        else "supply_receipt"
+                    )
+                    updated = operation.with_phase(receipt_phase).with_receipt(
+                        str(update["transaction_hash"]),
+                        str(update["receipt_state"]),
+                        datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                    )
+                    if not self._save_lending_operations(LendingOperationSnapshot(
+                        updated, self.lending_operation_snapshot.terminal,
+                    )):
+                        return False
+                    self.authority_expires_at = None
+                    return True
+                if event == "RECEIPT_CONFIRMED" and is_lending:
+                    operation = operation.with_receipt(
+                        str(update["transaction_hash"]), "confirmed",
+                        datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                    )
+                    self.ledger.terminalize(ActionState.COMPLETED, str(update["code"]))
+                    if update.get("phase") == "approve":
+                        updated = operation.with_phase("prepare_supply")
+                        next_snapshot = LendingOperationSnapshot(
+                            updated, self.lending_operation_snapshot.terminal,
+                        )
+                    else:
+                        completed = operation.with_phase("completed")
+                        next_snapshot = LendingOperationSnapshot(
+                            None, self.lending_operation_snapshot.terminal + (completed,),
+                        )
+                    if not self._save_lending_operations(next_snapshot):
+                        return False
+                elif event == "RECEIPT_FAILED" and is_lending:
+                    operation = operation.with_receipt(
+                        str(update["transaction_hash"]), "failed",
+                        datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                    )
+                    self.ledger.terminalize(ActionState.FAILED, str(update["code"]))
+                    if update.get("phase") == "supply":
+                        updated = operation.with_phase("resume_or_revoke")
+                        next_snapshot = LendingOperationSnapshot(
+                            updated, self.lending_operation_snapshot.terminal,
+                        )
+                    else:
+                        failed = operation.with_phase("failed")
+                        next_snapshot = LendingOperationSnapshot(
+                            None, self.lending_operation_snapshot.terminal + (failed,),
+                        )
+                    if not self._save_lending_operations(next_snapshot):
+                        return False
+                elif event == "COMPLETED":
                     self.ledger.transition(ActionState.APPROVED, "SUBMISSION_STARTED")
                     self.ledger.terminalize(ActionState.COMPLETED, str(update["code"]))
                 elif event == "REJECTED":
                     self.ledger.terminalize(ActionState.REJECTED, str(update["code"]))
+                    if is_lending:
+                        if operation.phase == "approve_review":
+                            cancelled = operation.with_phase("cancelled")
+                            next_snapshot = LendingOperationSnapshot(
+                                None,
+                                self.lending_operation_snapshot.terminal + (cancelled,),
+                            )
+                        else:
+                            next_snapshot = LendingOperationSnapshot(
+                                operation.with_phase("resume_or_revoke"),
+                                self.lending_operation_snapshot.terminal,
+                            )
+                        if not self._save_lending_operations(next_snapshot):
+                            return False
                 elif event == "FAILED":
                     self.ledger.terminalize(ActionState.FAILED, str(update["code"]))
                 else:
@@ -358,6 +533,9 @@ class GuardLifecycle(GuardCore):
 
     def cancel_external_transfer(self, action_id: str) -> GuardResult:
         with self._lock:
+            operation = self.lending_operation_snapshot.current
+            if operation is not None and action_id == operation.operation_id:
+                action_id = operation.phase_action_id
             if self.snapshot.state is not GuardState.ACTIVE or self.snapshot.action_id != action_id:
                 return self._result(False, "FLOW_NOT_ACTIVE", "No cancellable flow is active.")
             if self.prepared_digest is None or self.snapshot.flow_id is None:
@@ -379,6 +557,21 @@ class GuardLifecycle(GuardCore):
             self.prepared_digest = None
             self.authority_expires_at = None
             self._persist(idle_snapshot(GuardState.NORMAL, "ACTION_CANCELLED", self.clock()))
+            if operation is not None:
+                phase = (
+                    "resume_or_revoke"
+                    if operation.phase in {"approve_receipt", "prepare_supply", "supply_review", "supply_receipt"}
+                    else "cancelled"
+                )
+                updated = operation.with_phase(phase)
+                next_snapshot = (
+                    LendingOperationSnapshot(updated, self.lending_operation_snapshot.terminal)
+                    if phase == "resume_or_revoke"
+                    else LendingOperationSnapshot(
+                        None, self.lending_operation_snapshot.terminal + (updated,),
+                    )
+                )
+                self._save_lending_operations(next_snapshot)
             return self._result(True, "ACTION_CANCELLED", "Protected flow was cancelled.")
     def cancel_flow(self, action_id: str) -> GuardResult:
         if self.prepared_digest is not None:

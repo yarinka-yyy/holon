@@ -6,6 +6,9 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from holon_contracts import RefusalCode
+from holon_lending.action_profiles import (
+    ACTION_PROFILES_DIGEST, AAVE_MAX_TOTAL_FEE_WEI,
+)
 
 from .model import LendingRule, Policy, RecipientRule, TransferRule
 
@@ -86,6 +89,31 @@ class PolicyEngine:
     def evaluate_lending_intent(
         self, payload: Mapping[str, Any], action_profile_digest: str,
     ) -> tuple[PolicyDecision, LendingRule | None]:
+        if self.policy.schema_version == "4":
+            fixed = {
+                "module_id": "lending", "protocol_profile_id": "aave-v3-base-usdc",
+                "network": "base", "asset": "usdc",
+            }
+            if (
+                action_profile_digest != ACTION_PROFILES_DIGEST
+                or any(payload.get(name) != expected for name, expected in fixed.items())
+            ):
+                return PolicyDecision.refuse(
+                    RefusalCode.ACTION_NOT_ALLOWED, "Lending profile is not allowed.",
+                ), None
+            action, mode = payload.get("action"), payload.get("amount_mode")
+            if action not in {"supply", "withdraw"} or mode not in {"exact", "all"}:
+                return PolicyDecision.refuse(
+                    RefusalCode.ACTION_NOT_ALLOWED, "Lending action is not allowed.",
+                ), None
+            amount = payload.get("amount_atomic")
+            if mode == "all" and amount is None:
+                return PolicyDecision.allow(), None
+            if type(amount) is not int or amount <= 0:
+                return PolicyDecision.refuse(
+                    RefusalCode.AMOUNT_INVALID, "Lending amount is invalid.",
+                ), None
+            return PolicyDecision.allow(), None
         if not self.policy.lending_authority_enabled:
             return PolicyDecision.refuse(
                 RefusalCode.POLICY_AUTHORITY_DISABLED,
@@ -133,8 +161,24 @@ class PolicyEngine:
     @staticmethod
     def evaluate_lending_prepared(
         next_action: object, amount_atomic: object, max_total_fee_wei: object,
-        rule: LendingRule,
+        rule: LendingRule | None,
     ) -> PolicyDecision:
+        if rule is None:
+            if next_action not in {"approve", "supply", "withdraw"}:
+                return PolicyDecision.refuse(
+                    RefusalCode.ACTION_NOT_ALLOWED, "Prepared lending action is not allowed.",
+                )
+            if type(amount_atomic) is not int or amount_atomic <= 0:
+                return PolicyDecision.refuse(RefusalCode.AMOUNT_INVALID, "Amount is invalid.")
+            if type(max_total_fee_wei) is not int or max_total_fee_wei <= 0:
+                return PolicyDecision.refuse(
+                    RefusalCode.MAX_FEE_REQUIRED, "Maximum fee is required.",
+                )
+            if max_total_fee_wei > AAVE_MAX_TOTAL_FEE_WEI:
+                return PolicyDecision.refuse(
+                    RefusalCode.MAX_FEE_EXCEEDED, "Maximum fee exceeds the built-in limit.",
+                )
+            return PolicyDecision.allow()
         if next_action not in rule.allowed_actions:
             return PolicyDecision.refuse(
                 RefusalCode.ACTION_NOT_ALLOWED, "Prepared lending action is not allowed.",

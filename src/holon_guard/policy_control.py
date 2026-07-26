@@ -43,7 +43,66 @@ class GuardPolicyControl:
             return self._apply(request)
         if request["kind"] == "initialize_authority_state":
             return self._initialize_authority_state(request)
+        if request["kind"] in {
+            "resume_lending_operation", "cancel_lending_operation",
+        }:
+            return self._lending_operation(request)
         return self._set_capability(request)
+
+    def _lending_operation(
+        self, request: Mapping[str, object],
+    ) -> dict[str, object]:
+        lifecycle = self.authority.lifecycle
+        operation = lifecycle.lending_operation_snapshot.current
+        if operation is None or operation.operation_id != request["operation_id"]:
+            return self._refusal(request, "LENDING_OPERATION_NOT_FOUND")
+        if request["kind"] == "resume_lending_operation":
+            if (
+                operation.phase != "resume_or_revoke"
+                or operation.phase_action_id != request["phase_action_id"]
+                or operation.transaction_hash != request["transaction_hash"]
+                or operation.receipt_state not in {"pending", "unknown", "confirmed"}
+            ):
+                return self._refusal(request, "LENDING_OPERATION_MISMATCH")
+            if lifecycle.snapshot.state is GuardState.RECOVERY_REQUIRED:
+                recovered = lifecycle.recover_flow(operation.phase_action_id)
+                if not recovered.ok:
+                    return self._refusal(request, recovered.code)
+            elif lifecycle.snapshot.state is not GuardState.NORMAL:
+                return self._refusal(request, "POLICY_FLOW_ACTIVE")
+            try:
+                resumed = operation.with_receipt(
+                    str(request["transaction_hash"]), "confirmed",
+                    operation.updated_at,
+                ).resume(int(request["wallet_pid"]))
+            except Exception:
+                return self._refusal(request, "LENDING_OPERATION_MISMATCH")
+            if not lifecycle._save_lending_operations(type(
+                lifecycle.lending_operation_snapshot,
+            )(resumed, lifecycle.lending_operation_snapshot.terminal)):
+                return self._refusal(request, "LENDING_OPERATION_STATE_INVALID")
+            snapshot = self.revision_store.load()
+            return self._response(
+                request, "lending_operation_resumed", "LENDING_OPERATION_RESUMED",
+                snapshot,
+            )
+        if lifecycle.snapshot.state is GuardState.RECOVERY_REQUIRED:
+            recovered = lifecycle.recover_flow(operation.phase_action_id)
+            if not recovered.ok:
+                return self._refusal(request, recovered.code)
+        elif lifecycle.snapshot.state is not GuardState.NORMAL:
+            return self._refusal(request, "POLICY_FLOW_ACTIVE")
+        cancelled = operation.with_phase("cancelled")
+        operation_snapshot_type = type(lifecycle.lending_operation_snapshot)
+        if not lifecycle._save_lending_operations(operation_snapshot_type(
+            None, lifecycle.lending_operation_snapshot.terminal + (cancelled,),
+        )):
+            return self._refusal(request, "LENDING_OPERATION_STATE_INVALID")
+        snapshot = self.revision_store.load()
+        return self._response(
+            request, "lending_operation_cancelled", "LENDING_OPERATION_CANCELLED",
+            snapshot,
+        )
 
     def _initialize_authority_state(
         self, request: Mapping[str, object],
@@ -126,64 +185,12 @@ class GuardPolicyControl:
         }:
             self.authority.security_failure = None
             self.revision_invalid = False
-        lifecycle.disable_signing("POLICY_AUTHORITY_DISABLED")
+        lifecycle.enable_signing("AAVE_CAPABILITY_READY")
         code = "POLICY_REVISION_APPLIED" if changed else "POLICY_ALREADY_ACTIVE"
         return self._response(request, "policy_applied", code, snapshot)
 
     def _set_capability(self, request: Mapping[str, object]) -> dict[str, object]:
-        lifecycle = self.authority.lifecycle
-        if self.promotion_blocker is not None:
-            return self._refusal(request, self.promotion_blocker)
-        if (
-            lifecycle.snapshot.state not in {GuardState.NORMAL, GuardState.SIGNING_DISABLED}
-            or lifecycle.ledger.snapshot.current is not None
-        ):
-            return self._refusal(request, "POLICY_FLOW_ACTIVE")
-        try:
-            current = self.revision_store.load()
-            draft = self.draft_store.load()
-            envelope = draft.to_envelope()
-            draft_digest = trusted_draft_digest(envelope)
-            disabled = draft.to_policy()
-            enabled = request["kind"] == "activate_capability"
-            candidate = type(disabled)(
-                "3", "2", False, disabled.transfer_rules, enabled,
-                disabled.lending_rules,
-            )
-            if enabled and not candidate.lending_rules:
-                return self._refusal(request, "LENDING_POLICY_UNAVAILABLE")
-            if (
-                draft_digest != request["reviewed_draft_digest"]
-                or policy_digest(candidate.to_dict()) != request["candidate_policy_digest"]
-                or current.policy_revision != int(request["expected_policy_revision"])
-                or current.policy_digest != str(request["expected_policy_digest"])
-            ):
-                return self._refusal(request, "POLICY_REVISION_STALE")
-            if enabled and (
-                current.source_draft_digest != draft_digest
-                or current.policy.lending_authority_enabled
-                or current.policy.authority_enabled
-            ):
-                return self._refusal(request, "POLICY_DRAFT_NOT_APPLIED")
-            snapshot, _changed = self.revision_store.apply(
-                candidate, draft_digest, current.policy_revision,
-                current.policy_digest, require_disabled=False,
-            )
-        except TrustedDraftUnavailable:
-            return self._refusal(request, "POLICY_DRAFT_UNAVAILABLE")
-        except (PolicyRevisionStale, PolicyRevisionUnavailable):
-            return self._refusal(request, "POLICY_REVISION_WRITE_FAILED")
-        self.authority.replace_policy_snapshot(snapshot)
-        self.authority.security_failure = None
-        if enabled:
-            lifecycle.enable_signing("LENDING_AUTHORITY_ENABLED")
-            return self._response(
-                request, "policy_activated", "LENDING_AUTHORITY_ENABLED", snapshot,
-            )
-        lifecycle.disable_signing("POLICY_AUTHORITY_DISABLED")
-        return self._response(
-            request, "policy_deactivated", "LENDING_AUTHORITY_DISABLED", snapshot,
-        )
+        return self._refusal(request, "LENDING_CAPABILITY_BUILT_IN")
 
     def _refusal(
         self, request: Mapping[str, object], code: str,
