@@ -16,14 +16,23 @@ TransactionFlowShell {
             color: root.positive ? Design.accentSoft : "#332C2020"
             border.width: 1; border.color: root.positive ? Design.accent : Design.danger
             Image {
+                id: mainnetStatusSpinner
                 anchors.centerIn: parent; width: 34; height: 34
-                source: walletController.receiptChecking
-                    ? "assets/refresh.svg" : root.positive ? "assets/check.svg" : "assets/warning.svg"
+                visible: walletController.receiptChecking
+                source: "assets/refresh.svg"
                 sourceSize: Qt.size(68, 68)
                 RotationAnimation on rotation {
-                    running: walletController.receiptChecking
+                    running: mainnetStatusSpinner.visible
                     from: 0; to: 360; duration: 850; loops: Animation.Infinite
                 }
+            }
+            Image {
+                id: mainnetTerminalIcon
+                anchors.centerIn: parent; width: 34; height: 34
+                visible: !walletController.receiptChecking
+                rotation: 0
+                source: root.positive ? "assets/check.svg" : "assets/warning.svg"
+                sourceSize: Qt.size(68, 68)
             }
         }
         Text {

@@ -16,13 +16,21 @@ TransactionFlowShell {
             color: root.positive ? Design.accentSoft : "#332C2020"
             border.width: 1; border.color: root.positive ? Design.accent : Design.danger
             Image {
+                id: revokeStatusSpinner
                 anchors.centerIn: parent; width: 34; height: 34
-                source: walletController.receiptChecking
-                    ? "assets/refresh.svg" : root.positive ? "assets/check.svg" : "assets/warning.svg"
+                visible: walletController.receiptChecking
+                source: "assets/refresh.svg"
                 RotationAnimation on rotation {
-                    running: walletController.receiptChecking
+                    running: revokeStatusSpinner.visible
                     from: 0; to: 360; duration: 850; loops: Animation.Infinite
                 }
+            }
+            Image {
+                id: revokeTerminalIcon
+                anchors.centerIn: parent; width: 34; height: 34
+                visible: !walletController.receiptChecking
+                rotation: 0
+                source: root.positive ? "assets/check.svg" : "assets/warning.svg"
             }
         }
         Text {

@@ -10,12 +10,23 @@ ASSETS = files("holon_wallet.qml").joinpath("assets")
 
 
 def test_user_approved_raster_logos_are_transparent_package_resources() -> None:
-    for name in ("base.png", "usdc.png"):
+    for name in ("base.png", "usdc.png", "aave-logo-white.png"):
         with as_file(ASSETS.joinpath(name)) as path:
             image = QImage(str(path))
         assert not image.isNull()
         assert image.hasAlphaChannel()
         assert image.pixelColor(0, 0).alpha() == 0
+
+
+def test_aave_mark_is_a_compact_transparent_logo_not_a_banner() -> None:
+    with as_file(ASSETS.joinpath("aave-logo-white.png")) as path:
+        image = QImage(str(path))
+    assert image.width() > image.height() * 3
+    assert image.width() < 700
+    assert any(
+        image.pixelColor(x, image.height() // 2).alpha() > 0
+        for x in range(image.width())
+    )
 
 
 def test_ethereum_logo_is_clean_vector_without_embedded_checkerboard() -> None:

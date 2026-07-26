@@ -525,7 +525,7 @@ def test_send_review_mainnet_confirmation_result_and_history(tmp_path, qt_app) -
         secondary_button = child(app, "editTransferButton")
         assert continue_button.property("y") + continue_button.property("height") <= 592
         assert secondary_button.property("y") + secondary_button.property("height") <= 592
-        assert child(app, "transferReviewOverflowCue").property("visible")
+        assert not child(app, "transferReviewOverflowCue").property("visible")
         app.window.resize(520, 820)
         qt_app.processEvents()
         assert continue_button.property("visible")
@@ -535,7 +535,8 @@ def test_send_review_mainnet_confirmation_result_and_history(tmp_path, qt_app) -
         assert app.controller.transferAction["expiresAt"].endswith("UTC")
         assert app.controller.mainnetFeeLimit.endswith("ETH")
         invoke(child(app, "transferDetailsButton"), "trigger")
-        assert child(app, "transferReviewScroll").property("contentHeight") == 900
+        assert child(app, "transferReviewScroll").property("contentHeight") == 852
+        assert child(app, "transferReviewOverflowCue").property("visible")
 
         invoke(child(app, "editTransferButton"), "trigger")
         qt_app.processEvents()
@@ -1005,6 +1006,14 @@ def test_transaction_pages_have_password_click_only_and_semantic_copy() -> None:
     assert 'root.action.chainId' in review
     assert "transferFeeUsd" in review
     assert "Change action" in review and "Edit transfer" in review
+    assert 'source: "assets/aave-logo-white.png"' in review
+    assert "aaveDescription" not in review
+    assert "Receiver ·" not in review
+    assert 'return "Supply " + action.amount + " to Aave"' in review
+    assert 'return "Step 1 of 2 · Approve"' in review
+    assert "readonly property int reviewCardWidth: 438" in review
+    assert "width: 6; policy: ScrollBar.AsNeeded" in review
+    assert "assets/aave-banner.png" not in review
     for phrase in (
         "Approve Aave V3", "Supply to Aave V3",
         "Withdraw from Aave V3", "Withdraw all from Aave V3",
@@ -1014,6 +1023,21 @@ def test_transaction_pages_have_password_click_only_and_semantic_copy() -> None:
     assert "onAccepted:" not in revoke
     assert "CheckBox" not in sign + revoke
     assert "irreversible" not in (sign + revoke).lower()
+
+
+def test_terminal_result_icons_are_never_reused_from_the_rotating_spinner() -> None:
+    qml = Path(__file__).parents[1] / "src" / "holon_wallet" / "qml"
+    for name, spinner, terminal in (
+        ("MainnetResultPage.qml", "mainnetStatusSpinner", "mainnetTerminalIcon"),
+        ("ApprovalResultPage.qml", "revokeStatusSpinner", "revokeTerminalIcon"),
+    ):
+        source = (qml / name).read_text(encoding="utf-8")
+        assert "id: " + spinner in source
+        assert "id: " + terminal in source
+        assert "running: " + spinner + ".visible" in source
+        terminal_source = source[source.index("id: " + terminal):]
+        assert "rotation: 0" in terminal_source
+        assert 'source: root.positive ? "assets/check.svg" : "assets/warning.svg"' in terminal_source
 
 
 def test_guard_banner_is_public_timed_and_never_navigates(wallet_app, qt_app) -> None:

@@ -18,22 +18,26 @@ TransactionFlowShell {
         ? "assets/ethereum.svg" : "assets/usdc.png"
     property url networkIcon: action.networkId === "ethereum"
         ? "assets/ethereum.svg" : "assets/base.png"
+    readonly property int reviewCardWidth: 438
+    readonly property int accountY: root.isLending ? 0 : 50
+    readonly property int recipientY: root.isLending ? 74 : 118
+    readonly property int summaryY: root.isLending ? 154 : 190
+    readonly property int detailsY: root.isLending ? 340 : 372
+    readonly property int collapsedContentHeight: root.detailsY + 48
 
     function aaveTitle() {
-        if (action.method === "approve") return "Supply " + action.amount + " to Aave V3 · Step 1 of 2 — Approve"
-        if (action.method === "supply") return "Supply " + action.amount + " to Aave V3 · Step 2 of 2 — Supply"
+        if (action.method === "approve") return "Supply " + action.amount + " to Aave"
+        if (action.method === "supply") return "Supply " + action.amount + " to Aave"
         if (action.method === "withdraw" && action.amountMode === "all")
-            return "Withdraw all from Aave V3"
-        if (action.method === "withdraw") return "Withdraw from Aave V3"
-        return "Aave V3 action"
+            return "Withdraw all from Aave"
+        if (action.method === "withdraw") return "Withdraw from Aave"
+        return "Aave action"
     }
-    function aaveDescription() {
-        if (action.method === "approve")
-            return "Allow Aave V3 to use up to " + (action.amount || "the reviewed amount")
-        if (action.method === "supply")
-            return (action.amount || "USDC") + " supplied from " + (action.accountLabel || "this Account")
-        if (action.amountMode === "all") return "Return the complete current position"
-        return "Return " + (action.amount || "the reviewed amount") + " to this Wallet"
+    function aaveStep() {
+        if (action.method === "approve") return "Step 1 of 2 · Approve"
+        if (action.method === "supply") return "Step 2 of 2 · Supply"
+        if (action.method === "withdraw" && action.amountMode === "all") return "All available funds"
+        return "Exact amount"
     }
     function semanticAaveAction() {
         if (action.method === "approve") return "Approve Aave V3"
@@ -46,22 +50,17 @@ TransactionFlowShell {
     Flickable {
         id: reviewScroll; objectName: "transferReviewScroll"
         width: 458; height: 430; clip: true; contentWidth: width
-        contentHeight: root.detailsOpen ? 900 : 458
+        contentHeight: root.detailsOpen ? root.detailsY + 480 : root.collapsedContentHeight
         boundsBehavior: Flickable.StopAtBounds
-        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+        ScrollBar.vertical: ScrollBar { width: 6; policy: ScrollBar.AsNeeded }
 
         Rectangle {
-            objectName: "mainnetTransferBanner"; x: 0; y: 0; width: 458; height: 54
+            objectName: "mainnetTransferBanner"; visible: !root.isLending
+            x: 0; y: 0; width: root.reviewCardWidth; height: 40
             radius: 12; clip: true
-            color: root.isLending ? Design.surfaceCard : "#332C261B"
-            border.width: 1; border.color: root.isLending ? "#448D86FF" : "#66D5AA64"
-            Image {
-                anchors.fill: parent; visible: root.isLending
-                source: "assets/aave-banner.png"; fillMode: Image.PreserveAspectCrop
-                sourceSize: Qt.size(916, 108)
-            }
+            color: "#332C261B"; border.width: 1; border.color: "#66D5AA64"
             Text {
-                anchors.centerIn: parent; visible: !root.isLending
+                anchors.centerIn: parent
                 text: "MAINNET TRANSFER · REAL FUNDS"
                 color: Design.warning; font.family: Design.fontFamily
                 font.pixelSize: 11; font.weight: Font.DemiBold; font.letterSpacing: 0.3
@@ -69,7 +68,8 @@ TransactionFlowShell {
         }
 
         SurfaceCard {
-            objectName: "transferReviewAccount"; x: 0; y: 64; width: 458; height: 66
+            objectName: "transferReviewAccount"; x: 0; y: root.accountY
+            width: root.reviewCardWidth; height: 66
             Image { x: 16; y: 14; width: 22; height: 22; source: "assets/user.svg" }
             Text {
                 x: 50; y: 11; text: "From · " + (root.action.accountLabel || "Account")
@@ -82,47 +82,54 @@ TransactionFlowShell {
             }
         }
         SurfaceCard {
-            objectName: "transferReviewRecipient"; x: 0; y: 138; width: 458; height: 82
+            objectName: "transferReviewRecipient"; x: 0; y: root.recipientY
+            width: root.reviewCardWidth; height: root.isLending ? 72 : 66
             Image {
                 x: 16; y: 14; width: 24; height: 24
                 source: root.isLending ? "assets/usdc.png" : "assets/user.svg"
             }
+            Image {
+                visible: root.isLending
+                x: parent.width - 126; y: 24; width: 110; height: 22
+                source: "assets/aave-logo-white.png"
+                fillMode: Image.PreserveAspectFit
+                sourceSize: Qt.size(220, 44)
+            }
             Text {
-                x: 52; y: 11; width: 386
+                x: 52; y: 11; width: root.isLending ? 248 : 370
                 text: root.isLending ? root.aaveTitle() : "To"
                 color: Design.text; font.family: Design.fontFamily
                 font.pixelSize: 14; font.weight: Font.Medium
             }
             Text {
-                x: 52; y: 35; width: 386
-                text: root.isLending ? root.aaveDescription() : (root.action.recipient || "")
+                x: 52; y: 35; width: root.isLending ? 248 : 370
+                text: root.isLending ? root.aaveStep() : (root.action.recipient || "")
                 color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 11
                 elide: root.isLending ? Text.ElideRight : Text.ElideMiddle
             }
-            Text {
-                visible: root.isLending; x: 52; y: 57; width: 386
-                text: "Receiver · " + (root.action.accountLabel || "Active Wallet")
-                color: Design.textFaint; font.family: Design.fontFamily; font.pixelSize: 10
-            }
         }
         SummaryRow {
-            objectName: "transferReviewAmount"; x: 0; y: 224; width: 458; compact: true
+            objectName: "transferReviewAmount"; x: 0; y: root.summaryY
+            width: root.reviewCardWidth; compact: true
             label: "Amount"; value: root.action.amount || ""
             secondary: walletController.transferAmountUsd; iconSource: root.assetIcon
         }
         SummaryRow {
-            objectName: "transferReviewNetwork"; x: 0; y: 284; width: 458; compact: true
+            objectName: "transferReviewNetwork"; x: 0; y: root.summaryY + 60
+            width: root.reviewCardWidth; compact: true
             label: "Network"; value: root.action.network || ""
             iconSource: "assets/network-data.svg"; badgeSource: root.networkIcon
         }
         SummaryRow {
-            objectName: "transferReviewFee"; x: 0; y: 344; width: 458; compact: true
+            objectName: "transferReviewFee"; x: 0; y: root.summaryY + 120
+            width: root.reviewCardWidth; compact: true
             label: "Maximum fee"; value: walletController.transferFeeUsd
             iconSource: "assets/info.svg"
         }
 
         Item {
-            objectName: "transferDetailsButton"; x: 0; y: 410; width: 458; height: 48
+            objectName: "transferDetailsButton"; x: 0; y: root.detailsY
+            width: root.reviewCardWidth; height: 48
             function trigger() { root.detailsOpen = !root.detailsOpen }
             SurfaceCard { anchors.fill: parent; interactive: true; onTriggered: parent.trigger() }
             Text {
@@ -138,7 +145,8 @@ TransactionFlowShell {
             }
         }
         SurfaceCard {
-            visible: root.detailsOpen; x: 0; y: 470; width: 458; height: 420
+            visible: root.detailsOpen; x: 0; y: root.detailsY + 60
+            width: root.reviewCardWidth; height: 420
             Column {
                 x: 16; y: 10; width: parent.width - 32; spacing: 0
                 Repeater {
@@ -190,12 +198,22 @@ TransactionFlowShell {
     }
     Rectangle {
         objectName: "transferReviewOverflowCue"
-        x: 0; y: 402; width: 458; height: 28; z: 3
+        x: 438; y: 400; width: 18; height: 24; z: 3
+        color: "transparent"
         visible: reviewScroll.contentHeight > reviewScroll.height
             && reviewScroll.contentY < reviewScroll.contentHeight - reviewScroll.height - 2
-        gradient: Gradient {
-            GradientStop { position: 0; color: "transparent" }
-            GradientStop { position: 1; color: Design.background }
+        Image {
+            anchors.centerIn: parent; width: 16; height: 16
+            source: "assets/chevron-down.svg"; opacity: 0.8
+            transform: Translate {
+                SequentialAnimation on y {
+                    running: reviewScroll.contentHeight > reviewScroll.height
+                        && reviewScroll.contentY < reviewScroll.contentHeight - reviewScroll.height - 2
+                    loops: Animation.Infinite
+                    NumberAnimation { to: 3; duration: 420; easing.type: Easing.InOutQuad }
+                    NumberAnimation { to: 0; duration: 420; easing.type: Easing.InOutQuad }
+                }
+            }
         }
     }
     Text {
