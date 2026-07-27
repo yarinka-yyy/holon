@@ -11,10 +11,11 @@ from typing import Any, Mapping
 from .public_data import NETWORK_BY_ID
 from .storage import StorageError, WalletPaths, atomic_write_json, read_json
 
-HISTORY_SCHEMA_VERSION = 4
+HISTORY_SCHEMA_VERSION = 5
 LEGACY_HISTORY_SCHEMA_VERSION = 1
 FEE_HISTORY_SCHEMA_VERSION = 2
 OPERATION_HISTORY_SCHEMA_VERSION = 3
+POSITION_HISTORY_SCHEMA_VERSION = 4
 MAX_HISTORY_RECORDS = 500
 MONTH_LABELS = (
     "Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -87,12 +88,17 @@ class WalletHistoryRecord:
     actual_fee_wei: str | None = None
     operation_id: str | None = None
     position_before_atomic: str | None = None
+    protocol_id: str | None = None
+    call_amount_atomic: str | None = None
+    position_after_atomic: str | None = None
+    allowance_after_atomic: str | None = None
+    position_verified: bool | None = None
 
     def __post_init__(self) -> None:
         _validate_record(self)
 
-    def to_dict(self) -> dict[str, object]:
-        return {
+    def to_dict(self, *, include_v5: bool = False) -> dict[str, object]:
+        value = {
             "action_id": self.action_id,
             "profile_id": self.profile_id,
             "action_type": self.action_type,
@@ -114,6 +120,15 @@ class WalletHistoryRecord:
             "operation_id": self.operation_id,
             "position_before_atomic": self.position_before_atomic,
         }
+        if include_v5:
+            value.update({
+                "protocol_id": self.protocol_id,
+                "call_amount_atomic": self.call_amount_atomic,
+                "position_after_atomic": self.position_after_atomic,
+                "allowance_after_atomic": self.allowance_after_atomic,
+                "position_verified": self.position_verified,
+            })
+        return value
 
     @classmethod
     def from_dict(
@@ -129,9 +144,20 @@ class WalletHistoryRecord:
             expected |= {"max_total_fee_wei", "actual_fee_wei"}
         if schema_version >= OPERATION_HISTORY_SCHEMA_VERSION:
             expected |= {"operation_id"}
-        if schema_version >= HISTORY_SCHEMA_VERSION:
+        if schema_version >= POSITION_HISTORY_SCHEMA_VERSION:
             expected |= {"position_before_atomic"}
-        if set(value) != expected:
+        if schema_version >= HISTORY_SCHEMA_VERSION:
+            expected |= {
+                "protocol_id", "call_amount_atomic", "position_after_atomic",
+                "allowance_after_atomic", "position_verified",
+            }
+        legacy_v5 = schema_version == HISTORY_SCHEMA_VERSION and set(value) == (
+            expected - {
+                "protocol_id", "call_amount_atomic", "position_after_atomic",
+                "allowance_after_atomic", "position_verified",
+            }
+        )
+        if set(value) != expected and not legacy_v5:
             raise HistoryValidationError("History record fields are invalid")
         try:
             status = HistoryStatus(value["status"])
@@ -159,6 +185,11 @@ class WalletHistoryRecord:
                 actual_fee_wei=value.get("actual_fee_wei"),
                 operation_id=value.get("operation_id"),
                 position_before_atomic=value.get("position_before_atomic"),
+                protocol_id=value.get("protocol_id"),
+                call_amount_atomic=value.get("call_amount_atomic"),
+                position_after_atomic=value.get("position_after_atomic"),
+                allowance_after_atomic=value.get("allowance_after_atomic"),
+                position_verified=value.get("position_verified"),
             )
         except (TypeError, ValueError) as error:
             if isinstance(error, HistoryValidationError):
@@ -185,7 +216,7 @@ class HistoryStore:
             if schema_version not in {
                 LEGACY_HISTORY_SCHEMA_VERSION, FEE_HISTORY_SCHEMA_VERSION,
                 OPERATION_HISTORY_SCHEMA_VERSION,
-                HISTORY_SCHEMA_VERSION,
+                POSITION_HISTORY_SCHEMA_VERSION, HISTORY_SCHEMA_VERSION,
             }:
                 raise HistoryValidationError("History schema is unsupported")
             records = value["records"]
@@ -216,6 +247,9 @@ class HistoryStore:
         updated_at: str,
         transaction_hash: str | None = None,
         actual_fee_wei: str | None = None,
+        position_after_atomic: str | None = None,
+        allowance_after_atomic: str | None = None,
+        position_verified: bool | None = None,
     ) -> tuple[WalletHistoryRecord, ...]:
         records = list(self.load())
         for index, record in enumerate(records):
@@ -235,6 +269,18 @@ class HistoryStore:
                     actual_fee_wei if actual_fee_wei is not None
                     else record.actual_fee_wei
                 ),
+                position_after_atomic=(
+                    position_after_atomic if position_after_atomic is not None
+                    else record.position_after_atomic
+                ),
+                allowance_after_atomic=(
+                    allowance_after_atomic if allowance_after_atomic is not None
+                    else record.allowance_after_atomic
+                ),
+                position_verified=(
+                    position_verified if position_verified is not None
+                    else record.position_verified
+                ),
             )
             self._save(records)
             return tuple(records)
@@ -245,7 +291,7 @@ class HistoryStore:
             self._path,
             {
                 "schema_version": HISTORY_SCHEMA_VERSION,
-                "records": [record.to_dict() for record in records],
+                "records": [record.to_dict(include_v5=True) for record in records],
             },
         )
 
@@ -254,12 +300,19 @@ def history_record_to_map(record: WalletHistoryRecord) -> dict[str, object]:
     amount = _format_amount(record.amount_atomic, record.decimals, record.token)
     is_revoke = record.action_type == "revoke"
     is_lending = record.action_type.startswith("lending_")
-    is_withdraw = record.action_type.startswith("lending_withdraw")
+    is_withdraw = record.action_type.startswith("lending_withdraw") or record.action_type == "lending_redeem"
     is_approve = record.action_type == "lending_approve"
-    is_supply = record.action_type == "lending_supply"
+    is_supply = record.action_type in {"lending_supply", "lending_deposit"}
+    protocol_label = {
+        "aave-v3": "Aave V3", "compound-v3": "Compound III", "morpho-v1": "Morpho V1",
+    }.get(record.protocol_id or "aave-v3", "Lending")
     return {
         "actionId": record.action_id,
         "operationId": record.operation_id or record.action_id,
+        "protocolId": record.protocol_id or "",
+        "positionAfterAtomic": record.position_after_atomic or "",
+        "allowanceAfterAtomic": record.allowance_after_atomic or "",
+        "positionVerified": record.position_verified is True,
         "profileId": record.profile_id,
         "actionType": record.action_type,
         "network": record.network,
@@ -268,7 +321,7 @@ def history_record_to_map(record: WalletHistoryRecord) -> dict[str, object]:
         "sender": record.sender,
         "recipient": record.recipient,
         "shortRecipient": (
-            "Aave V3" if is_lending
+            protocol_label if is_lending
             else f"{record.recipient[:8]}…{record.recipient[-6:]}"
         ),
         "contract": record.contract or "",
@@ -289,9 +342,9 @@ def history_record_to_map(record: WalletHistoryRecord) -> dict[str, object]:
         "isRevoke": is_revoke,
         "summaryTitle": (
             "Revoked USDC" if is_revoke
-            else "Withdrawn from Aave V3" if is_withdraw
-            else "Approved Aave V3" if is_approve
-            else "Supplied to Aave V3" if is_supply
+            else f"Withdrawn from {protocol_label}" if is_withdraw
+            else f"Approved {protocol_label}" if is_approve
+            else f"Supplied to {protocol_label}" if is_supply
             else f"Sent {record.token}"
         ),
         "counterpartyLabel": "Spender" if is_revoke else "Protocol" if is_lending else "To",
@@ -317,10 +370,23 @@ def _validate_record(record: WalletHistoryRecord) -> None:
         or DECIMAL_RE.fullmatch(record.position_before_atomic) is None
     ):
         raise HistoryValidationError("History lending position is invalid")
+    for value in (
+        record.call_amount_atomic, record.position_after_atomic,
+        record.allowance_after_atomic,
+    ):
+        if value is not None and (not isinstance(value, str) or DECIMAL_RE.fullmatch(value) is None):
+            raise HistoryValidationError("History lending result is invalid")
+    if record.protocol_id is not None and record.protocol_id not in {
+        "aave-v3", "compound-v3", "morpho-v1",
+    }:
+        raise HistoryValidationError("History Lending protocol is invalid")
+    if record.position_verified is not None and type(record.position_verified) is not bool:
+        raise HistoryValidationError("History Lending verification is invalid")
     if not isinstance(record.profile_id, str) or not 1 <= len(record.profile_id) <= 128:
         raise HistoryValidationError("History profile ID is invalid")
     if record.action_type not in {
         "transfer", "revoke", "lending_approve", "lending_supply",
+        "lending_deposit", "lending_redeem",
         "lending_withdraw", "lending_withdraw_all",
     }:
         raise HistoryValidationError("History action type is invalid")

@@ -5,7 +5,7 @@ TransactionFlowShell {
     id: root
     title: "Confirm Transaction"
     subtitle: action.actionType === "lending"
-        ? "Authorize this exact Aave action once" : "Authorize this exact transfer once"
+        ? "Authorize this exact Lending action once" : "Authorize this exact transfer once"
     activeStep: 1; onBackRequested: walletController.cancelMainnetExecution()
     property var action: walletController.transferAction
     property bool isLending: action.actionType === "lending"
@@ -18,15 +18,17 @@ TransactionFlowShell {
 
     function actionTitle() {
         if (!root.isLending) return (root.action.amount || "Transfer") + " on " + (root.action.network || "")
-        if (root.action.method === "approve") return "Step 1 of 2 · Approve Aave V3"
-        if (root.action.method === "supply") return "Step 2 of 2 · Supply to Aave V3"
-        if (root.action.amountMode === "all") return "Withdraw all from Aave V3"
-        return "Withdraw from Aave V3"
+        if (root.action.method === "approve") return "Step 1 of 2 · Approve " + root.action.protocolLabel
+        if (root.action.method === "supply" || root.action.method === "deposit")
+            return "Step 2 of 2 · Supply to " + root.action.protocolLabel
+        if (root.action.amountMode === "all") return "Withdraw all from " + root.action.protocolLabel
+        return "Withdraw from " + root.action.protocolLabel
     }
     function actionSubtitle() {
         if (!root.isLending) return "To " + (root.action.recipient || "")
         if (root.action.method === "approve") return "Exact allowance · " + (root.action.amount || "USDC")
-        if (root.action.method === "supply") return "Supply " + (root.action.amount || "USDC") + " from this Wallet"
+        if (root.action.method === "supply" || root.action.method === "deposit")
+            return "Supply " + (root.action.amount || "USDC") + " from this Wallet"
         return "Receiver · " + (root.action.accountLabel || "Active Wallet")
     }
     function submit() {
@@ -41,17 +43,17 @@ TransactionFlowShell {
     SurfaceCard {
         x: 0; y: 0; width: 458; height: 168; clip: true
         Image {
-            visible: root.isLending; x: 0; y: 0; width: parent.width; height: 62
-            source: "assets/aave-banner.png"; fillMode: Image.PreserveAspectCrop
-            sourceSize: Qt.size(916, 124)
+            visible: root.isLending; x: parent.width - 168; y: 18; width: 150; height: 32
+            source: root.action.protocolLogo || ""; fillMode: Image.PreserveAspectFit
+            sourceSize: Qt.size(300, 64)
         }
         Text {
-            x: 18; y: root.isLending ? 78 : 18; width: 350
+            x: 18; y: root.isLending ? 70 : 18; width: root.isLending ? 420 : 350
             text: root.actionTitle(); color: Design.text
             font.family: Design.fontFamily; font.pixelSize: 19; font.weight: Font.DemiBold
         }
         Text {
-            x: 18; y: root.isLending ? 108 : 54; width: 350
+            x: 18; y: root.isLending ? 105 : 54; width: 350
             text: root.actionSubtitle(); color: Design.textMuted
             font.family: Design.fontFamily; font.pixelSize: 11
             elide: Text.ElideMiddle

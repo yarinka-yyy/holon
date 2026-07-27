@@ -37,7 +37,7 @@ PageState {
         text: root.operation === "initialize"
             ? "Authenticate one-time authority-state initialization. Send and Lending remain disabled."
             : root.operation === "activate"
-            ? "Authenticate enabling the reviewed Aave withdraw limits. Send remains disabled."
+            ? "Authenticate enabling the reviewed Lending routes. Send remains disabled."
             : root.operation === "deactivate"
             ? "Authenticate disabling Lending authority."
             : root.applyMode

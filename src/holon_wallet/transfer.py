@@ -255,6 +255,8 @@ class PreparedTransferAction:
     phase: str = ""
     safety_profile_digest: str = ""
     position_before_atomic: int = 0
+    call_amount_atomic: int = 0
+    protocol_id: str = ""
 
     def material_fields(self) -> dict[str, object]:
         material = {
@@ -293,6 +295,8 @@ class PreparedTransferAction:
             material["phase"] = self.phase
             material["safety_profile_digest"] = self.safety_profile_digest
             material["position_before_atomic"] = self.position_before_atomic
+            material["call_amount_atomic"] = self.call_amount_atomic
+            material["protocol_id"] = self.protocol_id
         return material
 
     @property
@@ -922,6 +926,10 @@ def encode_usdc_transfer(recipient: str, amount_atomic: int) -> str:
 
 def transfer_action_to_map(action: PreparedTransferAction) -> dict[str, object]:
     tx = action.transaction
+    protocol_id = action.protocol_id
+    protocol_label = {
+        "aave-v3": "Aave V3", "compound-v3": "Compound III", "morpho-v1": "Morpho V1",
+    }.get(protocol_id, "Lending")
     return {
         "actionId": action.action_id,
         "shortActionId": f"{action.action_id[:12]}…",
@@ -955,6 +963,13 @@ def transfer_action_to_map(action: PreparedTransferAction) -> dict[str, object]:
         "l2FeeCeilingWei": str(action.l2_fee_ceiling_wei),
         "l1FeeUpperBoundWei": str(action.l1_fee_upper_bound_wei),
         "actionType": action.action_type,
+        "protocolId": protocol_id,
+        "protocolLabel": protocol_label,
+        "protocolLogo": {
+            "aave-v3": "assets/aave-logo-white.png",
+            "compound-v3": "assets/compound-logo-white.svg",
+            "morpho-v1": "assets/morpho-logo-white.svg",
+        }.get(protocol_id, ""),
         "method": action.method,
         "amountMode": action.amount_mode,
         "actionProfileDigest": action.action_profile_digest,
@@ -964,7 +979,7 @@ def transfer_action_to_map(action: PreparedTransferAction) -> dict[str, object]:
         "phase": action.phase,
         "operationStep": (
             "Step 1 of 2" if action.method == "approve"
-            else "Step 2 of 2" if action.method == "supply" else ""
+            else "Step 2 of 2" if action.method in {"supply", "deposit"} else ""
         ),
         "maxFeeDisplay": f"≤ {_format_wei(action.max_total_fee_wei)} ETH",
         "expiresAt": action.expires_at.strftime("%H:%M:%S UTC"),

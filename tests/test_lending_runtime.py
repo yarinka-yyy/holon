@@ -112,6 +112,19 @@ def test_compare_normalizes_three_protocols_and_rewards(runtime) -> None:
         "comparison_apy_percent": "4.5",
         "not_safety_recommendation": True,
     }
+    assert selected["confirmed_total_annual_percent"] == "4.75"
+    assert selected["total_completeness"] == "BASE_AND_INCENTIVES"
+    assert result["recommendation"] == {
+        "protocol": "morpho-v1",
+        "confirmed_total_annual_percent": "4.75",
+        "missing_incentive_protocols": ["aave-v3", "compound-v3"],
+        "incomplete_comparison": True,
+        "requires_user_confirmation": True,
+    }
+    assert result["delivery"] == {
+        "fetched_at": "2027-01-15T08:00:00Z", "cache_age_seconds": 0,
+        "cache_max_age_seconds": 30, "force_refreshed": False,
+    }
     assert rpc.calls.count("aave") == 1
     assert morpho.calls == 1
 
@@ -138,6 +151,27 @@ def test_one_protocol_failure_is_partial_not_zero(runtime) -> None:
     assert failed["base_yield"] is None
     assert failed["freshness"]["state"] == "UNAVAILABLE"
     assert failed["caveats"] == ["COMPOUND_DATA_UNAVAILABLE"]
+
+
+def test_compare_reuses_thirty_second_cache_and_force_refreshes() -> None:
+    now = [NOW]
+    rpc, morpho = FakeRpc(), FakeMorpho()
+    service = LendingReadService(
+        ReadProfilesState.load(), lambda: rpc, morpho, clock=lambda: now[0],
+    )
+    first = service.compare()
+    calls = list(rpc.calls)
+    now[0] += 30
+    cached = service.compare()
+    assert rpc.calls == calls
+    assert cached["delivery"]["cache_age_seconds"] == 30
+    rpc.fail.add("compound")
+    refreshed = service.compare(True)
+    assert refreshed["status"] == "PARTIAL"
+    assert refreshed["delivery"]["force_refreshed"] is True
+    now[0] += 31
+    rpc.fail.clear()
+    assert service.compare()["status"] == "READY"
 
 
 def test_profile_failure_performs_no_network_call() -> None:

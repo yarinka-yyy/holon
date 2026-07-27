@@ -1,4 +1,4 @@
-"""Guard policy and lifecycle boundary for one exact Aave action intent."""
+"""Guard policy and lifecycle boundary for one exact Lending action intent."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ def prepare_lending_authority(service, request, owner_pid: int):
         intent = parse_lending_intent(request.payload)
     except Exception:
         return service.refusal(request, RefusalCode.REQUEST_INVALID.value, "Lending intent is invalid.")
-    profile = service.lending_actions.profile
+    profile = service.lending_actions.select(intent.profile_id)
     if profile is None:
         return service.refusal(request, "ACTION_PROFILES_UNAVAILABLE", "Lending profile is unavailable.")
     existing = service.lifecycle.ledger.find(request.action_id or "")
@@ -30,6 +30,7 @@ def prepare_lending_authority(service, request, owner_pid: int):
         )
     material = {
         "schema": "lending-authority-1", "action": intent.action,
+        "protocol_profile_id": intent.profile_id,
         "operation_id": request.action_id, "phase_action_id": request.action_id,
         "phase": "withdraw" if intent.action == "withdraw" else "approve_or_supply",
         "amount_mode": intent.amount_mode,
@@ -111,7 +112,7 @@ def prepare_lending_authority(service, request, owner_pid: int):
         owner_pid, request.action_id or "", fingerprint,
         {
             "action": intent.action, "amount_mode": intent.amount_mode,
-            "amount": intent.amount,
+            "amount": intent.amount, "protocol_profile_id": intent.profile_id,
         },
         resolved_amount,
         service.policy.policy.policy_version,
@@ -119,6 +120,7 @@ def prepare_lending_authority(service, request, owner_pid: int):
         None if rule is None else rule.max_amount_atomic,
         service.policy_snapshot.policy_revision, service.policy_snapshot.policy_digest,
         profile.digest,
+        safety_digest=profile.safety_digest,
         phase=("withdraw" if intent.action == "withdraw" else "approve_or_supply"),
     )
     if not result.ok:

@@ -27,7 +27,7 @@ class GuardClient(Protocol):
 
     def wallet_balances(self) -> ContractEnvelope: ...
 
-    def lending_markets(self) -> ContractEnvelope: ...
+    def lending_markets(self, force_refresh: bool = False) -> ContractEnvelope: ...
 
     def lending_positions(self) -> ContractEnvelope: ...
 
@@ -62,7 +62,8 @@ class UnavailableGuardClient:
     def wallet_balances(self) -> ContractEnvelope:
         raise RuntimeError("Guard is unavailable")
 
-    def lending_markets(self) -> ContractEnvelope:
+    def lending_markets(self, force_refresh: bool = False) -> ContractEnvelope:
+        del force_refresh
         raise RuntimeError("Guard is unavailable")
 
     def lending_positions(self) -> ContractEnvelope:
@@ -147,11 +148,11 @@ class GuardConnector:
             raise RuntimeError("Guard is unavailable")
         return self._client.wallet_balances()
 
-    def lending_markets(self) -> ContractEnvelope:
+    def lending_markets(self, force_refresh: bool = False) -> ContractEnvelope:
         health = self.ensure_available()
         if health.availability is not GuardAvailability.AVAILABLE:
             raise RuntimeError("Guard is unavailable")
-        return self._client.lending_markets()
+        return self._client.lending_markets(force_refresh)
 
     def lending_positions(self) -> ContractEnvelope:
         health = self.ensure_available()

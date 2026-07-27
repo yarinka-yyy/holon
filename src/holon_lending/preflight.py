@@ -13,7 +13,7 @@ from typing import Any, Callable, Mapping, Protocol
 
 from web3 import Web3
 
-from .action_profiles import ActionProfilesState, AaveActionProfile
+from .action_profiles import ActionProfilesState, AaveActionProfile, ProtocolActionProfile
 from .runtime import BASE_RPC_ENV, DEFAULT_BASE_RPC_URL
 
 PREVIEW_LIFETIME = timedelta(minutes=5)
@@ -109,6 +109,20 @@ L1_FEE_UPPER_BOUND_ABI = [{
     "inputs": [{"name": "unsignedTxSize", "type": "uint256"}],
     "outputs": [{"name": "", "type": "uint256"}],
 }]
+BOOL_ABI = lambda name: [{
+    "type": "function", "name": name, "stateMutability": "view",
+    "inputs": [], "outputs": [{"name": "", "type": "bool"}],
+}]
+ACCOUNT_UINT_ABI = lambda name: [{
+    "type": "function", "name": name, "stateMutability": "view",
+    "inputs": [{"name": "account", "type": "address"}],
+    "outputs": [{"name": "", "type": "uint256"}],
+}]
+VAULT_UINT_ABI = lambda name: [{
+    "type": "function", "name": name, "stateMutability": "view",
+    "inputs": [{"name": "value", "type": "uint256"}],
+    "outputs": [{"name": "", "type": "uint256"}],
+}]
 
 
 class LendingPreflightCode(str, Enum):
@@ -144,6 +158,8 @@ class LendingPreflightError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class LendingIntent:
+    profile_id: str
+    protocol_id: str
     action: str
     amount_mode: str
     amount: str | None
@@ -153,13 +169,20 @@ class LendingIntent:
 def parse_lending_intent(value: Mapping[str, object]) -> LendingIntent:
     expected = {
         "module_id": "lending", "module_version": "1",
-        "protocol_profile_id": "aave-v3-base-usdc",
         "protocol_profile_version": "1", "network": "base", "asset": "usdc",
         "beneficiary_mode": "active_wallet_account",
     }
-    if set(value) != {*expected, "action", "amount_mode", "amount"}:
+    if set(value) != {*expected, "protocol_profile_id", "action", "amount_mode", "amount"}:
         raise LendingPreflightError(LendingPreflightCode.REQUEST_INVALID)
     if any(value.get(name) != expected_value for name, expected_value in expected.items()):
+        raise LendingPreflightError(LendingPreflightCode.REQUEST_INVALID)
+    profiles = {
+        "aave-v3-base-usdc": "aave-v3",
+        "compound-v3-base-usdc": "compound-v3",
+        "morpho-v1-gauntlet-usdc-prime": "morpho-v1",
+    }
+    profile_id = value.get("protocol_profile_id")
+    if profile_id not in profiles:
         raise LendingPreflightError(LendingPreflightCode.REQUEST_INVALID)
     action, mode, amount = value.get("action"), value.get("amount_mode"), value.get("amount")
     if action not in {"supply", "withdraw"} or mode not in {"exact", "all"}:
@@ -167,7 +190,7 @@ def parse_lending_intent(value: Mapping[str, object]) -> LendingIntent:
     if mode == "all":
         if amount is not None:
             raise LendingPreflightError(LendingPreflightCode.REQUEST_INVALID)
-        return LendingIntent(action, mode, None, None)
+        return LendingIntent(str(profile_id), profiles[str(profile_id)], action, mode, None, None)
     if not isinstance(amount, str) or len(amount) > 80 or AMOUNT_RE.fullmatch(amount) is None:
         raise LendingPreflightError(LendingPreflightCode.REQUEST_INVALID)
     normalized = amount.replace(",", ".")
@@ -180,7 +203,7 @@ def parse_lending_intent(value: Mapping[str, object]) -> LendingIntent:
     if atomic <= 0 or atomic > MAX_UINT256:
         raise LendingPreflightError(LendingPreflightCode.REQUEST_INVALID)
     display = format_atomic(atomic)
-    return LendingIntent(action, mode, display, atomic)
+    return LendingIntent(str(profile_id), profiles[str(profile_id)], action, mode, display, atomic)
 
 
 class AavePreflightRpc(Protocol):
@@ -202,6 +225,11 @@ class AavePreflightRpc(Protocol):
     def estimate_gas(self, transaction: Mapping[str, object]) -> int: ...
     def simulate(self, transaction: Mapping[str, object]) -> bytes: ...
     def l1_fee_upper_bound(self, transaction_size: int, block: int) -> int: ...
+    def protocol_asset(self, target: str, block: int) -> str: ...
+    def protocol_paused(self, target: str, action: str, block: int) -> bool: ...
+    def compound_borrow_balance(self, target: str, account: str, block: int) -> int: ...
+    def vault_limit(self, target: str, method: str, account: str, block: int) -> int: ...
+    def vault_convert(self, target: str, method: str, amount: int, block: int) -> int: ...
 
 
 class Web3AavePreflightRpc:
@@ -282,6 +310,40 @@ class Web3AavePreflightRpc:
             transaction_size,
         ).call(block_identifier=block))
 
+    def protocol_asset(self, target: str, block: int) -> str:
+        for name in ("baseToken", "asset"):
+            try:
+                return Web3.to_checksum_address(
+                    getattr(self._contract(target, ADDRESS_ABI(name)).functions, name)().call(
+                        block_identifier=block,
+                    ),
+                )
+            except Exception:
+                continue
+        raise LendingPreflightError(LendingPreflightCode.IDENTITY_MISMATCH)
+
+    def protocol_paused(self, target: str, action: str, block: int) -> bool:
+        name = "isSupplyPaused" if action == "supply" else "isWithdrawPaused"
+        return bool(getattr(self._contract(target, BOOL_ABI(name)).functions, name)().call(
+            block_identifier=block,
+        ))
+
+    def compound_borrow_balance(self, target: str, account: str, block: int) -> int:
+        name = "borrowBalanceOf"
+        return int(getattr(
+            self._contract(target, ACCOUNT_UINT_ABI(name)).functions, name,
+        )(account).call(block_identifier=block))
+
+    def vault_limit(self, target: str, method: str, account: str, block: int) -> int:
+        return int(getattr(
+            self._contract(target, ACCOUNT_UINT_ABI(method)).functions, method,
+        )(account).call(block_identifier=block))
+
+    def vault_convert(self, target: str, method: str, amount: int, block: int) -> int:
+        return int(getattr(
+            self._contract(target, VAULT_UINT_ABI(method)).functions, method,
+        )(amount).call(block_identifier=block))
+
 
 RpcFactory = Callable[[], AavePreflightRpc]
 
@@ -304,10 +366,12 @@ class LendingPreflightService:
     ) -> dict[str, object]:
         if self.profiles.profile is None:
             raise LendingPreflightError(self.profiles.error_code or LendingPreflightCode.PROFILE_UNAVAILABLE.value)
-        profile = self.profiles.profile
+        intent = parse_lending_intent(raw_intent)
+        profile = self.profiles.select(intent.profile_id)
+        if profile is None:
+            raise LendingPreflightError(LendingPreflightCode.PROFILE_UNAVAILABLE)
         if expected_profile_digest != profile.digest:
             raise LendingPreflightError(LendingPreflightCode.PROFILE_MISMATCH)
-        intent = parse_lending_intent(raw_intent)
         label, sender = account.get("label"), account.get("address")
         if (
             not isinstance(label, str) or not label or len(label) > 64
@@ -315,7 +379,12 @@ class LendingPreflightService:
         ):
             raise LendingPreflightError(LendingPreflightCode.ACCOUNT_UNAVAILABLE)
         try:
-            return self._prepare(
+            if isinstance(profile, AaveActionProfile):
+                return self._prepare(
+                    profile, intent, label, sender,
+                    frozen_amount_atomic=frozen_amount_atomic,
+                )
+            return self._prepare_protocol(
                 profile, intent, label, sender,
                 frozen_amount_atomic=frozen_amount_atomic,
             )
@@ -453,6 +522,7 @@ class LendingPreflightService:
             "network": {"network": "base", "chain_id": profile.chain_id},
             "asset": {"asset": "USDC", "address": profile.asset, "decimals": profile.decimals},
             "amount_mode": intent.amount_mode, "amount_atomic": str(expected_amount),
+            "call_amount_atomic": str(call_amount),
             "display_amount": f"{format_atomic(expected_amount)} USDC",
             "target": target, "method": next_action,
             "calldata_hash": material["calldata_hash"], "native_value_wei": "0",
@@ -468,6 +538,166 @@ class LendingPreflightService:
             "code": "LENDING_ACTION_PREVIEW_READY",
             "message": "Preview ready. Execution requires a new authority action and fresh preflight.",
             "position_before_atomic": str(position_before),
+        }
+
+    def _prepare_protocol(
+        self, profile: ProtocolActionProfile, intent: LendingIntent,
+        label: str, sender: str, *, frozen_amount_atomic: int | None = None,
+    ) -> dict[str, object]:
+        rpc = self._rpc_factory()
+        block, block_time, base_fee = rpc.begin()
+        now = self._clock().astimezone(UTC).replace(microsecond=0)
+        age = int(now.timestamp()) - block_time
+        if block <= 0 or age < -FUTURE_TOLERANCE_SECONDS or age > BLOCK_MAX_AGE_SECONDS:
+            raise LendingPreflightError("LENDING_BLOCK_STALE")
+        if (
+            not rpc.has_code(profile.asset, block) or not rpc.has_code(profile.target, block)
+            or rpc.token_decimals(profile.asset, block) != profile.decimals
+            or rpc.protocol_asset(profile.target, block) != profile.asset
+        ):
+            raise LendingPreflightError("LENDING_IDENTITY_MISMATCH")
+        checks = ["ACTION_PROFILE_VERIFIED", "PROTOCOL_IDENTITY_VERIFIED"]
+        if profile.protocol_id == "compound-v3":
+            if rpc.protocol_paused(profile.target, intent.action, block):
+                raise LendingPreflightError("PROTOCOL_ACTION_PAUSED")
+            if rpc.compound_borrow_balance(profile.target, sender, block) != 0:
+                raise LendingPreflightError("COMPOUND_ACCOUNT_HAS_BORROW")
+            checks.extend(["COMPOUND_ACTION_AVAILABLE", "COMPOUND_BORROW_ZERO"])
+            position = rpc.token_balance(profile.position_token, sender, block)
+        else:
+            dead = "0x000000000000000000000000000000000000dEaD"
+            if rpc.token_balance(profile.position_token, dead, block) < 10**12:
+                raise LendingPreflightError("MORPHO_INFLATION_PROTECTION_MISSING")
+            shares = rpc.token_balance(profile.position_token, sender, block)
+            position = rpc.vault_convert(
+                profile.target, "convertToAssets", shares, block,
+            )
+            checks.extend(["MORPHO_VAULT_AVAILABLE", "MORPHO_INFLATION_PROTECTION_VERIFIED"])
+
+        expected_amount = intent.amount_atomic
+        call_amount = intent.amount_atomic
+        if intent.action == "supply":
+            balance = rpc.token_balance(profile.asset, sender, block)
+            if intent.amount_mode == "all":
+                expected_amount = frozen_amount_atomic if frozen_amount_atomic is not None else balance
+                call_amount = expected_amount
+            if call_amount is None or call_amount <= 0 or balance < call_amount:
+                raise LendingPreflightError(LendingPreflightCode.INSUFFICIENT_USDC)
+            if profile.protocol_id == "morpho-v1" and rpc.vault_limit(
+                profile.target, "maxDeposit", sender, block,
+            ) < call_amount:
+                raise LendingPreflightError("MORPHO_DEPOSIT_UNAVAILABLE")
+            allowance = rpc.allowance(profile.asset, sender, profile.spender, block)
+            if allowance == 0:
+                next_action, target = "approve", profile.asset
+                calldata = encode_approve(profile.spender, call_amount)
+                checks.extend(["USDC_BALANCE_AVAILABLE", "ALLOWANCE_ZERO"])
+            elif allowance == call_amount:
+                target = profile.target
+                if profile.protocol_id == "compound-v3":
+                    next_action = "supply"
+                    calldata = encode_compound_supply(profile.asset, call_amount)
+                else:
+                    next_action = "deposit"
+                    calldata = encode_morpho_deposit(call_amount, sender)
+                checks.extend(["USDC_BALANCE_AVAILABLE", "ALLOWANCE_EXACT"])
+            else:
+                raise LendingPreflightError(LendingPreflightCode.UNEXPECTED_ALLOWANCE)
+        else:
+            expected_amount = position if intent.amount_mode == "all" else intent.amount_atomic
+            if expected_amount is None or expected_amount <= 0 or position < expected_amount:
+                raise LendingPreflightError("INSUFFICIENT_LENDING_POSITION")
+            target = profile.target
+            if profile.protocol_id == "compound-v3":
+                liquidity = rpc.token_balance(profile.asset, profile.target, block)
+                if liquidity < expected_amount:
+                    raise LendingPreflightError(LendingPreflightCode.INSUFFICIENT_LIQUIDITY)
+                next_action = "withdraw"
+                call_amount = MAX_UINT256 if intent.amount_mode == "all" else expected_amount
+                calldata = encode_compound_withdraw(profile.asset, call_amount)
+            else:
+                available = rpc.vault_limit(profile.target, "maxWithdraw", sender, block)
+                if available < expected_amount:
+                    raise LendingPreflightError(LendingPreflightCode.INSUFFICIENT_LIQUIDITY)
+                if intent.amount_mode == "all":
+                    shares = rpc.token_balance(profile.position_token, sender, block)
+                    if shares <= 0:
+                        raise LendingPreflightError("INSUFFICIENT_LENDING_POSITION")
+                    next_action, call_amount = "redeem", shares
+                    calldata = encode_morpho_redeem(shares, sender)
+                else:
+                    next_action, call_amount = "withdraw", expected_amount
+                    calldata = encode_morpho_withdraw(expected_amount, sender)
+            checks.append("LENDING_POSITION_AVAILABLE")
+
+        nonce = rpc.pending_nonce(sender)
+        priority_fee = rpc.priority_fee()
+        max_fee = 2 * base_fee + priority_fee
+        transaction: dict[str, object] = {
+            "from": sender, "to": target, "value": 0, "data": calldata,
+            "nonce": nonce, "type": 2, "chainId": profile.chain_id,
+            "maxFeePerGas": max_fee, "maxPriorityFeePerGas": priority_fee,
+        }
+        try:
+            gas = rpc.estimate_gas(transaction)
+            l1_fee = rpc.l1_fee_upper_bound(LENDING_TRANSACTION_SIZE_UPPER_BOUND, block)
+        except Exception as exc:
+            raise LendingPreflightError(LendingPreflightCode.GAS_ESTIMATE_FAILED) from exc
+        if gas <= 0 or max_fee <= 0 or l1_fee <= 0:
+            raise LendingPreflightError(LendingPreflightCode.GAS_ESTIMATE_FAILED)
+        l2_fee = gas * max_fee
+        total_fee = l2_fee + l1_fee
+        if rpc.native_balance(sender, block) < total_fee:
+            raise LendingPreflightError(LendingPreflightCode.INSUFFICIENT_ETH)
+        transaction["gas"] = gas
+        try:
+            rpc.simulate(transaction)
+        except Exception as exc:
+            raise LendingPreflightError(LendingPreflightCode.SIMULATION_FAILED) from exc
+        checks.extend(["FEE_BALANCE_AVAILABLE", "SIMULATION_SUCCEEDED"])
+        expires = now + PREVIEW_LIFETIME
+        material = {
+            "schema_version": "2", "profile_id": profile.profile_id,
+            "profile_version": profile.profile_version, "profile_digest": profile.digest,
+            "account": sender, "action": intent.action, "next_action": next_action,
+            "amount_mode": intent.amount_mode, "amount_atomic": str(expected_amount),
+            "call_amount_atomic": str(call_amount), "target": target,
+            "calldata_hash": calldata_hash(calldata), "native_value_wei": "0",
+            "nonce": str(nonce), "gas": str(gas), "max_fee_per_gas_wei": str(max_fee),
+            "max_priority_fee_per_gas_wei": str(priority_fee),
+            "l2_fee_ceiling_wei": str(l2_fee), "l1_fee_upper_bound_wei": str(l1_fee),
+            "max_total_fee_wei": str(total_fee), "block_number": str(block),
+            "observed_at": timestamp(datetime.fromtimestamp(block_time, UTC)),
+            "created_at": timestamp(now), "expires_at": timestamp(expires),
+        }
+        digest = hashlib.sha256(
+            json.dumps(material, separators=(",", ":"), sort_keys=True).encode(),
+        ).hexdigest()
+        return {
+            "status": "PREVIEW_READY", "authority_available": False,
+            "execution_available": False,
+            "account": {"label": label, "address": sender},
+            "requested_action": intent.action, "next_action": next_action,
+            "protocol": profile.protocol_id, "profile_id": profile.profile_id,
+            "profile_version": profile.profile_version, "profile_digest": profile.digest,
+            "network": {"network": "base", "chain_id": profile.chain_id},
+            "asset": {"asset": "USDC", "address": profile.asset, "decimals": 6},
+            "amount_mode": intent.amount_mode, "amount_atomic": str(expected_amount),
+            "call_amount_atomic": str(call_amount),
+            "display_amount": f"{format_atomic(expected_amount)} USDC",
+            "target": target, "method": next_action,
+            "calldata_hash": material["calldata_hash"], "native_value_wei": "0",
+            "nonce": str(nonce), "gas": str(gas),
+            "max_fee_per_gas_wei": str(max_fee),
+            "max_priority_fee_per_gas_wei": str(priority_fee),
+            "l2_fee_ceiling_wei": str(l2_fee), "l1_fee_upper_bound_wei": str(l1_fee),
+            "max_total_fee_wei": str(total_fee), "block_number": str(block),
+            "observed_at": material["observed_at"], "expires_at": material["expires_at"],
+            "preview_digest": digest, "checks": checks,
+            "caveats": ["FEE_NOT_POLICY_AUTHORIZED", "PREVIEW_ONLY"],
+            "code": "LENDING_ACTION_PREVIEW_READY",
+            "message": "Preview ready. Execution requires a new authority action and fresh preflight.",
+            "position_before_atomic": str(position),
         }
 
     def _default_rpc(self) -> AavePreflightRpc:
@@ -487,6 +717,26 @@ def encode_supply(asset: str, amount: int, beneficiary: str) -> str:
 
 def encode_withdraw(asset: str, amount: int, beneficiary: str) -> str:
     return "0x69328dec" + _address_word(asset) + _uint_word(amount) + _address_word(beneficiary)
+
+
+def encode_compound_supply(asset: str, amount: int) -> str:
+    return "0xf2b9fdb8" + _address_word(asset) + _uint_word(amount)
+
+
+def encode_compound_withdraw(asset: str, amount: int) -> str:
+    return "0xf3fef3a3" + _address_word(asset) + _uint_word(amount)
+
+
+def encode_morpho_deposit(amount: int, receiver: str) -> str:
+    return "0x6e553f65" + _uint_word(amount) + _address_word(receiver)
+
+
+def encode_morpho_withdraw(amount: int, account: str) -> str:
+    return "0xb460af94" + _uint_word(amount) + _address_word(account) + _address_word(account)
+
+
+def encode_morpho_redeem(shares: int, account: str) -> str:
+    return "0xba087652" + _uint_word(shares) + _address_word(account) + _address_word(account)
 
 
 def _address_word(value: str) -> str:
@@ -519,7 +769,8 @@ _UNAVAILABLE_CODES = frozenset({
     "ACTION_PROFILES_CORRUPT", "ACTION_PROFILES_INCOMPATIBLE",
     "ACTION_PROFILES_INTEGRITY_FAILED", "ACTION_PROFILES_MISSING",
     "ACTION_PROFILES_UNAVAILABLE", "ACTION_PROFILE_MISMATCH", "ACCOUNT_CHANGED", "AAVE_BLOCK_STALE",
-    "AAVE_IDENTITY_MISMATCH", "BASE_RPC_UNAVAILABLE", "WALLET_ACCOUNT_UNAVAILABLE",
+    "AAVE_IDENTITY_MISMATCH", "LENDING_BLOCK_STALE", "LENDING_IDENTITY_MISMATCH",
+    "BASE_RPC_UNAVAILABLE", "WALLET_ACCOUNT_UNAVAILABLE",
     "WALLET_UNAVAILABLE", "WRONG_CHAIN",
 })
 
@@ -528,17 +779,24 @@ def unavailable_preview(
     reason: str, *, requested_action: str | None = None,
     amount_mode: str | None = None, account: Mapping[str, object] | None = None,
     profile_digest: str | None = None,
+    profile_id: str = "aave-v3-base-usdc",
 ) -> dict[str, object]:
     status = "UNAVAILABLE" if reason in _UNAVAILABLE_CODES else "REFUSED"
+    protocol = {
+        "aave-v3-base-usdc": "aave-v3",
+        "compound-v3-base-usdc": "compound-v3",
+        "morpho-v1-gauntlet-usdc-prime": "morpho-v1",
+    }.get(profile_id, "aave-v3")
     return {
         "status": status, "authority_available": False,
         "execution_available": False, "account": None if account is None else dict(account),
         "requested_action": requested_action, "next_action": None,
-        "protocol": "aave-v3", "profile_id": "aave-v3-base-usdc",
+        "protocol": protocol, "profile_id": profile_id,
         "profile_version": "1", "profile_digest": profile_digest,
         "network": {"network": "base", "chain_id": 8453},
         "asset": {"asset": "USDC", "address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", "decimals": 6},
-        "amount_mode": amount_mode, "amount_atomic": None, "display_amount": None,
+        "amount_mode": amount_mode, "amount_atomic": None, "call_amount_atomic": None,
+        "display_amount": None,
         "target": None, "method": None, "calldata_hash": None,
         "native_value_wei": "0", "nonce": None, "gas": None,
         "max_fee_per_gas_wei": None, "max_priority_fee_per_gas_wei": None,

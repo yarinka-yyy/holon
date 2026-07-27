@@ -31,7 +31,8 @@ from holon_policy import (
 from holon_lending import AAVE_MAX_TOTAL_FEE_WEI, ActionProfilesState
 from holon_lending.preflight import (
     BASE_GAS_PRICE_ORACLE, MAX_UINT256, Web3AavePreflightRpc, encode_approve,
-    encode_supply, encode_withdraw,
+    encode_compound_supply, encode_compound_withdraw, encode_morpho_deposit,
+    encode_morpho_redeem, encode_morpho_withdraw, encode_supply, encode_withdraw,
 )
 
 from .approval import (
@@ -273,6 +274,7 @@ class MainnetBroadcastPolicy:
         self, action: str, amount_mode: str, amount_atomic: int | None,
         action_profile_digest: str,
         policy_version: str | None = None,
+        protocol_profile_id: str = "aave-v3-base-usdc",
     ) -> MainnetTransferCode | None:
         """Reject a semantic Lending intent before Wallet performs any RPC."""
         if not self.refresh() or self.shared_engine is None:
@@ -283,7 +285,7 @@ class MainnetBroadcastPolicy:
         ):
             return MainnetTransferCode.POLICY_VERSION_MISMATCH
         decision, _rule = self.shared_engine.evaluate_lending_intent({
-            "module_id": "lending", "protocol_profile_id": "aave-v3-base-usdc",
+            "module_id": "lending", "protocol_profile_id": protocol_profile_id,
             "network": "base", "asset": "usdc", "action": action,
             "amount_mode": amount_mode, "amount_atomic": amount_atomic,
         }, action_profile_digest)
@@ -324,10 +326,15 @@ class MainnetBroadcastPolicy:
         if self.shared_engine is not None:
             if action.action_type == "lending":
                 requested_action = (
-                    "withdraw" if action.method == "withdraw" else "supply"
+                    "withdraw" if action.method in {"withdraw", "redeem"} else "supply"
                 )
+                selected = ActionProfilesState.load().select_by_digest(
+                    action.action_profile_digest,
+                )
+                if selected is None:
+                    return MainnetTransferCode.POLICY_UNAVAILABLE
                 decision, rule = self.shared_engine.evaluate_lending_intent({
-                    "module_id": "lending", "protocol_profile_id": "aave-v3-base-usdc",
+                    "module_id": "lending", "protocol_profile_id": selected.profile_id,
                     "network": "base", "asset": "usdc", "action": requested_action,
                     "amount_mode": action.amount_mode,
                     "amount_atomic": action.amount_atomic,
@@ -483,6 +490,11 @@ class MainnetRpc(Protocol):
         self, token: str, owner: str, spender: str, block: int,
     ) -> int: ...
     def lending_simulate(self, transaction: Mapping[str, object]) -> bytes: ...
+    def lending_protocol_asset(self, target: str, block: int) -> str: ...
+    def lending_protocol_paused(self, target: str, action: str, block: int) -> bool: ...
+    def lending_compound_borrow(self, target: str, account: str, block: int) -> int: ...
+    def lending_vault_limit(self, target: str, method: str, account: str, block: int) -> int: ...
+    def lending_vault_convert(self, target: str, method: str, amount: int, block: int) -> int: ...
 
     def transaction(self, transaction_hash: str) -> Mapping[str, object] | None: ...
 
@@ -593,6 +605,21 @@ class Web3MainnetRpc:
 
     def lending_simulate(self, transaction: Mapping[str, object]) -> bytes:
         return self._aave.simulate(transaction)
+
+    def lending_protocol_asset(self, target: str, block: int) -> str:
+        return self._aave.protocol_asset(target, block)
+
+    def lending_protocol_paused(self, target: str, action: str, block: int) -> bool:
+        return self._aave.protocol_paused(target, action, block)
+
+    def lending_compound_borrow(self, target: str, account: str, block: int) -> int:
+        return self._aave.compound_borrow_balance(target, account, block)
+
+    def lending_vault_limit(self, target: str, method: str, account: str, block: int) -> int:
+        return self._aave.vault_limit(target, method, account, block)
+
+    def lending_vault_convert(self, target: str, method: str, amount: int, block: int) -> int:
+        return self._aave.vault_convert(target, method, amount, block)
 
     def transaction(self, transaction_hash: str) -> Mapping[str, object] | None:
         try:
@@ -855,6 +882,53 @@ class MainnetTransferExecutor:
         )
 
 
+def _lending_post_state(
+    rpc: MainnetRpc, record: WalletHistoryRecord, block: int,
+) -> tuple[int, int, bool] | None:
+    profile = next(
+        (
+            item for item in ActionProfilesState.load().profiles
+            if item.protocol_id == (record.protocol_id or "aave-v3")
+        ),
+        None,
+    )
+    if profile is None:
+        return None
+    try:
+        allowance = int(rpc.lending_allowance(
+            profile.asset, record.sender, profile.spender, block,
+        ))
+        if profile.protocol_id == "morpho-v1":
+            shares = int(rpc.lending_token_balance(
+                profile.position_token, record.sender, block,
+            ))
+            position = int(rpc.lending_vault_convert(
+                profile.target, "convertToAssets", shares, block,
+            ))
+        else:
+            shares = -1
+            position = int(rpc.lending_token_balance(
+                profile.position_token, record.sender, block,
+            ))
+        amount = int(record.amount_atomic)
+        before = int(record.position_before_atomic or "0")
+        if record.action_type == "lending_approve":
+            verified = allowance == amount
+        elif record.action_type in {"lending_supply", "lending_deposit"}:
+            verified = allowance == 0 and position >= before + amount - 1
+        elif record.action_type in {"lending_withdraw_all", "lending_redeem"}:
+            verified = allowance == 0 and (
+                shares == 0 if record.action_type == "lending_redeem" else position <= 1
+            )
+        elif record.action_type == "lending_withdraw":
+            verified = allowance == 0 and position + amount <= before + 10
+        else:
+            return None
+        return position, allowance, verified
+    except Exception:
+        return None
+
+
 class BroadcastReceiptTracker:
     """Checks public transaction state without signing or rebroadcasting."""
 
@@ -908,6 +982,9 @@ class BroadcastReceiptTracker:
             return self._result(record, record.status, True)
         observed = record.status
         actual_fee_wei: str | None = None
+        position_after_atomic: str | None = None
+        allowance_after_atomic: str | None = None
+        position_verified: bool | None = None
         try:
             rpc = self._rpc_factory(endpoint)
             if rpc.chain_id() != record.chain_id:
@@ -926,21 +1003,26 @@ class BroadcastReceiptTracker:
                 observed = _receipt_status(receipt, record, transaction)
                 if (
                     observed is HistoryStatus.CONFIRMED
-                    and record.action_type == "lending_supply"
+                    and record.action_type.startswith("lending_")
+                    and (
+                        record.protocol_id is not None
+                        or record.action_type == "lending_supply"
+                    )
                 ):
-                    profile = ActionProfilesState.load().profile
                     block = receipt.get("blockNumber")
-                    if (
-                        profile is None or type(block) is not int
-                        or rpc.lending_allowance(
-                            profile.asset, record.sender, profile.pool, block,
-                        ) != 0
-                        or record.position_before_atomic is None
-                        or rpc.lending_token_balance(
-                            profile.a_token, record.sender, block,
-                        ) < int(record.position_before_atomic) + int(record.amount_atomic) - 1
-                    ):
+                    post_state = (
+                        _lending_post_state(rpc, record, block)
+                        if type(block) is int else None
+                    )
+                    if post_state is None:
                         observed = HistoryStatus.UNKNOWN
+                    else:
+                        position_after, allowance_after, verified = post_state
+                        position_after_atomic = str(position_after)
+                        allowance_after_atomic = str(allowance_after)
+                        position_verified = verified
+                        if not verified:
+                            observed = HistoryStatus.UNKNOWN
                 if observed in {HistoryStatus.CONFIRMED, HistoryStatus.FAILED}:
                     actual_fee_wei = _receipt_fee_wei(receipt)
             elif record.status is HistoryStatus.PENDING:
@@ -970,6 +1052,9 @@ class BroadcastReceiptTracker:
                 _timestamp(self._clock()),
                 record.transaction_hash,
                 actual_fee_wei,
+                position_after_atomic,
+                allowance_after_atomic,
+                position_verified,
             )
             current = next(item for item in updated if item.action_id == record.action_id)
             return self._result(current, observed, True)
@@ -1109,11 +1194,113 @@ def _final_revalidation(rpc: MainnetRpc, action: PreparedTransactionAction) -> b
     )
 
 
+def _final_protocol_revalidation(
+    rpc: MainnetRpc, action: PreparedTransferAction, profile,
+) -> bool:
+    tx = action.transaction
+    call_amount = action.call_amount_atomic or action.amount_atomic
+    try:
+        block, base_fee = rpc.latest_block()
+        if (
+            not rpc.lending_has_code(profile.asset, block)
+            or not rpc.lending_has_code(profile.target, block)
+            or rpc.lending_token_decimals(profile.asset, block) != profile.decimals
+            or rpc.lending_protocol_asset(profile.target, block) != profile.asset
+        ):
+            return False
+        balance = int(rpc.lending_token_balance(profile.asset, action.sender, block))
+        allowance = int(rpc.lending_allowance(
+            profile.asset, action.sender, profile.spender, block,
+        ))
+        if profile.protocol_id == "compound-v3":
+            requested = "withdraw" if action.method == "withdraw" else "supply"
+            if (
+                rpc.lending_protocol_paused(profile.target, requested, block)
+                or rpc.lending_compound_borrow(profile.target, action.sender, block) != 0
+            ):
+                return False
+            position = int(rpc.lending_token_balance(profile.position_token, action.sender, block))
+            liquidity = int(rpc.lending_token_balance(profile.asset, profile.target, block))
+        else:
+            dead = "0x000000000000000000000000000000000000dEaD"
+            if rpc.lending_token_balance(profile.position_token, dead, block) < 10**12:
+                return False
+            shares = int(rpc.lending_token_balance(
+                profile.position_token, action.sender, block,
+            ))
+            position = int(rpc.lending_vault_convert(
+                profile.target, "convertToAssets", shares, block,
+            ))
+            liquidity = int(rpc.lending_vault_limit(
+                profile.target, "maxWithdraw", action.sender, block,
+            ))
+        if action.method == "approve":
+            expected_data = encode_approve(profile.spender, action.amount_atomic)
+            state_ok = allowance == 0 and balance >= action.amount_atomic
+        elif action.method == "supply":
+            expected_data = encode_compound_supply(profile.asset, action.amount_atomic)
+            state_ok = allowance == action.amount_atomic and balance >= action.amount_atomic
+        elif action.method == "deposit":
+            expected_data = encode_morpho_deposit(action.amount_atomic, action.sender)
+            state_ok = (
+                allowance == action.amount_atomic and balance >= action.amount_atomic
+                and rpc.lending_vault_limit(
+                    profile.target, "maxDeposit", action.sender, block,
+                ) >= action.amount_atomic
+            )
+        elif action.method == "withdraw" and profile.protocol_id == "compound-v3":
+            expected_data = encode_compound_withdraw(profile.asset, call_amount)
+            state_ok = liquidity >= action.amount_atomic and position >= action.amount_atomic and (
+                action.amount_mode != "all" or position == action.amount_atomic
+            )
+        elif action.method == "withdraw":
+            expected_data = encode_morpho_withdraw(action.amount_atomic, action.sender)
+            state_ok = position >= action.amount_atomic and liquidity >= action.amount_atomic
+        elif action.method == "redeem":
+            expected_data = encode_morpho_redeem(call_amount, action.sender)
+            state_ok = (
+                shares == call_amount and position >= action.amount_atomic
+                and liquidity >= action.amount_atomic
+            )
+        else:
+            return False
+        estimate = int(rpc.estimate_gas({
+            "from": action.sender, "to": tx.to, "value": 0, "data": tx.data,
+            "nonce": tx.nonce, "type": 2, "chainId": tx.chain_id,
+            "maxFeePerGas": tx.max_fee_per_gas,
+            "maxPriorityFeePerGas": tx.max_priority_fee_per_gas,
+        }))
+        priority = int(rpc.max_priority_fee_per_gas())
+        native = int(rpc.native_balance(action.sender))
+        rpc.lending_simulate({
+            "from": action.sender, "to": tx.to, "value": 0, "data": tx.data,
+            "nonce": tx.nonce, "type": 2, "chainId": tx.chain_id,
+            "maxFeePerGas": tx.max_fee_per_gas,
+            "maxPriorityFeePerGas": tx.max_priority_fee_per_gas, "gas": tx.gas,
+        })
+    except Exception:
+        return False
+    expected_target = profile.asset if action.method == "approve" else profile.target
+    return (
+        state_ok and rpc.chain_id() == profile.chain_id and block >= action.block_number
+        and tx.to.lower() == expected_target.lower()
+    ) and (
+        tx.data == expected_data and rpc.pending_nonce(action.sender) == tx.nonce
+        and 0 < estimate <= tx.gas and 0 <= priority <= tx.max_priority_fee_per_gas
+        and 0 < 2 * int(base_fee) + priority <= tx.max_fee_per_gas
+        and native >= action.max_total_fee_wei
+    )
+
+
 def _final_lending_revalidation(rpc: MainnetRpc, action: PreparedTransferAction) -> bool:
     profiles = ActionProfilesState.load()
-    profile = profiles.profile
-    if profile is None or profile.digest != action.action_profile_digest:
+    profile = profiles.select_by_digest(action.action_profile_digest)
+    if profile is None:
         return False
+    if action.protocol_id != profile.protocol_id:
+        return False
+    if profile.protocol_id != "aave-v3":
+        return _final_protocol_revalidation(rpc, action, profile)
     tx = action.transaction
     try:
         block, base_fee = rpc.latest_block()
@@ -1408,22 +1595,32 @@ def _public_transaction_matches(
         elif record.action_type == "lending_approve":
             expected_data = encode_approve(record.recipient, int(record.amount_atomic))
             expected_value = 0
-        elif record.action_type == "lending_supply":
-            profile = ActionProfilesState.load().profile
+        elif record.action_type.startswith("lending_"):
+            profile = next((
+                item for item in ActionProfilesState.load().profiles
+                if item.protocol_id == (record.protocol_id or "aave-v3")
+            ), None)
             if profile is None:
                 return False
-            expected_data = encode_supply(profile.asset, int(record.amount_atomic), record.sender)
-            expected_value = 0
-        elif record.action_type in {"lending_withdraw", "lending_withdraw_all"}:
-            profile = ActionProfilesState.load().profile
-            if profile is None:
-                return False
-            amount = (
-                MAX_UINT256
-                if record.action_type == "lending_withdraw_all"
-                else int(record.amount_atomic)
+            amount = int(record.amount_atomic)
+            call_amount = int(
+                record.call_amount_atomic
+                or (str(MAX_UINT256) if record.action_type == "lending_withdraw_all" else record.amount_atomic)
             )
-            expected_data = encode_withdraw(profile.asset, amount, record.sender)
+            if record.action_type == "lending_supply" and profile.protocol_id == "aave-v3":
+                expected_data = encode_supply(profile.asset, amount, record.sender)
+            elif record.action_type == "lending_supply":
+                expected_data = encode_compound_supply(profile.asset, amount)
+            elif record.action_type == "lending_deposit":
+                expected_data = encode_morpho_deposit(amount, record.sender)
+            elif record.action_type in {"lending_withdraw", "lending_withdraw_all"} and profile.protocol_id == "aave-v3":
+                expected_data = encode_withdraw(profile.asset, call_amount, record.sender)
+            elif record.action_type in {"lending_withdraw", "lending_withdraw_all"}:
+                expected_data = encode_compound_withdraw(profile.asset, call_amount)
+            elif record.action_type == "lending_redeem":
+                expected_data = encode_morpho_redeem(call_amount, record.sender)
+            else:
+                return False
             expected_value = 0
         elif record.token == "ETH":
             expected_data = "0x"
@@ -1571,36 +1768,51 @@ def _result_text(
         ),
     }
     title, message = values[code]
-    if action_type.startswith("lending_"):
-        action = action_type.removeprefix("lending_")
+    if action_type.startswith("lending_") or action_type.startswith("lending:"):
+        if action_type.startswith("lending:"):
+            _prefix, protocol_id, action = action_type.split(":", 2)
+        else:
+            protocol_id, action = "aave-v3", action_type.removeprefix("lending_")
+        protocol = {
+            "aave-v3": "Aave V3", "compound-v3": "Compound III", "morpho-v1": "Morpho V1",
+        }.get(protocol_id, "Lending")
+        approval_protocol = "Aave" if protocol_id == "aave-v3" else protocol
         label = {
-            "approve": "Aave approval",
-            "supply": "Aave supply",
-            "withdraw": "Aave withdrawal",
-            "withdraw_all": "Aave withdrawal",
-        }.get(action, "Aave action")
+            "approve": f"{protocol} approval",
+            "supply": f"{protocol} supply", "deposit": f"{protocol} supply",
+            "withdraw": f"{protocol} withdrawal", "withdraw_all": f"{protocol} withdrawal",
+            "redeem": f"{protocol} withdrawal",
+        }.get(action, f"{protocol} action")
         replacements = {
             MainnetTransferCode.CONFIRMED: {
                 "approve": (
-                    "Aave approval confirmed",
+                    f"{approval_protocol} approval confirmed",
                     "Approval confirmed · Preparing the separate Supply Review…",
                 ),
                 "supply": (
-                    "Supplied to Aave V3",
+                    f"Supplied to {protocol}",
+                    "The exact reviewed USDC amount was supplied on-chain.",
+                ),
+                "deposit": (
+                    f"Supplied to {protocol}",
                     "The exact reviewed USDC amount was supplied on-chain.",
                 ),
                 "withdraw": (
-                    "Withdrawn from Aave V3",
+                    f"Withdrawn from {protocol}",
                     "The exact reviewed USDC amount returned to this Wallet.",
                 ),
                 "withdraw_all": (
-                    "Withdrawn from Aave V3",
-                    "The reviewed Aave position returned to this Wallet.",
+                    f"Withdrawn from {protocol}",
+                    "The reviewed Lending position returned to this Wallet.",
+                ),
+                "redeem": (
+                    f"Withdrawn from {protocol}",
+                    "The reviewed Lending position returned to this Wallet.",
                 ),
             }.get(
                 action,
                 (
-                    "Aave action confirmed",
+                    f"{protocol} action confirmed",
                     "The reviewed action was confirmed on-chain.",
                 ),
             ),
@@ -1610,7 +1822,7 @@ def _result_text(
             ),
             MainnetTransferCode.FAILED: (
                 f"{label} reverted",
-                "A network fee may have been spent, but the Aave action reverted.",
+                "A network fee may have been spent, but the Lending action reverted.",
             ),
         }
         return replacements.get(code, (title, message))
@@ -1646,11 +1858,15 @@ def _result_action_type(action: PreparedTransactionAction) -> str:
         return REVOKE_ACTION_TYPE
     if action.action_type != "lending":
         return action.action_type
-    return (
+    legacy = (
         "lending_withdraw_all"
         if action.method == "withdraw" and action.amount_mode == "all"
         else f"lending_{action.method}"
     )
+    if not action.protocol_id or action.protocol_id == "aave-v3":
+        return legacy
+    method = "withdraw_all" if action.method == "withdraw" and action.amount_mode == "all" else action.method
+    return f"lending:{action.protocol_id}:{method}"
 
 
 _TRANSPORT_ERRORS = (

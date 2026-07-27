@@ -72,6 +72,11 @@ LENDING_IDENTITIES = (
     ("compound-v3", "base-usdc", "0xb125E6687d4313864e53df431d5425969c15Eb2F"),
     ("morpho-v1", "gauntlet-usdc-prime-v1", "0xeE8F4eC5672F09119b96Ab6fB59C27E1b7e44b61"),
 )
+LENDING_WRITE_PROFILES = {
+    "aave-v3": "aave-v3-base-usdc",
+    "compound-v3": "compound-v3-base-usdc",
+    "morpho-v1": "morpho-v1-gauntlet-usdc-prime",
+}
 
 
 def _lending_root() -> dict[str, Any]:
@@ -95,12 +100,19 @@ def _unavailable_lending_markets() -> dict[str, Any]:
                 "status": "UNAVAILABLE", "total_apr_percent": None,
                 "components": [],
             },
+            "confirmed_total_annual_percent": None,
+            "total_completeness": "UNAVAILABLE",
             "freshness": {
                 "state": "UNAVAILABLE", "observed_at": None, "block_number": None,
             },
             "caveats": ["READ_PROFILES_UNAVAILABLE"],
         } for protocol, market, contract in LENDING_IDENTITIES],
-        "highest_observed": None, "code": "LENDING_UNAVAILABLE",
+        "highest_observed": None, "recommendation": None,
+        "delivery": {
+            "fetched_at": "2026-01-01T00:00:00Z", "cache_age_seconds": 0,
+            "cache_max_age_seconds": 30, "force_refreshed": False,
+        },
+        "code": "LENDING_UNAVAILABLE",
         "message": "Lending data is unavailable.",
     })
     return value
@@ -118,7 +130,8 @@ def _unavailable_lending_preview() -> dict[str, Any]:
             "asset": "USDC", "address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
             "decimals": 6,
         },
-        "amount_mode": None, "amount_atomic": None, "display_amount": None,
+        "amount_mode": None, "amount_atomic": None, "call_amount_atomic": None,
+        "display_amount": None,
         "target": None, "method": None, "calldata_hash": None,
         "native_value_wei": "0", "nonce": None, "gas": None,
         "max_fee_per_gas_wei": None, "max_priority_fee_per_gas_wei": None,
@@ -246,9 +259,15 @@ class PluginRuntime:
     def handle_lending_compare(
         self, params: Optional[dict] = None, **kwargs: Any,
     ) -> str:
-        del params, kwargs
+        del kwargs
+        values = {} if params is None else params
+        if not isinstance(values, dict) or set(values) - {"force_refresh"}:
+            return json.dumps(_unavailable_lending_markets(), separators=(",", ":"))
+        force_refresh = values.get("force_refresh", False)
+        if type(force_refresh) is not bool:
+            return json.dumps(_unavailable_lending_markets(), separators=(",", ":"))
         try:
-            response = self._connector.lending_markets()
+            response = self._connector.lending_markets(force_refresh)
             if response.kind is MessageKind.LENDING_MARKETS:
                 return json.dumps(response.payload, ensure_ascii=False, separators=(",", ":"))
         except Exception:
@@ -275,18 +294,23 @@ class PluginRuntime:
         self, params: Optional[dict] = None, **kwargs: Any,
     ) -> str:
         del kwargs
-        if not isinstance(params, dict) or set(params) != {"action", "amount_mode", "amount"}:
+        if not isinstance(params, dict) or set(params) not in (
+            {"action", "amount_mode", "amount"},
+            {"protocol", "action", "amount_mode", "amount"},
+        ):
             return json.dumps(_unavailable_lending_preview(), separators=(",", ":"))
+        protocol = params.get("protocol", "aave-v3")
         action, mode, amount = params.get("action"), params.get("amount_mode"), params.get("amount")
         if (
-            action not in {"supply", "withdraw"} or mode not in {"exact", "all"}
+            protocol not in LENDING_WRITE_PROFILES
+            or action not in {"supply", "withdraw"} or mode not in {"exact", "all"}
             or mode == "all" and amount is not None
             or mode == "exact" and not isinstance(amount, str)
         ):
             return json.dumps(_unavailable_lending_preview(), separators=(",", ":"))
         intent = {
             "module_id": "lending", "module_version": "1",
-            "protocol_profile_id": "aave-v3-base-usdc",
+            "protocol_profile_id": LENDING_WRITE_PROFILES[protocol],
             "protocol_profile_version": "1", "network": "base", "asset": "usdc",
             "beneficiary_mode": "active_wallet_account", "action": action,
             "amount_mode": mode, "amount": amount,
@@ -303,10 +327,15 @@ class PluginRuntime:
         self, params: Optional[dict] = None, **kwargs: Any,
     ) -> str:
         del kwargs
-        if not isinstance(params, dict) or set(params) != {"action", "amount_mode", "amount"}:
+        if not isinstance(params, dict) or set(params) not in (
+            {"action", "amount_mode", "amount"},
+            {"protocol", "action", "amount_mode", "amount"},
+        ):
             return self._safe_transfer_failure()
+        protocol = params.get("protocol", "aave-v3")
         if (
-            params.get("action") not in {"supply", "withdraw"}
+            protocol not in LENDING_WRITE_PROFILES
+            or params.get("action") not in {"supply", "withdraw"}
             or params.get("amount_mode") not in {"exact", "all"}
             or (
                 params.get("amount_mode") == "exact"
@@ -320,9 +349,11 @@ class PluginRuntime:
         action_id = new_action_id()
         intent = {
             "module_id": "lending", "module_version": "1",
-            "protocol_profile_id": "aave-v3-base-usdc",
+            "protocol_profile_id": LENDING_WRITE_PROFILES[protocol],
             "protocol_profile_version": "1", "network": "base", "asset": "usdc",
-            "beneficiary_mode": "active_wallet_account", **params,
+            "beneficiary_mode": "active_wallet_account",
+            "action": params["action"], "amount_mode": params["amount_mode"],
+            "amount": params["amount"],
         }
         try:
             response = self._connector.lending_action_execute(intent, action_id)
@@ -333,10 +364,10 @@ class PluginRuntime:
             self._protected_action_id = action_id
             return json.dumps({
                 "status": "AWAITING_LOCAL_CONFIRMATION", "authority_available": True,
-                "action_id": action_id, "action": params["action"],
+                "action_id": action_id, "protocol": protocol, "action": params["action"],
                 "amount_mode": params["amount_mode"], "amount": params["amount"],
                 "code": response.payload["code"],
-                "message": "Review and confirm the independent Aave action in Wallet.",
+                "message": f"Review and confirm the independent {protocol} action in Wallet.",
                 "turn_state": "END_REQUIRED",
                 "next_step": "End this turn and wait for the user's decision in Wallet.",
             }, separators=(",", ":"))
@@ -656,10 +687,14 @@ def register(ctx: Any) -> None:
             "name": LENDING_COMPARE_TOOL,
             "description": (
                 "Compare verified read-only Base USDC yield for Aave V3, Compound III, "
-                "and the selected Morpho Vault. Explain freshness and rate-model "
-                "differences; the highest observed yield is not a safety recommendation."
+                "and the selected Morpho Vault. Explain freshness, unknown bonuses, and "
+                "rate-model differences. Use the returned confirmed-total recommendation."
             ),
-            "parameters": empty_parameters,
+            "parameters": {
+                "type": "object",
+                "properties": {"force_refresh": {"type": "boolean", "default": False}},
+                "required": [], "additionalProperties": False,
+            },
         },
         handler=_handle_lending_compare,
         description="Compare supported Base USDC lending yield.",
@@ -684,38 +719,45 @@ def register(ctx: Any) -> None:
         schema={
             "name": LENDING_PREPARE_TOOL,
             "description": (
-                "Prepare a non-executable Aave V3 Base USDC action preview. "
+                "Prepare a non-executable Base USDC Lending preview for the explicitly "
+                "confirmed protocol. If the user did not name a protocol, first call "
+                "holon_lending_compare, explain its recommendation, and ask for confirmation. "
                 "This never signs, broadcasts, or unlocks Wallet authority."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "protocol": {"type": "string", "enum": list(LENDING_WRITE_PROFILES)},
                     "action": {"type": "string", "enum": ["supply", "withdraw"]},
                     "amount_mode": {"type": "string", "enum": ["exact", "all"]},
                     "amount": {"type": ["string", "null"]},
                 },
-                "required": ["action", "amount_mode", "amount"],
+                "required": ["protocol", "action", "amount_mode", "amount"],
                 "additionalProperties": False,
             },
         },
         handler=_handle_lending_prepare,
-        description="Prepare a read-only Aave action preview.",
+        description="Prepare a read-only Base USDC Lending action preview.",
     )
     ctx.register_tool(
         name=LENDING_EXECUTE_TOOL, toolset="holon",
         schema={
             "name": LENDING_EXECUTE_TOOL,
-            "description": "Prepare one protected Aave V3 Base USDC supply or withdraw operation.",
+            "description": (
+                "Prepare one protected Base USDC Lending operation for an explicitly confirmed "
+                "protocol. If no protocol was chosen, compare first and wait for confirmation."
+            ),
             "parameters": {
                 "type": "object", "properties": {
+                    "protocol": {"type": "string", "enum": list(LENDING_WRITE_PROFILES)},
                     "action": {"type": "string", "enum": ["supply", "withdraw"]},
                     "amount_mode": {"type": "string", "enum": ["exact", "all"]},
                     "amount": {"type": ["string", "null"]},
-                }, "required": ["action", "amount_mode", "amount"],
+                }, "required": ["protocol", "action", "amount_mode", "amount"],
                 "additionalProperties": False,
             },
         }, handler=_handle_lending_execute,
-        description="Prepare one protected Aave supply or withdraw operation.",
+        description="Prepare one protected Base USDC Lending supply or withdraw operation.",
     )
     transfer_properties = {
         "network": {"type": "string", "enum": ["ethereum", "base"]},

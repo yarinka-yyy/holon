@@ -84,7 +84,7 @@ def _policy_path(args: argparse.Namespace) -> Path | None:
 
 
 def _any_authority_enabled(policy: Policy) -> bool:
-    """Compatibility helper: schema v4 always exposes protected Aave actions."""
+    """Compatibility helper: schema v4 exposes protected Lending actions."""
     return (
         policy.schema_version == "4"
         or policy.authority_enabled

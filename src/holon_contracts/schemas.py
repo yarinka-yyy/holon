@@ -89,7 +89,7 @@ PAYLOAD_FIELDS = {
     MessageKind.LENDING_MARKETS: frozenset(
         {
             "status", "authority_available", "network", "asset", "markets",
-            "highest_observed", "code", "message",
+            "highest_observed", "recommendation", "delivery", "code", "message",
         }
     ),
     MessageKind.LENDING_POSITIONS: frozenset(
@@ -104,6 +104,7 @@ PAYLOAD_FIELDS = {
             "requested_action", "next_action", "protocol", "profile_id",
             "profile_version", "profile_digest", "network", "asset",
             "amount_mode", "amount_atomic", "display_amount", "target", "method",
+            "call_amount_atomic",
             "calldata_hash", "native_value_wei", "nonce", "gas",
             "max_fee_per_gas_wei", "max_priority_fee_per_gas_wei",
             "l2_fee_ceiling_wei", "l1_fee_upper_bound_wei",

@@ -59,6 +59,24 @@ class Rpc:
     def simulate(self, transaction): del transaction; return b""
 
 
+class GenericRpc(Rpc):
+    def resolve_pool(self, provider, block): raise AssertionError((provider, block))
+    def protocol_asset(self, target, block): del target, block; return self.profile.asset
+    def protocol_paused(self, target, action, block): del target, action, block; return False
+    def compound_borrow_balance(self, target, account, block): del target, account, block; return 0
+    def vault_limit(self, target, method, account, block):
+        del target, account, block
+        return self.position if method == "maxWithdraw" else 10_000_000
+    def vault_convert(self, target, method, amount, block): del target, method, block; return amount
+    def token_balance(self, token, account, block):
+        del block
+        if token == self.profile.position_token and account == SENDER:
+            return self.position
+        if token == self.profile.position_token and account.lower().endswith("dead"):
+            return 10**12
+        return 10_000_000
+
+
 def request(
     now: datetime, action: str = "supply", amount_mode: str = "exact",
     amount: str | None = "1",
@@ -164,6 +182,34 @@ def test_exact_and_all_withdraw_bind_distinct_calldata_and_mode() -> None:
     assert exact.digest != all_action.digest
     assert validate_signing_action(exact, exact.digest, now) is None
     assert validate_signing_action(all_action, all_action.digest, now) is None
+
+
+@pytest.mark.parametrize(("profile_id", "action", "mode", "amount", "allowance", "method"), [
+    ("compound-v3-base-usdc", "supply", "exact", "1", 1_000_000, "supply"),
+    ("morpho-v1-gauntlet-usdc-prime", "supply", "exact", "1", 1_000_000, "deposit"),
+    ("compound-v3-base-usdc", "withdraw", "all", None, 0, "withdraw"),
+    ("morpho-v1-gauntlet-usdc-prime", "withdraw", "all", None, 0, "redeem"),
+])
+def test_wallet_builds_and_signer_accepts_generic_protocol_actions(
+    profile_id, action, mode, amount, allowance, method,
+) -> None:
+    state = ActionProfilesState.load()
+    profile = state.select(profile_id)
+    assert profile is not None
+    now = datetime.now(UTC).replace(microsecond=0)
+    account = ProfileSummary("p", "Main", SENDER, "mnemonic", "m", "2026-07-26T00:00:00Z")
+    value = request(now, action, mode, amount)
+    value["protocol_profile_id"] = profile_id
+    value["action_profile_digest"] = profile.digest
+    prepared = prepare_lending_action(
+        LendingPreflightService(
+            state, lambda: GenericRpc(profile, allowance=allowance, position=2_000_000),
+        ),
+        state, account, value,
+    )
+    assert prepared.method == method
+    assert prepared.action_profile_digest == profile.digest
+    assert validate_signing_action(prepared, prepared.digest, now) is None
 
 
 def test_withdraw_all_policy_caps_resolved_position_not_sentinel() -> None:

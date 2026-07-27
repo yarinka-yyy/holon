@@ -31,7 +31,8 @@ PREPARE_FIELDS = frozenset({
 })
 LENDING_PREPARE_FIELDS = frozenset({
     "authority_version", "kind", "flow_id", "action_id", "policy_version",
-    "policy_revision", "policy_digest", "action_profile_digest", "action",
+    "policy_revision", "policy_digest", "action_profile_digest",
+    "protocol_profile_id", "action",
     "amount_mode", "amount", "resolved_amount_atomic", "operation_id",
     "phase_action_id", "phase", "created_at", "expires_at",
 })
@@ -110,7 +111,10 @@ def validate_request(value: Mapping[str, object]) -> dict[str, object]:
         else LENDING_PREPARE_FIELDS if kind == "prepare_lending_action"
         else CANCEL_FIELDS
     )
-    if set(value) != expected or value.get("authority_version") != AUTHORITY_VERSION:
+    legacy_lending = kind == "prepare_lending_action" and set(value) == (
+        LENDING_PREPARE_FIELDS - {"protocol_profile_id"}
+    )
+    if (set(value) != expected and not legacy_lending) or value.get("authority_version") != AUTHORITY_VERSION:
         raise ControlProtocolError("Invalid authority request")
     _uuid(value.get("flow_id"))
     _action(value.get("action_id"))
@@ -120,6 +124,7 @@ def validate_request(value: Mapping[str, object]) -> dict[str, object]:
             raise ControlProtocolError("Invalid authority request")
         return dict(value)
     if kind == "prepare_lending_action":
+        value = {"protocol_profile_id": "aave-v3-base-usdc", **value}
         if (
             value.get("policy_version") not in {"2", "3"}
             or type(value.get("policy_revision")) is not int
@@ -128,6 +133,10 @@ def validate_request(value: Mapping[str, object]) -> dict[str, object]:
             or HEX_RE.fullmatch(value["policy_digest"]) is None
             or not isinstance(value.get("action_profile_digest"), str)
             or HEX_RE.fullmatch(value["action_profile_digest"]) is None
+            or value.get("protocol_profile_id") not in {
+                "aave-v3-base-usdc", "compound-v3-base-usdc",
+                "morpho-v1-gauntlet-usdc-prime",
+            }
             or value.get("action") not in {"supply", "withdraw"}
             or value.get("amount_mode") not in {"exact", "all"}
             or value.get("operation_id") is None
@@ -205,16 +214,18 @@ def validate_response(
             if value.get(field) != request.get(expected_field):
                 raise ControlProtocolError("Authority response mismatch")
         if (
-            value.get("next_action") not in {"approve", "supply", "withdraw"}
+            value.get("next_action") not in {
+                "approve", "supply", "deposit", "withdraw", "redeem",
+            }
             or value.get("network") != "base" or value.get("asset") != "usdc"
             or value.get("method") != value.get("next_action")
             or (
                 request.get("action") == "withdraw"
-                and value.get("next_action") != "withdraw"
+                and value.get("next_action") not in {"withdraw", "redeem"}
             )
             or (
                 request.get("action") == "supply"
-                and value.get("next_action") not in {"approve", "supply"}
+                and value.get("next_action") not in {"approve", "supply", "deposit"}
             )
             or not isinstance(value.get("target"), str)
             or ADDRESS_RE.fullmatch(value["target"]) is None

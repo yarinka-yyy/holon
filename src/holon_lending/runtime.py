@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, ROUND_HALF_UP, localcontext
@@ -28,6 +30,7 @@ MORPHO_UNAVAILABLE_SECONDS = 1_800
 FUTURE_TOLERANCE_SECONDS = 60
 MAX_RATE = Decimal("10")
 MAX_REWARDS = 8
+COMPARE_CACHE_SECONDS = 30
 DEFAULT_BASE_RPC_URL = "https://base-rpc.publicnode.com"
 BASE_RPC_ENV = "HOLON_BASE_RPC_URL"
 
@@ -99,7 +102,7 @@ class LendingReadError(RuntimeError):
 
 
 class LendingReader(Protocol):
-    def compare(self) -> dict[str, Any]: ...
+    def compare(self, force_refresh: bool = False) -> dict[str, Any]: ...
 
     def positions(self, account: Mapping[str, str] | None) -> dict[str, Any]: ...
 
@@ -167,6 +170,7 @@ def _market_unavailable(protocol: str, market_id: str, contract: str, caveat: st
     return {
         "protocol": protocol, "market_id": market_id, "contract_address": contract,
         "base_yield": None, "incentives": _incentives_unavailable(),
+        "confirmed_total_annual_percent": None, "total_completeness": "UNAVAILABLE",
         "freshness": _unavailable_freshness(), "caveats": [caveat],
     }
 
@@ -306,6 +310,8 @@ class LendingReadService:
         self._rpc_factory = rpc_factory
         self._morpho = morpho
         self._clock = clock
+        self._compare_cache: dict[str, Any] | None = None
+        self._compare_cached_at: int | None = None
 
     @classmethod
     def default(cls, environ: Mapping[str, str] | None = None) -> "LendingReadService":
@@ -353,11 +359,25 @@ class LendingReadService:
         ]
         return self._compare_response(markets)
 
-    def compare(self) -> dict[str, Any]:
+    def compare(self, force_refresh: bool = False) -> dict[str, Any]:
+        if type(force_refresh) is not bool:
+            raise LendingReadError("force_refresh must be boolean")
         if self._state.profiles is None:
-            return self._unavailable_compare(self._state.error_code or "READ_PROFILES_UNAVAILABLE")
+            return self._with_delivery(
+                self._unavailable_compare(self._state.error_code or "READ_PROFILES_UNAVAILABLE"),
+                int(self._clock()), 0, force_refresh,
+            )
         contracts = self._profile_contracts()
         now = int(self._clock())
+        if (
+            not force_refresh and self._compare_cache is not None
+            and self._compare_cached_at is not None
+            and 0 <= now - self._compare_cached_at <= COMPARE_CACHE_SECONDS
+        ):
+            return self._with_delivery(
+                deepcopy(self._compare_cache), self._compare_cached_at,
+                now - self._compare_cached_at, False,
+            )
         try:
             rpc = self._rpc_factory()
             snapshot = self._retry(rpc.begin)
@@ -367,52 +387,61 @@ class LendingReadService:
             snapshot = None
             chain_freshness = _unavailable_freshness()
 
-        markets: list[dict[str, Any]] = []
-        try:
-            if rpc is None or snapshot is None or chain_freshness["state"] == "UNAVAILABLE":
-                raise LendingReadError("On-chain data unavailable")
-            ray, _ = self._retry(lambda: rpc.aave(snapshot))
-            apr = _rate(Decimal(ray) / Decimal(10**27))
-            markets.append(self._market_rate(
-                PROTOCOLS[0][0], PROTOCOLS[0][1], contracts[0], str(ray), "ray_apr",
-                apr, "APR", _apy_from_apr(apr), "per_second_compounding_365d",
-                chain_freshness, _incentives_unavailable(), ["INCENTIVES_NOT_PROFILED"],
-            ))
-        except Exception:
-            markets.append(_market_unavailable(PROTOCOLS[0][0], PROTOCOLS[0][1], contracts[0], "AAVE_DATA_UNAVAILABLE"))
+        def aave() -> dict[str, Any]:
+            try:
+                if rpc is None or snapshot is None or chain_freshness["state"] == "UNAVAILABLE":
+                    raise LendingReadError("On-chain data unavailable")
+                ray, _ = self._retry(lambda: rpc.aave(snapshot))
+                apr = _rate(Decimal(ray) / Decimal(10**27))
+                return self._market_rate(
+                    PROTOCOLS[0][0], PROTOCOLS[0][1], contracts[0], str(ray), "ray_apr",
+                    apr, "APR", _apy_from_apr(apr), "per_second_compounding_365d",
+                    chain_freshness, _incentives_unavailable(), ["INCENTIVES_NOT_PROFILED"],
+                )
+            except Exception:
+                return _market_unavailable(*PROTOCOLS[0][:2], contracts[0], "AAVE_DATA_UNAVAILABLE")
 
-        try:
-            if rpc is None or snapshot is None or chain_freshness["state"] == "UNAVAILABLE":
-                raise LendingReadError("On-chain data unavailable")
-            _utilization, per_second, _ = self._retry(lambda: rpc.compound(snapshot))
-            per_second_decimal = _rate(Decimal(per_second) / Decimal(10**18))
-            apr = _rate(per_second_decimal * SECONDS_PER_YEAR)
-            apy = (Decimal(1) + per_second_decimal) ** SECONDS_PER_YEAR - Decimal(1)
-            markets.append(self._market_rate(
-                PROTOCOLS[1][0], PROTOCOLS[1][1], contracts[1], str(per_second),
-                "per_second_wad", apr, "APR", apy, "per_second_compounding_365d",
-                chain_freshness, _incentives_unavailable(), ["INCENTIVES_NOT_PROFILED"],
-            ))
-        except Exception:
-            markets.append(_market_unavailable(PROTOCOLS[1][0], PROTOCOLS[1][1], contracts[1], "COMPOUND_DATA_UNAVAILABLE"))
+        def compound() -> dict[str, Any]:
+            try:
+                if rpc is None or snapshot is None or chain_freshness["state"] == "UNAVAILABLE":
+                    raise LendingReadError("On-chain data unavailable")
+                _utilization, per_second, _ = self._retry(lambda: rpc.compound(snapshot))
+                per_second_decimal = _rate(Decimal(per_second) / Decimal(10**18))
+                apr = _rate(per_second_decimal * SECONDS_PER_YEAR)
+                apy = (Decimal(1) + per_second_decimal) ** SECONDS_PER_YEAR - Decimal(1)
+                return self._market_rate(
+                    PROTOCOLS[1][0], PROTOCOLS[1][1], contracts[1], str(per_second),
+                    "per_second_wad", apr, "APR", apy, "per_second_compounding_365d",
+                    chain_freshness, _incentives_unavailable(), ["INCENTIVES_NOT_PROFILED"],
+                )
+            except Exception:
+                return _market_unavailable(*PROTOCOLS[1][:2], contracts[1], "COMPOUND_DATA_UNAVAILABLE")
 
-        try:
-            if rpc is None or snapshot is None or chain_freshness["state"] == "UNAVAILABLE":
-                raise LendingReadError("On-chain identity unavailable")
-            self._retry(lambda: rpc.morpho(snapshot))
-            raw = self._retry(self._morpho.query)
-            rate, incentives, api_freshness = self._parse_morpho(raw, now)
-            freshness = _worst_freshness(chain_freshness, api_freshness)
-            if freshness["state"] == "UNAVAILABLE":
-                raise LendingReadError("Morpho data is stale")
-            markets.append(self._market_rate(
-                PROTOCOLS[2][0], PROTOCOLS[2][1], contracts[2], str(rate),
-                "decimal_fraction", rate, "APY", rate, "reported_apy",
-                freshness, incentives, [],
-            ))
-        except Exception:
-            markets.append(_market_unavailable(PROTOCOLS[2][0], PROTOCOLS[2][1], contracts[2], "MORPHO_DATA_UNAVAILABLE"))
-        return self._compare_response(markets)
+        def morpho() -> dict[str, Any]:
+            try:
+                if rpc is None or snapshot is None or chain_freshness["state"] == "UNAVAILABLE":
+                    raise LendingReadError("On-chain identity unavailable")
+                self._retry(lambda: rpc.morpho(snapshot))
+                raw = self._retry(self._morpho.query)
+                rate, incentives, api_freshness = self._parse_morpho(raw, now)
+                freshness = _worst_freshness(chain_freshness, api_freshness)
+                if freshness["state"] == "UNAVAILABLE":
+                    raise LendingReadError("Morpho data is stale")
+                return self._market_rate(
+                    PROTOCOLS[2][0], PROTOCOLS[2][1], contracts[2], str(rate),
+                    "decimal_fraction", rate, "APY", rate, "reported_apy",
+                    freshness, incentives, [],
+                )
+            except Exception:
+                return _market_unavailable(*PROTOCOLS[2][:2], contracts[2], "MORPHO_DATA_UNAVAILABLE")
+
+        with ThreadPoolExecutor(max_workers=3, thread_name_prefix="holon-lending") as executor:
+            futures = [executor.submit(call) for call in (aave, compound, morpho)]
+            markets = [future.result() for future in futures]
+        result = self._compare_response(markets)
+        self._compare_cache = deepcopy(result)
+        self._compare_cached_at = now
+        return self._with_delivery(result, now, 0, force_refresh)
 
     @staticmethod
     def _market_rate(
@@ -420,6 +449,11 @@ class LendingReadService:
         base: Decimal, metric: str, apy: Decimal, normalization: str,
         freshness: Mapping[str, Any], incentives: Mapping[str, Any], caveats: list[str],
     ) -> dict[str, Any]:
+        incentive_apr = (
+            Decimal(str(incentives["total_apr_percent"]))
+            if incentives.get("status") == "AVAILABLE" else Decimal(0)
+        )
+        total = _rate(apy) * 100 + incentive_apr
         return {
             "protocol": protocol, "market_id": market, "contract_address": contract,
             "base_yield": {
@@ -428,7 +462,13 @@ class LendingReadService:
                 "comparison_apy_percent": _canonical_decimal(_rate(apy) * 100),
                 "normalization": normalization,
             },
-            "incentives": dict(incentives), "freshness": dict(freshness),
+            "incentives": dict(incentives),
+            "confirmed_total_annual_percent": _canonical_decimal(total),
+            "total_completeness": (
+                "BASE_AND_INCENTIVES" if incentives.get("status") == "AVAILABLE"
+                else "BASE_ONLY"
+            ),
+            "freshness": dict(freshness),
             "caveats": caveats,
         }
 
@@ -493,6 +533,7 @@ class LendingReadService:
         else:
             status, code, message = "DEGRADED", "LENDING_UNAVAILABLE", "Lending data is unavailable."
         highest = None
+        recommendation = None
         if usable:
             item = max(usable, key=lambda entry: Decimal(entry["base_yield"]["comparison_apy_percent"]))
             highest = {
@@ -500,11 +541,37 @@ class LendingReadService:
                 "comparison_apy_percent": item["base_yield"]["comparison_apy_percent"],
                 "not_safety_recommendation": True,
             }
+            recommended = max(
+                usable, key=lambda entry: Decimal(entry["confirmed_total_annual_percent"]),
+            )
+            missing = [
+                entry["protocol"] for entry in usable
+                if entry["total_completeness"] == "BASE_ONLY"
+            ]
+            recommendation = {
+                "protocol": recommended["protocol"],
+                "confirmed_total_annual_percent": recommended["confirmed_total_annual_percent"],
+                "missing_incentive_protocols": missing,
+                "incomplete_comparison": bool(missing) or len(usable) < len(markets),
+                "requires_user_confirmation": True,
+            }
         return {
             "status": status, "authority_available": False, "network": dict(NETWORK),
             "asset": dict(ASSET), "markets": markets, "highest_observed": highest,
+            "recommendation": recommendation,
             "code": code, "message": message,
         }
+
+    @staticmethod
+    def _with_delivery(
+        payload: dict[str, Any], fetched_at: int, age: int, force_refreshed: bool,
+    ) -> dict[str, Any]:
+        payload["delivery"] = {
+            "fetched_at": _timestamp(fetched_at), "cache_age_seconds": age,
+            "cache_max_age_seconds": COMPARE_CACHE_SECONDS,
+            "force_refreshed": force_refreshed,
+        }
+        return payload
 
     def positions(self, account: Mapping[str, str] | None) -> dict[str, Any]:
         if self._state.profiles is None:

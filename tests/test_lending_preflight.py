@@ -18,6 +18,11 @@ from holon_lending import (
     action_profiles_digest,
     canonical_action_profiles_bytes,
     encode_approve,
+    encode_compound_supply,
+    encode_compound_withdraw,
+    encode_morpho_deposit,
+    encode_morpho_redeem,
+    encode_morpho_withdraw,
     encode_supply,
     encode_withdraw,
     load_action_profile,
@@ -38,6 +43,12 @@ def intent(action: str = "supply", mode: str = "exact", amount: str | None = "1.
         "beneficiary_mode": "active_wallet_account", "action": action,
         "amount_mode": mode, "amount": amount,
     }
+
+
+def protocol_intent(profile_id: str, action: str, mode: str, amount: str | None):
+    value = intent(action, mode, amount)
+    value["protocol_profile_id"] = profile_id
+    return value
 
 
 class FakeRpc:
@@ -142,6 +153,38 @@ class FakeRpc:
         return b""
 
 
+class ProtocolRpc(FakeRpc):
+    def protocol_asset(self, target, block):
+        del target, block
+        return self.profile.asset
+
+    def protocol_paused(self, target, action, block):
+        del target, action, block
+        return self.paused
+
+    def compound_borrow_balance(self, target, account, block):
+        del target, account, block
+        return self.debt
+
+    def vault_limit(self, target, method, account, block):
+        del target, account, block
+        return self.position if method == "maxWithdraw" else self.usdc_balance
+
+    def vault_convert(self, target, method, amount, block):
+        del target, method, block
+        return amount
+
+    def token_balance(self, token, account, block):
+        del block
+        if token == self.profile.position_token and account == SENDER:
+            return self.position
+        if token == self.profile.position_token and account.lower().endswith("dead"):
+            return 10**12
+        if token == self.profile.asset and account == self.profile.target:
+            return self.liquidity
+        return self.usdc_balance
+
+
 @pytest.fixture
 def setup_service():
     state = ActionProfilesState.load()
@@ -191,6 +234,90 @@ def test_exact_encoders_pin_only_approved_methods(setup_service) -> None:
     assert approve.startswith("0x095ea7b3") and len(approve) == 2 + 8 + 64 * 2
     assert supply.startswith("0x617ba037") and len(supply) == 2 + 8 + 64 * 4
     assert withdraw.startswith("0x69328dec") and len(withdraw) == 2 + 8 + 64 * 3
+
+
+@pytest.mark.parametrize("profile_id", [
+    "compound-v3-base-usdc", "morpho-v1-gauntlet-usdc-prime",
+])
+def test_compound_and_morpho_support_all_four_intents_without_signing(profile_id) -> None:
+    state = ActionProfilesState.load()
+    profile = state.select(profile_id)
+    assert profile is not None
+    rpc = ProtocolRpc(profile)
+    service = LendingPreflightService(state, lambda: rpc, clock=lambda: NOW)
+    account = {"label": "Main", "address": SENDER}
+
+    approve = service.prepare(
+        protocol_intent(profile_id, "supply", "exact", "1"), account,
+        expected_profile_digest=profile.digest,
+    )
+    assert approve["next_action"] == "approve"
+    assert rpc.last_transaction["data"] == encode_approve(profile.spender, 1_000_000)
+
+    rpc.allowance_value = 1_000_000
+    exact_supply = service.prepare(
+        protocol_intent(profile_id, "supply", "exact", "1"), account,
+        expected_profile_digest=profile.digest,
+    )
+    expected_supply = (
+        encode_compound_supply(profile.asset, 1_000_000)
+        if profile.protocol_id == "compound-v3"
+        else encode_morpho_deposit(1_000_000, SENDER)
+    )
+    assert rpc.last_transaction["data"] == expected_supply
+    assert exact_supply["next_action"] in {"supply", "deposit"}
+
+    rpc.allowance_value = rpc.usdc_balance
+    supply_all = service.prepare(
+        protocol_intent(profile_id, "supply", "all", None), account,
+        expected_profile_digest=profile.digest,
+    )
+    assert supply_all["amount_atomic"] == str(rpc.usdc_balance)
+
+    exact_withdraw = service.prepare(
+        protocol_intent(profile_id, "withdraw", "exact", "1"), account,
+        expected_profile_digest=profile.digest,
+    )
+    expected_withdraw = (
+        encode_compound_withdraw(profile.asset, 1_000_000)
+        if profile.protocol_id == "compound-v3"
+        else encode_morpho_withdraw(1_000_000, SENDER)
+    )
+    assert rpc.last_transaction["data"] == expected_withdraw
+    assert exact_withdraw["amount_atomic"] == "1000000"
+
+    withdraw_all = service.prepare(
+        protocol_intent(profile_id, "withdraw", "all", None), account,
+        expected_profile_digest=profile.digest,
+    )
+    expected_all = (
+        encode_compound_withdraw(profile.asset, MAX_UINT256)
+        if profile.protocol_id == "compound-v3"
+        else encode_morpho_redeem(rpc.position, SENDER)
+    )
+    assert rpc.last_transaction["data"] == expected_all
+    assert withdraw_all["amount_atomic"] == str(rpc.position)
+
+
+def test_compound_refuses_borrow_position_and_liquidity_overrun() -> None:
+    state = ActionProfilesState.load()
+    profile = state.select("compound-v3-base-usdc")
+    assert profile is not None
+    rpc = ProtocolRpc(profile)
+    service = LendingPreflightService(state, lambda: rpc, clock=lambda: NOW)
+    raw = protocol_intent(profile.profile_id, "withdraw", "exact", "1")
+    account = {"label": "Main", "address": SENDER}
+    rpc.debt = 1
+    with pytest.raises(LendingPreflightError, match="COMPOUND_ACCOUNT_HAS_BORROW"):
+        service.prepare(raw, account, expected_profile_digest=profile.digest)
+    rpc.debt = 0
+    rpc.position = 500_000
+    with pytest.raises(LendingPreflightError, match="INSUFFICIENT_LENDING_POSITION"):
+        service.prepare(raw, account, expected_profile_digest=profile.digest)
+    rpc.position = 5_000_000
+    rpc.liquidity = 500_000
+    with pytest.raises(LendingPreflightError, match="INSUFFICIENT_PROTOCOL_LIQUIDITY"):
+        service.prepare(raw, account, expected_profile_digest=profile.digest)
 
 
 def test_supply_with_zero_allowance_returns_exact_approval_preview(setup_service) -> None:

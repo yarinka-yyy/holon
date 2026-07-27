@@ -1,4 +1,4 @@
-"""Shared strict public state for one protected multi-phase Aave operation."""
+"""Shared strict public state for one protected multi-phase Lending operation."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping
 
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
 MAX_BYTES = 32 * 1024
 MAX_TERMINAL = 64
 PHASES = {
@@ -19,7 +19,7 @@ PHASES = {
     "supply_receipt", "resume_or_revoke", "completed", "failed", "cancelled",
 }
 TERMINAL_PHASES = {"completed", "failed", "cancelled"}
-FIELDS = {
+LEGACY_FIELDS = {
     "schema_version", "operation_id", "requested_action", "amount_mode", "amount",
     "resolved_amount_atomic", "owner_pid", "policy_version", "policy_revision",
     "policy_digest", "action_profile_digest", "safety_digest", "phase",
@@ -27,6 +27,7 @@ FIELDS = {
     "account_profile_id", "account_address",
     "transaction_hash", "receipt_state", "updated_at",
 }
+FIELDS = LEGACY_FIELDS | {"protocol_profile_id", "protocol_id"}
 RECEIPT_STATES = {"none", "pending", "unknown", "confirmed", "failed"}
 ACTION_RE = re.compile(r"^act-[0-9a-f-]{36}$")
 HEX_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -69,6 +70,8 @@ class LendingOperation:
     transaction_hash: str | None = None
     receipt_state: str = "none"
     updated_at: str = ""
+    protocol_profile_id: str = "aave-v3-base-usdc"
+    protocol_id: str = "aave-v3"
 
     def with_phase(
         self, phase: str, *, phase_action_id: str | None = None,
@@ -128,13 +131,16 @@ class LendingOperation:
             "transaction_hash": self.transaction_hash,
             "receipt_state": self.receipt_state,
             "updated_at": self.updated_at,
+            "protocol_profile_id": self.protocol_profile_id,
+            "protocol_id": self.protocol_id,
         }
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "LendingOperation":
-        if not isinstance(value, Mapping) or set(value) != FIELDS:
+        if not isinstance(value, Mapping) or frozenset(value) not in {frozenset(FIELDS), frozenset(LEGACY_FIELDS)}:
             raise LendingOperationStateError("Invalid lending operation fields")
-        if value.get("schema_version") != SCHEMA_VERSION:
+        version = value.get("schema_version")
+        if version not in {"1", SCHEMA_VERSION} or (version == "1") != (set(value) == LEGACY_FIELDS):
             raise LendingOperationStateError("Unsupported lending operation version")
         amount = value.get("amount")
         transaction_hash = value.get("transaction_hash")
@@ -173,6 +179,14 @@ class LendingOperation:
             or value["policy_version"] not in {"2", "3"}
         ):
             raise LendingOperationStateError("Invalid lending operation identity")
+        protocol_profile_id = str(value.get("protocol_profile_id", "aave-v3-base-usdc"))
+        protocol_id = str(value.get("protocol_id", "aave-v3"))
+        if {
+            "aave-v3-base-usdc": "aave-v3",
+            "compound-v3-base-usdc": "compound-v3",
+            "morpho-v1-gauntlet-usdc-prime": "morpho-v1",
+        }.get(protocol_profile_id) != protocol_id:
+            raise LendingOperationStateError("Invalid lending operation protocol")
         try:
             resolved = int(value["resolved_amount_atomic"])
         except (TypeError, ValueError) as exc:
@@ -189,8 +203,14 @@ class LendingOperation:
             str(value["created_at"]),
             str(value["account_profile_id"]), str(value["account_address"]),
             transaction_hash, str(value["receipt_state"]), str(value["updated_at"]),
+            protocol_profile_id, protocol_id,
         )
-        if result.to_dict() != dict(value):
+        canonical = result.to_dict()
+        if version == "1":
+            canonical.pop("protocol_profile_id")
+            canonical.pop("protocol_id")
+            canonical["schema_version"] = "1"
+        if canonical != dict(value):
             raise LendingOperationStateError("Lending operation is not canonical")
         return result
 

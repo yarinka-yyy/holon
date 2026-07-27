@@ -188,9 +188,11 @@ class AuthorityService(ResponseMixin):
             )
         if request.kind is MessageKind.READ_LENDING_MARKETS:
             try:
-                payload = self.lending.compare()
+                payload = self.lending.compare(request.payload.get("force_refresh", False))
             except Exception:
-                payload = LendingReadService.unavailable().compare()
+                payload = LendingReadService.unavailable().compare(
+                    request.payload.get("force_refresh", False),
+                )
             return self._response(request, MessageKind.LENDING_MARKETS, payload)
         if request.kind is MessageKind.READ_LENDING_POSITIONS:
             account = None
@@ -205,37 +207,44 @@ class AuthorityService(ResponseMixin):
         if request.kind is MessageKind.LENDING_ACTION_INTENT:
             action = request.payload.get("action")
             mode = request.payload.get("amount_mode")
+            profile_id = str(request.payload.get("protocol_profile_id", ""))
+            profile = self.lending_actions.select(
+                profile_id,
+            )
             if self.lifecycle.snapshot.state in {
                 GuardState.ENTERING, GuardState.ACTIVE, GuardState.EXITING,
                 GuardState.RECOVERY_REQUIRED,
             }:
                 payload = unavailable_preview(
                     "PROTECTED_FLOW_ACTIVE", requested_action=str(action),
-                    amount_mode=str(mode),
+                    amount_mode=str(mode), profile_id=profile_id,
                 )
-            elif self.lending_actions.profile is None:
+            elif profile is None:
                 payload = unavailable_preview(
                     self.lending_actions.error_code or "ACTION_PROFILES_UNAVAILABLE",
                     requested_action=str(action), amount_mode=str(mode),
+                    profile_id=profile_id,
                 )
             else:
                 try:
                     result = self.lifecycle.wallet.preview_lending(
-                        request.payload, self.lending_actions.profile.digest,
+                        request.payload, profile.digest,
                     )
                     payload = (
                         result.payload if result.ok and result.payload is not None
                         else unavailable_preview(
                             "WALLET_UNAVAILABLE", requested_action=str(action),
                             amount_mode=str(mode),
-                            profile_digest=self.lending_actions.profile.digest,
+                            profile_digest=profile.digest,
+                            profile_id=profile_id,
                         )
                     )
                 except Exception:
                     payload = unavailable_preview(
                         "WALLET_UNAVAILABLE", requested_action=str(action),
                         amount_mode=str(mode),
-                        profile_digest=self.lending_actions.profile.digest,
+                        profile_digest=profile.digest,
+                        profile_id=profile_id,
                     )
             return self._response(request, MessageKind.LENDING_ACTION_PREVIEW, payload)
         if request.kind is MessageKind.LENDING_AUTHORITY_INTENT:

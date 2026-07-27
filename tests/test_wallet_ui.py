@@ -760,7 +760,7 @@ def test_trusted_recipients_qml_initializes_authority_before_apply(
         assert app.controller.currentScreen == "trusted_recipients"
         assert policy_control.authority_state == "READY"
         assert "Send disabled" in app.controller.trustedAuthorityStatus
-        assert "Aave protected route ready" in app.controller.trustedAuthorityStatus
+        assert "Lending protected routes ready" in app.controller.trustedAuthorityStatus
         assert app._test_mainnet_rpc.send_calls == 0
     finally:
         app.close()
@@ -1006,18 +1006,19 @@ def test_transaction_pages_have_password_click_only_and_semantic_copy() -> None:
     assert 'root.action.chainId' in review
     assert "transferFeeUsd" in review
     assert "Change action" in review and "Edit transfer" in review
-    assert 'source: "assets/aave-logo-white.png"' in review
+    assert 'source: root.action.protocolLogo || ""' in review
+    assert "semanticLendingAction" in review
+    assert "compound-logo-white.svg" in (
+        Path(__file__).parents[1] / "src" / "holon_wallet" / "transfer.py"
+    ).read_text(encoding="utf-8")
     assert "aaveDescription" not in review
     assert "Receiver ·" not in review
-    assert 'return "Supply " + action.amount + " to Aave"' in review
+    assert 'return "Supply " + action.amount + " to " + action.protocolLabel' in review
     assert 'return "Step 1 of 2 · Approve"' in review
     assert "readonly property int reviewCardWidth: 438" in review
     assert "width: 6; policy: ScrollBar.AsNeeded" in review
     assert "assets/aave-banner.png" not in review
-    for phrase in (
-        "Approve Aave V3", "Supply to Aave V3",
-        "Withdraw from Aave V3", "Withdraw all from Aave V3",
-    ):
+    for phrase in ("Approve ", "Supply to ", "Withdraw from ", "Withdraw all from "):
         assert phrase in review
     assert "onAccepted:" not in sign
     assert "onAccepted:" not in revoke

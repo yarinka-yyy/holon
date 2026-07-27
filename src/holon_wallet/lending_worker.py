@@ -33,10 +33,18 @@ def read_lending_preview(
     mode = intent.get("amount_mode") if intent.get("amount_mode") in {"exact", "all"} else None
     digest = request.get("profile_digest")
     profile_digest = digest if isinstance(digest, str) else None
+    profile_id = (
+        str(intent.get("protocol_profile_id"))
+        if intent.get("protocol_profile_id") in {
+            "aave-v3-base-usdc", "compound-v3-base-usdc",
+            "morpho-v1-gauntlet-usdc-prime",
+        } else "aave-v3-base-usdc"
+    )
     if not repository.exists:
         return unavailable_preview(
             "WALLET_ACCOUNT_UNAVAILABLE", requested_action=requested,
             amount_mode=mode, profile_digest=profile_digest,
+            profile_id=profile_id,
         )
     try:
         active = _active_profile(repository, settings)
@@ -44,6 +52,7 @@ def read_lending_preview(
         return unavailable_preview(
             "WALLET_ACCOUNT_UNAVAILABLE", requested_action=requested,
             amount_mode=mode, profile_digest=profile_digest,
+            profile_id=profile_id,
         )
     account = {"label": active.label, "address": active.address}
     try:
@@ -54,6 +63,7 @@ def read_lending_preview(
         preview = unavailable_preview(
             exc.code, requested_action=requested, amount_mode=mode,
             account=account, profile_digest=profile_digest,
+            profile_id=profile_id,
         )
     try:
         current = _active_profile(repository, settings)
@@ -63,6 +73,7 @@ def read_lending_preview(
         return unavailable_preview(
             "ACCOUNT_CHANGED", requested_action=requested, amount_mode=mode,
             profile_digest=profile_digest,
+            profile_id=profile_id,
         )
     return preview
 

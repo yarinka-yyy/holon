@@ -1,13 +1,15 @@
-"""Fresh, authority-bearing Aave action construction from semantic intent."""
+"""Fresh, authority-bearing pinned Lending action construction."""
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from holon_lending import AAVE_SAFETY_DIGEST, ActionProfilesState
+from holon_lending import ActionProfilesState
 from holon_lending.preflight import (
     MAX_UINT256, LendingPreflightError, LendingPreflightService, encode_approve,
-    encode_supply, encode_withdraw, parse_lending_intent,
+    encode_compound_supply, encode_compound_withdraw, encode_morpho_deposit,
+    encode_morpho_redeem, encode_morpho_withdraw, encode_supply, encode_withdraw,
+    parse_lending_intent,
 )
 
 from .model import ProfileSummary
@@ -24,12 +26,13 @@ def prepare_lending_action(
     request: dict[str, object],
 ) -> PreparedTransferAction:
     """Repeat the complete preflight and bind its exact transaction to a new action."""
-    action_profile = profiles.profile
+    profile_id = str(request.get("protocol_profile_id", "aave-v3-base-usdc"))
+    action_profile = profiles.select(profile_id)
     if action_profile is None or action_profile.digest != request.get("action_profile_digest"):
         raise LendingPreflightError("ACTION_PROFILE_UNAVAILABLE")
     raw_intent = {
         "module_id": "lending", "module_version": "1",
-        "protocol_profile_id": "aave-v3-base-usdc",
+        "protocol_profile_id": profile_id,
         "protocol_profile_version": "1", "network": "base", "asset": "usdc",
         "beneficiary_mode": "active_wallet_account", "action": request["action"],
         "amount_mode": request["amount_mode"], "amount": request["amount"],
@@ -57,18 +60,33 @@ def prepare_lending_action(
         raise LendingPreflightError("LENDING_AMOUNT_MISMATCH")
     next_action = str(preview["next_action"])
     if next_action == "approve":
-        calldata = encode_approve(action_profile.pool, amount)
-    elif next_action == "supply":
+        calldata = encode_approve(action_profile.spender, amount)
+    elif next_action == "supply" and action_profile.protocol_id == "aave-v3":
         calldata = encode_supply(action_profile.asset, amount, profile.address)
-    elif next_action == "withdraw":
+    elif next_action == "supply":
+        calldata = encode_compound_supply(action_profile.asset, amount)
+    elif next_action == "deposit":
+        calldata = encode_morpho_deposit(amount, profile.address)
+    elif next_action == "withdraw" and action_profile.protocol_id == "aave-v3":
         calldata = encode_withdraw(
             action_profile.asset,
             MAX_UINT256 if intent.amount_mode == "all" else amount,
             profile.address,
         )
+    elif next_action == "withdraw" and action_profile.protocol_id == "compound-v3":
+        calldata = encode_compound_withdraw(
+            action_profile.asset,
+            MAX_UINT256 if intent.amount_mode == "all" else amount,
+        )
+    elif next_action == "withdraw":
+        calldata = encode_morpho_withdraw(amount, profile.address)
+    elif next_action == "redeem":
+        calldata = encode_morpho_redeem(
+            int(str(preview["call_amount_atomic"])), profile.address,
+        )
     else:
         raise LendingPreflightError("LENDING_ACTION_UNAVAILABLE")
-    target = action_profile.asset if next_action == "approve" else action_profile.pool
+    target = action_profile.asset if next_action == "approve" else action_profile.target
     created = datetime.fromisoformat(str(request["created_at"]).replace("Z", "+00:00")).astimezone(UTC)
     expires = datetime.fromisoformat(str(request["expires_at"]).replace("Z", "+00:00")).astimezone(UTC)
     if expires - created != ACTION_LIFETIME or datetime.now(UTC) >= expires:
@@ -81,7 +99,7 @@ def prepare_lending_action(
     )
     return PreparedTransferAction(
         TRANSFER_SCHEMA_VERSION, str(request["action_id"]), profile.profile_id,
-        profile.label, profile.address, action_profile.pool, "base", "Base",
+        profile.label, profile.address, action_profile.target, "base", "Base",
         action_profile.chain_id, "usdc", "USDC", action_profile.asset, amount, 6,
         tx, int(str(preview["block_number"])), int(str(preview["max_total_fee_wei"])),
         created, expires, False, int(request["policy_revision"]),
@@ -92,6 +110,8 @@ def prepare_lending_action(
         str(request.get("operation_id", request["action_id"])),
         str(request.get("phase_action_id", request["action_id"])),
         str(request.get("phase", "withdraw" if intent.action == "withdraw" else "approve_or_supply")),
-        AAVE_SAFETY_DIGEST,
+        action_profile.safety_digest,
         int(str(preview.get("position_before_atomic", "0"))),
+        int(str(preview["call_amount_atomic"])),
+        action_profile.protocol_id,
     )

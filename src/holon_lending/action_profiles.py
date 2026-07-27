@@ -10,12 +10,14 @@ from typing import Any, Mapping
 
 from web3 import Web3
 
-from .model import AAVE_CONTRACTS, BASE_CHAIN_ID, BASE_USDC
+from .model import AAVE_CONTRACTS, BASE_CHAIN_ID, BASE_USDC, COMPOUND_CONTRACTS
+from .morpho import MORPHO_VAULT_ADDRESS
 
 ACTION_PROFILES_PATH = Path(__file__).with_name("action-profiles.json")
 MAX_ACTION_PROFILES_BYTES = 32 * 1024
 ACTION_PROFILES_DIGEST = "83640cdbbbbb8476eb1b34f0347430a5388a65034a63269f25e177c2671539be"
 AAVE_MAX_TOTAL_FEE_WEI = 100_000_000_000_000
+LENDING_MAX_TOTAL_FEE_WEI = AAVE_MAX_TOTAL_FEE_WEI
 AAVE_SAFETY_PROFILE = {
     "allowed_intents": ["supply:exact", "supply:all", "withdraw:exact", "withdraw:all"],
     "allowed_methods": ["approve", "supply", "withdraw"],
@@ -33,6 +35,63 @@ PROFILE_VERSION = "1"
 APPROVE_SELECTOR = "0x095ea7b3"
 SUPPLY_SELECTOR = "0x617ba037"
 WITHDRAW_SELECTOR = "0x69328dec"
+COMPOUND_PROFILE_ID = "compound-v3-base-usdc"
+MORPHO_PROFILE_ID = "morpho-v1-gauntlet-usdc-prime"
+
+
+def _profile_digest(value: Mapping[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(dict(value), separators=(",", ":"), sort_keys=True).encode(),
+    ).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class ProtocolActionProfile:
+    profile_id: str
+    profile_version: str
+    protocol_id: str
+    chain_id: int
+    asset: str
+    decimals: int
+    target: str
+    spender: str
+    position_token: str
+    digest: str
+    safety_digest: str
+
+
+def _additional_profile(
+    profile_id: str, protocol_id: str, target: str, methods: list[str],
+) -> ProtocolActionProfile:
+    value = {
+        "allowed_intents": ["supply:exact", "supply:all", "withdraw:exact", "withdraw:all"],
+        "allowed_methods": ["approve", *methods], "asset": BASE_USDC,
+        "beneficiary": "active_wallet_account", "chain_id": BASE_CHAIN_ID,
+        "max_total_fee_wei": str(LENDING_MAX_TOTAL_FEE_WEI), "native_value_wei": "0",
+        "profile_id": profile_id, "profile_version": "1", "protocol_id": protocol_id,
+        "spender": target, "target": target,
+    }
+    digest = _profile_digest(value)
+    safety = _profile_digest({**value, "safety_schema_version": "1"})
+    return ProtocolActionProfile(
+        profile_id, "1", protocol_id, BASE_CHAIN_ID, BASE_USDC, 6,
+        target, target, target, digest, safety,
+    )
+
+
+COMPOUND_ACTION_PROFILE = _additional_profile(
+    COMPOUND_PROFILE_ID, "compound-v3", COMPOUND_CONTRACTS["comet"],
+    ["supply", "withdraw"],
+)
+MORPHO_ACTION_PROFILE = _additional_profile(
+    MORPHO_PROFILE_ID, "morpho-v1", MORPHO_VAULT_ADDRESS,
+    ["deposit", "withdraw", "redeem"],
+)
+ADDITIONAL_ACTION_PROFILES = (COMPOUND_ACTION_PROFILE, MORPHO_ACTION_PROFILE)
+ACTION_PROFILE_DIGESTS = {
+    PROFILE_ID: ACTION_PROFILES_DIGEST,
+    **{profile.profile_id: profile.digest for profile in ADDITIONAL_ACTION_PROFILES},
+}
 
 
 class ActionProfilesValidationError(ValueError):
@@ -75,6 +134,26 @@ class AaveActionProfile:
     data_provider: str
     a_token: str
     digest: str
+
+    @property
+    def protocol_id(self) -> str:
+        return "aave-v3"
+
+    @property
+    def target(self) -> str:
+        return self.pool
+
+    @property
+    def spender(self) -> str:
+        return self.pool
+
+    @property
+    def position_token(self) -> str:
+        return self.a_token
+
+    @property
+    def safety_digest(self) -> str:
+        return AAVE_SAFETY_DIGEST
 
     @classmethod
     def from_dict(cls, value: object, digest: str) -> "AaveActionProfile":
@@ -178,6 +257,23 @@ class ActionProfilesState:
     status: str
     profile: AaveActionProfile | None
     error_code: str | None
+
+    def select(self, profile_id: str) -> AaveActionProfile | ProtocolActionProfile | None:
+        if self.profile is not None and profile_id == self.profile.profile_id:
+            return self.profile
+        return next(
+            (profile for profile in ADDITIONAL_ACTION_PROFILES if profile.profile_id == profile_id),
+            None,
+        )
+
+    def select_by_digest(self, digest: str) -> AaveActionProfile | ProtocolActionProfile | None:
+        return next((profile for profile in self.profiles if profile.digest == digest), None)
+
+    @property
+    def profiles(self) -> tuple[AaveActionProfile | ProtocolActionProfile, ...]:
+        if self.profile is None:
+            return ()
+        return (self.profile, *ADDITIONAL_ACTION_PROFILES)
 
     @classmethod
     def load(cls, path: Path = ACTION_PROFILES_PATH) -> "ActionProfilesState":

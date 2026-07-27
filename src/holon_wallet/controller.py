@@ -864,7 +864,7 @@ class WalletController(QObject):
     def trustedAuthorityStatus(self) -> str:
         return (
             ("Send enabled" if self._trusted_transfer_enabled else "Send disabled")
-            + " · Aave protected route ready"
+            + " · Lending protected routes ready"
         )
 
     @Property(str, notify=trustedDraftChanged)
@@ -1209,7 +1209,7 @@ class WalletController(QObject):
         try:
             intent = parse_lending_intent({
                 "module_id": "lending", "module_version": "1",
-                "protocol_profile_id": "aave-v3-base-usdc",
+                "protocol_profile_id": request["protocol_profile_id"],
                 "protocol_profile_version": "1", "network": "base",
                 "asset": "usdc", "beneficiary_mode": "active_wallet_account",
                 "action": request["action"], "amount_mode": request["amount_mode"],
@@ -1231,6 +1231,7 @@ class WalletController(QObject):
                 intent.action, intent.amount_mode, amount_atomic,
                 str(request["action_profile_digest"]),
                 str(request.get("policy_version", "")),
+                protocol_profile_id=intent.profile_id,
             )
             if policy_code is not None:
                 completion(self._external_refusal(request, policy_code.value))
@@ -1247,7 +1248,11 @@ class WalletController(QObject):
         self._external_completion = completion
         self._transfer_network = "base"
         self._transfer_asset = "usdc"
-        self._transfer_recipient = "Aave V3 Pool"
+        self._transfer_recipient = {
+            "aave-v3-base-usdc": "Aave V3",
+            "compound-v3-base-usdc": "Compound III",
+            "morpho-v1-gauntlet-usdc-prime": "Morpho V1",
+        }[intent.profile_id]
         self._transfer_amount_input = intent.amount or "All current position"
         self._transfer_preparing = True
         self._transfer_generation += 1
@@ -1404,7 +1409,7 @@ class WalletController(QObject):
             self._notify_external_transfer("REJECTED", "ACTION_EDIT_REQUESTED")
             self._clear_mainnet_result()
             self._cancel_transfer_request(clear_recipient=True)
-            self._guard_open_notice = "Aave action cancelled · change it in Hermes"
+            self._guard_open_notice = "Lending action cancelled · change it in Hermes"
             self.guardNoticeChanged.emit()
             self._guard_notice_timer.start()
             self._set_screen("main")
@@ -1877,12 +1882,12 @@ class WalletController(QObject):
     @Slot(str, str, result=bool)
     def saveTrustedLendingLimits(self, amount: str, fee: str) -> bool:
         del amount, fee
-        self._set_error("Aave limits are built in and cannot be edited here")
+        self._set_error("Lending limits are built in and cannot be edited here")
         return False
 
     @Slot(result=bool)
     def removeTrustedLendingLimits(self) -> bool:
-        self._set_error("Aave limits are built in and cannot be removed")
+        self._set_error("Lending limits are built in and cannot be removed")
         return False
 
     @Slot()
@@ -2829,12 +2834,20 @@ class WalletController(QObject):
             "amountAtomic": str(operation.resolved_amount_atomic),
             "receiptState": operation.receipt_state,
             "transactionHash": operation.transaction_hash or "",
+            "protocolProfileId": operation.protocol_profile_id,
+            "protocolId": operation.protocol_id,
             "status": (
                 "Approval confirmed · resume with a fresh live preflight"
                 if operation.receipt_state == "confirmed"
                 else "Approval status must be checked before supply can resume"
             ),
         }
+        recovery_profile = self._lending_action_profiles.select(operation.protocol_profile_id)
+        if recovery_profile is None:
+            self._lending_recovery = {}
+            self.lendingRecoveryChanged.emit()
+            return False
+        self._activate_lending_revoke_profile(recovery_profile.spender)
         self.lendingRecoveryChanged.emit()
         self._set_screen("lending_recovery")
         return True
@@ -2917,7 +2930,9 @@ class WalletController(QObject):
         return True
 
     def _is_recovery_revoke(self, action_id: str) -> bool:
-        profile = self._lending_action_profiles.profile
+        profile = self._lending_action_profiles.select(
+            str(self._lending_recovery.get("protocolProfileId", "aave-v3-base-usdc")),
+        )
         record = next(
             (item for item in self._history_records if item.action_id == action_id),
             None,
@@ -2925,8 +2940,17 @@ class WalletController(QObject):
         return bool(
             profile is not None and record is not None
             and record.action_type == "revoke" and record.network == "base"
-            and record.recipient.lower() == profile.pool.lower()
+            and record.recipient.lower() == profile.spender.lower()
         )
+
+    def _activate_lending_revoke_profile(self, spender: str) -> None:
+        policy = self._revoke_policy.with_builtin_base(spender, AAVE_MAX_TOTAL_FEE_WEI)
+        self._revoke_policy = policy
+        self._mainnet_executor.revoke_policy = policy
+        environ = getattr(self._mainnet_executor, "_environ", None)
+        rpc_factory = getattr(self._mainnet_executor, "_rpc_factory", None)
+        self._allowance_service = AllowanceReadService(policy, rpc_factory, environ)
+        self._revoke_preflight_service = RevokePreflightService(policy, rpc_factory, environ)
 
     def _trusted_route_map(
         self, route: TrustedRouteDraft,
@@ -3138,7 +3162,7 @@ class WalletController(QObject):
                 HistoryStatus.PENDING, HistoryStatus.CONFIRMED, HistoryStatus.UNKNOWN,
             }
         ):
-            if action.action_type == "lending" and action.method in {"approve", "supply"}:
+            if action.action_type == "lending" and action.method in {"approve", "supply", "deposit"}:
                 self._notify_external_transfer(
                     "BROADCASTED", result.code.value, result.history_status.value,
                     keep=True,
@@ -3322,7 +3346,7 @@ class WalletController(QObject):
             message = (
                 _transfer_error_message(result.code)
                 if isinstance(result, TransferPreflightError)
-                else "Aave action preflight failed"
+                else "Lending action preflight failed"
             )
             self._set_transfer_error(message)
             self.transferChanged.emit()
@@ -3340,7 +3364,7 @@ class WalletController(QObject):
         policy_code = self._mainnet_executor.policy.evaluate(result)
         if result.action_type == "lending" and policy_code is not None:
             self._transfer_flow.close()
-            self._set_transfer_error("Aave action exceeds the active policy")
+            self._set_transfer_error("Lending action exceeds the active policy")
             self.transferChanged.emit()
             self._finish_external_preflight(None, policy_code.value)
             self._set_screen("send")
@@ -4021,7 +4045,12 @@ def _history_record(action: PreparedTransferAction) -> WalletHistoryRecord:
         operation_id=(action.operation_id or action.action_id),
         position_before_atomic=(
             str(action.position_before_atomic)
-            if action.action_type == "lending" and action.method == "supply" else None
+            if action.action_type == "lending" and action.method != "approve" else None
+        ),
+        protocol_id=(action.protocol_id or None),
+        call_amount_atomic=(
+            str(action.call_amount_atomic or action.amount_atomic)
+            if action.action_type == "lending" else None
         ),
     )
 

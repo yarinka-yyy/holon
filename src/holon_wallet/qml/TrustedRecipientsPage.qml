@@ -113,7 +113,7 @@ PageState {
     }
     Text {
         x: 48; y: 734; width: 418; horizontalAlignment: Text.AlignHCenter
-        text: "Transfer drafts never alter the built-in Aave route"
+        text: "Transfer drafts never alter the built-in Lending routes"
         color: Design.textFaint; font.family: Design.fontFamily; font.pixelSize: 11
     }
 }

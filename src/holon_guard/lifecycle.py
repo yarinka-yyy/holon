@@ -60,10 +60,12 @@ class GuardLifecycle(GuardCore):
                 {
                     "action": "supply", "amount_mode": operation.amount_mode,
                     "amount": operation.amount,
+                    "protocol_profile_id": operation.protocol_profile_id,
                 }, operation.resolved_amount_atomic, operation.policy_version,
                 str(AAVE_MAX_TOTAL_FEE_WEI), None, operation.policy_revision,
                 operation.policy_digest, operation.action_profile_digest,
                 operation_id=operation.operation_id, phase="supply",
+                safety_digest=operation.safety_digest,
             )
             if not result.ok:
                 updated = operation.with_phase("resume_or_revoke")
@@ -267,8 +269,10 @@ class GuardLifecycle(GuardCore):
         amount_cap_atomic: str | None,
         policy_revision: int, policy_digest: str, action_profile_digest: str,
         operation_id: str | None = None, phase: str = "approve_or_supply",
+        safety_digest: str = AAVE_SAFETY_DIGEST,
     ) -> tuple[GuardResult, dict[str, object] | None]:
-        """Start one fresh Aave action; never chains another action."""
+        """Start one fresh Lending action; never chains another action."""
+        intent = {"protocol_profile_id": "aave-v3-base-usdc", **intent}
         with self._lock:
             try:
                 self.ledger.preflight(action_id, fingerprint)
@@ -387,10 +391,16 @@ class GuardLifecycle(GuardCore):
                         operation_id or action_id, "supply", str(intent["amount_mode"]),
                         intent.get("amount") if isinstance(intent.get("amount"), str) else None,
                         resolved_amount_atomic, owner_pid, policy_version, policy_revision,
-                        policy_digest, action_profile_digest, AAVE_SAFETY_DIGEST,
+                        policy_digest, action_profile_digest, safety_digest,
                         operation_phase, action_id, fingerprint,
                         created.isoformat().replace("+00:00", "Z"),
                         prepared_profile_id, prepared_sender,
+                        protocol_profile_id=str(intent["protocol_profile_id"]),
+                        protocol_id={
+                            "aave-v3-base-usdc": "aave-v3",
+                            "compound-v3-base-usdc": "compound-v3",
+                            "morpho-v1-gauntlet-usdc-prime": "morpho-v1",
+                        }[str(intent["protocol_profile_id"])],
                     )
                 else:
                     if (
@@ -467,7 +477,7 @@ class GuardLifecycle(GuardCore):
                         datetime.now(UTC).isoformat().replace("+00:00", "Z"),
                     )
                     self.ledger.terminalize(ActionState.FAILED, str(update["code"]))
-                    if update.get("phase") == "supply":
+                    if update.get("phase") in {"supply", "deposit"}:
                         updated = operation.with_phase("resume_or_revoke")
                         next_snapshot = LendingOperationSnapshot(
                             updated, self.lending_operation_snapshot.terminal,

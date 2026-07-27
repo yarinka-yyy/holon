@@ -22,7 +22,7 @@ PageState {
     }
     SurfaceCard {
         visible: root.lending.configured && root.operation !== "initialize"; x: 28; y: 220; width: 458; height: 82
-        Text { x: 16; y: 12; text: "Aave V3 · Base · USDC"; color: Design.text; font.family: Design.fontFamily; font.pixelSize: 14; font.weight: Font.DemiBold }
+        Text { x: 16; y: 12; text: "Aave · Compound · Morpho · Base USDC"; color: Design.text; font.family: Design.fontFamily; font.pixelSize: 14; font.weight: Font.DemiBold }
         Text { x: 16; y: 39; text: (root.lending.withdrawOnly ? "Withdraw ≤ " : "Legacy supply ≤ ") + root.lending.amount + " USDC · fee ≤ " + root.lending.fee + " ETH per action"; color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 12 }
         Text { x: 16; y: 61; text: root.lending.withdrawOnly ? "Exact or all-position withdraw only · active Wallet Account" : "Legacy approve/supply draft cannot be activated in M4.09"; color: Design.textFaint; font.family: Design.fontFamily; font.pixelSize: 10 }
     }
@@ -34,7 +34,7 @@ PageState {
             text: root.operation === "initialize"
                 ? "Guard will create first-run journal and replay-protection state. No policy or transaction will be activated."
                 : root.operation === "activate"
-                ? "Guard will enable only Aave Base USDC withdraw limits. Send remains disabled."
+                ? "Guard will enable only the built-in Base USDC Lending routes. Send remains disabled."
                 : root.operation === "deactivate"
                 ? "Guard will disable Lending authority. No transaction will be created."
                 : root.applyMode

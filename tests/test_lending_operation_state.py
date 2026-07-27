@@ -63,3 +63,27 @@ def test_receipt_mutation_and_terminal_history_fail_closed(tmp_path) -> None:
     store = LendingOperationStore(tmp_path / "lending-operation-state.json")
     with pytest.raises(LendingOperationStateError):
         store.save(LendingOperationSnapshot(None, (value,)))
+
+
+def test_v2_stores_protocol_and_v1_aave_state_remains_readable(tmp_path) -> None:
+    store = LendingOperationStore(tmp_path / "lending-operation-state.json")
+    compound = operation(
+        protocol_profile_id="compound-v3-base-usdc", protocol_id="compound-v3",
+    )
+    store.save(LendingOperationSnapshot(compound))
+    persisted = json.loads(store.path.read_text(encoding="utf-8"))["current"]
+    assert persisted["schema_version"] == "2"
+    assert persisted["protocol_profile_id"] == "compound-v3-base-usdc"
+    assert store.load().current == compound
+
+    legacy = operation().to_dict()
+    legacy["schema_version"] = "1"
+    legacy.pop("protocol_profile_id")
+    legacy.pop("protocol_id")
+    store.path.write_text(
+        json.dumps({"current": legacy, "terminal": []}), encoding="utf-8",
+    )
+    restored = store.load().current
+    assert restored is not None
+    assert restored.protocol_profile_id == "aave-v3-base-usdc"
+    assert restored.protocol_id == "aave-v3"

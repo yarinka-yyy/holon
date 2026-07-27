@@ -6,7 +6,7 @@ PageState {
     property var recovery: walletController.lendingRecovery
 
     Text {
-        x: 28; y: 54; text: "Aave supply recovery"; color: Design.text
+        x: 28; y: 54; text: "Lending supply recovery"; color: Design.text
         font.family: Design.fontFamily; font.pixelSize: 24; font.weight: Font.DemiBold
     }
     Text {
@@ -17,7 +17,7 @@ PageState {
     SurfaceCard {
         x: 28; y: 150; width: 458; height: 250
         Text {
-            x: 20; y: 20; text: "Supply to Aave V3"; color: Design.text
+            x: 20; y: 20; text: "Supply to " + (walletController.lendingRecovery.protocolId || "Lending"); color: Design.text
             font.family: Design.fontFamily; font.pixelSize: 19; font.weight: Font.DemiBold
         }
         Text {

@@ -6,7 +6,7 @@ TransactionFlowShell {
     id: root
     title: "Confirm Transaction"
     subtitle: action.actionType === "lending"
-        ? ((action.operationStep || "Review") + " · Review the exact Aave action")
+        ? ((action.operationStep || "Review") + " · Review the exact Lending action")
         : "Review exact transfer details"
     activeStep: 0; onBackRequested: walletController.editTransfer()
     property bool detailsOpen: false
@@ -25,26 +25,24 @@ TransactionFlowShell {
     readonly property int detailsY: root.isLending ? 340 : 372
     readonly property int collapsedContentHeight: root.detailsY + 48
 
-    function aaveTitle() {
-        if (action.method === "approve") return "Supply " + action.amount + " to Aave"
-        if (action.method === "supply") return "Supply " + action.amount + " to Aave"
-        if (action.method === "withdraw" && action.amountMode === "all")
-            return "Withdraw all from Aave"
-        if (action.method === "withdraw") return "Withdraw from Aave"
-        return "Aave action"
+    function lendingTitle() {
+        if (action.method === "approve" || action.method === "supply" || action.method === "deposit")
+            return "Supply " + action.amount + " to " + action.protocolLabel
+        if (action.amountMode === "all") return "Withdraw all from " + action.protocolLabel
+        if (action.method === "withdraw") return "Withdraw from " + action.protocolLabel
+        return "Lending action"
     }
-    function aaveStep() {
+    function lendingStep() {
         if (action.method === "approve") return "Step 1 of 2 · Approve"
-        if (action.method === "supply") return "Step 2 of 2 · Supply"
-        if (action.method === "withdraw" && action.amountMode === "all") return "All available funds"
+        if (action.method === "supply" || action.method === "deposit") return "Step 2 of 2 · Supply"
+        if (action.amountMode === "all") return "All available funds"
         return "Exact amount"
     }
-    function semanticAaveAction() {
-        if (action.method === "approve") return "Approve Aave V3"
-        if (action.method === "supply") return "Supply to Aave V3"
-        if (action.method === "withdraw" && action.amountMode === "all")
-            return "Withdraw all from Aave V3"
-        return "Withdraw from Aave V3"
+    function semanticLendingAction() {
+        if (action.method === "approve") return "Approve " + action.protocolLabel
+        if (action.method === "supply" || action.method === "deposit") return "Supply to " + action.protocolLabel
+        if (action.amountMode === "all") return "Withdraw all from " + action.protocolLabel
+        return "Withdraw from " + action.protocolLabel
     }
 
     Flickable {
@@ -91,19 +89,19 @@ TransactionFlowShell {
             Image {
                 visible: root.isLending
                 x: parent.width - 126; y: 24; width: 110; height: 22
-                source: "assets/aave-logo-white.png"
+                source: root.action.protocolLogo || ""
                 fillMode: Image.PreserveAspectFit
                 sourceSize: Qt.size(220, 44)
             }
             Text {
                 x: 52; y: 11; width: root.isLending ? 248 : 370
-                text: root.isLending ? root.aaveTitle() : "To"
+                text: root.isLending ? root.lendingTitle() : "To"
                 color: Design.text; font.family: Design.fontFamily
                 font.pixelSize: 14; font.weight: Font.Medium
             }
             Text {
                 x: 52; y: 35; width: root.isLending ? 248 : 370
-                text: root.isLending ? root.aaveStep() : (root.action.recipient || "")
+                text: root.isLending ? root.lendingStep() : (root.action.recipient || "")
                 color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 11
                 elide: root.isLending ? Text.ElideRight : Text.ElideMiddle
             }
@@ -157,7 +155,8 @@ TransactionFlowShell {
                             ? (root.action.sender || "")
                             : (root.action.recipient || "")],
                         ["Method", root.action.method || "transfer"],
-                        ["Action", root.isLending ? root.semanticAaveAction() : "Transfer"],
+                        ["Protocol", root.isLending ? (root.action.protocolLabel || "") : ""],
+                        ["Action", root.isLending ? root.semanticLendingAction() : "Transfer"],
                         ["Amount mode", root.action.amountMode || "exact"],
                         ["Action profile", root.action.actionProfileDigest || ""],
                         ["Contract", root.action.shortContract || "Native asset"],

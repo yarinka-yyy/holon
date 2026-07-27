@@ -112,9 +112,10 @@ class PipeGuardClient:
             response_timeout=35.0,
         )
 
-    def lending_markets(self) -> ContractEnvelope:
+    def lending_markets(self, force_refresh: bool = False) -> ContractEnvelope:
         return self.client.request(
             MessageKind.READ_LENDING_MARKETS,
+            {"force_refresh": force_refresh},
             response_timeout=20.0,
         )
 

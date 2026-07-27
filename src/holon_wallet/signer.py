@@ -36,7 +36,9 @@ from .transfer import (
 )
 from holon_lending import ActionProfilesState
 from holon_lending.preflight import (
-    MAX_UINT256, encode_approve, encode_supply, encode_withdraw,
+    MAX_UINT256, encode_approve, encode_compound_supply, encode_compound_withdraw,
+    encode_morpho_deposit, encode_morpho_redeem, encode_morpho_withdraw,
+    encode_supply, encode_withdraw,
 )
 from .vault import (
     AuthenticationFailedError,
@@ -291,31 +293,48 @@ def validate_signing_action(
 def _validate_lending_action(
     action: PreparedTransferAction, expected_digest: str, now: datetime,
 ) -> OfflineSigningCode | None:
-    profile = ActionProfilesState.load().profile
+    profile = ActionProfilesState.load().select_by_digest(action.action_profile_digest)
     if profile is None:
         return OfflineSigningCode.ACTION_INVALID
     tx = action.transaction
+    call_amount = action.call_amount_atomic or action.amount_atomic
     if action.method == "approve":
-        expected_data = encode_approve(profile.pool, action.amount_atomic)
-    elif action.method == "supply":
+        expected_data = encode_approve(profile.spender, action.amount_atomic)
+    elif action.method == "supply" and profile.protocol_id == "aave-v3":
         expected_data = encode_supply(profile.asset, action.amount_atomic, action.sender)
-    else:
+    elif action.method == "supply":
+        expected_data = encode_compound_supply(profile.asset, action.amount_atomic)
+    elif action.method == "deposit":
+        expected_data = encode_morpho_deposit(action.amount_atomic, action.sender)
+    elif action.method == "withdraw" and profile.protocol_id == "aave-v3":
         expected_data = encode_withdraw(
             profile.asset,
             MAX_UINT256 if action.amount_mode == "all" else action.amount_atomic,
             action.sender,
         )
-    expected_target = profile.asset if action.method == "approve" else profile.pool
+    elif action.method == "withdraw" and profile.protocol_id == "compound-v3":
+        expected_data = encode_compound_withdraw(
+            profile.asset,
+            MAX_UINT256 if action.amount_mode == "all" else action.amount_atomic,
+        )
+    elif action.method == "withdraw":
+        expected_data = encode_morpho_withdraw(action.amount_atomic, action.sender)
+    elif action.method == "redeem":
+        expected_data = encode_morpho_redeem(call_amount, action.sender)
+    else:
+        return OfflineSigningCode.ACTION_INVALID
+    expected_target = profile.asset if action.method == "approve" else profile.target
     valid_mode = (
-        action.method in {"approve", "supply"} and action.amount_mode == "exact"
+        action.method in {"approve", "supply", "deposit"} and action.amount_mode == "exact"
     ) or (
-        action.method == "withdraw" and action.amount_mode in {"exact", "all"}
+        action.method in {"withdraw", "redeem"} and action.amount_mode in {"exact", "all"}
     )
     valid = (
         action.digest == expected_digest and now < action.expires_at
         and action.expires_at - action.created_at == ACTION_LIFETIME
         and valid_mode
         and action.action_profile_digest == profile.digest
+        and action.protocol_id == profile.protocol_id
         and action.network_id == "base" and action.asset_id == "usdc"
         and action.chain_id == profile.chain_id and action.token_contract == profile.asset
         and Web3.is_checksum_address(action.sender) and action.amount_atomic > 0

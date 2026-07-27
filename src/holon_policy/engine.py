@@ -7,7 +7,7 @@ from typing import Any, Mapping
 
 from holon_contracts import RefusalCode
 from holon_lending.action_profiles import (
-    ACTION_PROFILES_DIGEST, AAVE_MAX_TOTAL_FEE_WEI,
+    ACTION_PROFILE_DIGESTS, AAVE_MAX_TOTAL_FEE_WEI,
 )
 
 from .model import LendingRule, Policy, RecipientRule, TransferRule
@@ -91,11 +91,12 @@ class PolicyEngine:
     ) -> tuple[PolicyDecision, LendingRule | None]:
         if self.policy.schema_version == "4":
             fixed = {
-                "module_id": "lending", "protocol_profile_id": "aave-v3-base-usdc",
-                "network": "base", "asset": "usdc",
+                "module_id": "lending", "network": "base", "asset": "usdc",
             }
+            profile_id = payload.get("protocol_profile_id")
             if (
-                action_profile_digest != ACTION_PROFILES_DIGEST
+                not isinstance(profile_id, str)
+                or ACTION_PROFILE_DIGESTS.get(profile_id) != action_profile_digest
                 or any(payload.get(name) != expected for name, expected in fixed.items())
             ):
                 return PolicyDecision.refuse(
@@ -164,7 +165,7 @@ class PolicyEngine:
         rule: LendingRule | None,
     ) -> PolicyDecision:
         if rule is None:
-            if next_action not in {"approve", "supply", "withdraw"}:
+            if next_action not in {"approve", "supply", "deposit", "withdraw", "redeem"}:
                 return PolicyDecision.refuse(
                     RefusalCode.ACTION_NOT_ALLOWED, "Prepared lending action is not allowed.",
                 )
