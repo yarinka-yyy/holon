@@ -17,6 +17,7 @@ $sourceRoot = Join-Path $projectRoot "src"
 $entryPoint = Join-Path $sourceRoot "holon_wallet_app.py"
 $qmlRoot = Join-Path $sourceRoot "holon_wallet\qml"
 $resourceRoot = Join-Path $sourceRoot "holon_wallet\resources"
+$lendingReadProfile = Join-Path $sourceRoot "holon_lending\read-profiles.json"
 $lendingActionProfile = Join-Path $sourceRoot "holon_lending\action-profiles.json"
 $baselinePolicy = Join-Path $sourceRoot "holon_policy\baseline-policy.json"
 New-Item -ItemType Directory -Force -Path $buildRoot | Out-Null
@@ -38,6 +39,7 @@ try {
         --paths $sourceRoot `
         --add-data "$qmlRoot;holon_wallet/qml" `
         --add-data "$resourceRoot;holon_wallet/resources" `
+        --add-data "$lendingReadProfile;holon_lending" `
         --add-data "$lendingActionProfile;holon_lending" `
         --add-data "$baselinePolicy;holon_policy" `
         --collect-data bip_utils `
