@@ -510,6 +510,20 @@ class GuardLifecycle(GuardCore):
                             return False
                 elif event == "FAILED":
                     self.ledger.terminalize(ActionState.FAILED, str(update["code"]))
+                    if is_lending:
+                        if operation.phase == "approve_review":
+                            failed = operation.with_phase("failed")
+                            next_snapshot = LendingOperationSnapshot(
+                                None,
+                                self.lending_operation_snapshot.terminal + (failed,),
+                            )
+                        else:
+                            next_snapshot = LendingOperationSnapshot(
+                                operation.with_phase("resume_or_revoke"),
+                                self.lending_operation_snapshot.terminal,
+                            )
+                        if not self._save_lending_operations(next_snapshot):
+                            return False
                 else:
                     return False
             except ActionLedgerFailure:

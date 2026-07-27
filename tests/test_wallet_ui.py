@@ -523,6 +523,12 @@ def test_send_review_mainnet_confirmation_result_and_history(tmp_path, qt_app) -
         assert child(app, "transferReviewFee").property("text").startswith("≈ $")
         continue_button = child(app, "continueMainnetButton")
         secondary_button = child(app, "editTransferButton")
+        assert child(app, "transferReviewAccount").property("width") == (
+            continue_button.property("width")
+        )
+        assert child(app, "transferDetailsButton").property("width") == (
+            secondary_button.property("width")
+        )
         assert continue_button.property("y") + continue_button.property("height") <= 592
         assert secondary_button.property("y") + secondary_button.property("height") <= 592
         assert not child(app, "transferReviewOverflowCue").property("visible")
@@ -551,6 +557,11 @@ def test_send_review_mainnet_confirmation_result_and_history(tmp_path, qt_app) -
         assert child(app, "mainnetSignPageProgress").property("activeStep") == 1
         assert not child(app, "mainnetPasswordField").property("revealed")
         assert not child(app, "mainnetSendButton").property("enabled")
+        assert (
+            child(app, "mainnetPasswordField").property("y")
+            + child(app, "mainnetPasswordField").property("height")
+            < child(app, "mainnetSendButton").property("y")
+        )
         set_text(app, "mainnetPasswordInput", password)
         qt_app.processEvents()
         assert child(app, "mainnetSendButton").property("enabled")
@@ -1015,12 +1026,17 @@ def test_transaction_pages_have_password_click_only_and_semantic_copy() -> None:
     assert "Receiver ·" not in review
     assert 'return "Supply " + action.amount + " to " + action.protocolLabel' in review
     assert 'return "Step 1 of 2 · Approve"' in review
-    assert "readonly property int reviewCardWidth: 438" in review
+    assert "readonly property int reviewCardWidth: 458" in review
     assert "width: 6; policy: ScrollBar.AsNeeded" in review
     assert "assets/aave-banner.png" not in review
     for phrase in ("Approve ", "Supply to ", "Withdraw from ", "Withdraw all from "):
         assert phrase in review
     assert "onAccepted:" not in sign
+    assert 'return "Step 1 of 2 · Approve"' in sign
+    assert 'return "Step 2 of 2 · Supply"' in sign
+    assert 'objectName: "mainnetSignProtocolLogo"' in sign
+    assert 'x: 0; y: 370; width: 458; height: 56' in sign
+    assert 'objectName: "mainnetSendButton"; x: 0; y: 466' in sign
     assert "onAccepted:" not in revoke
     assert "CheckBox" not in sign + revoke
     assert "irreversible" not in (sign + revoke).lower()

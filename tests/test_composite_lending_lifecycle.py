@@ -120,3 +120,29 @@ def test_approve_receipt_creates_fresh_supply_phase_without_auto_signing(tmp_pat
         operation_store, operation_store.load(),
     )
     assert restored.lending_operation_snapshot.current.phase == "resume_or_revoke"
+
+
+def test_failed_approve_review_clears_current_lending_operation(tmp_path: Path) -> None:
+    state_store = SnapshotStore(tmp_path / "guard-state.json")
+    state_store.bootstrap_normal_for_test(1.0)
+    operation_store = LendingOperationStore(tmp_path / "lending-operation-state.json")
+    guard = GuardLifecycle(
+        state_store, state_store.load(), CompositeWallet(), Owner(),
+        make_ledger(tmp_path), operation_store, operation_store.load(),
+        clock=lambda: 2.0,
+    )
+    result, _prepared = guard.start_lending_intent(
+        101, ACTION_ID, FINGERPRINT,
+        {"action": "supply", "amount_mode": "exact", "amount": "2"},
+        2_000_000, "3", str(AAVE_MAX_TOTAL_FEE_WEI), None, 7,
+        "1" * 64, "2" * 64, operation_id=ACTION_ID,
+    )
+    assert result.ok
+
+    assert guard.accept_wallet_status(status(
+        guard, "FAILED", "REVALIDATION_FAILED",
+        receipt_state="none", tx_hash=None,
+    ))
+    assert guard.snapshot.state is GuardState.NORMAL
+    assert guard.lending_operation_snapshot.current is None
+    assert guard.lending_operation_snapshot.terminal[-1].phase == "failed"

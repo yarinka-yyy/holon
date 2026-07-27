@@ -18,7 +18,7 @@ TransactionFlowShell {
         ? "assets/ethereum.svg" : "assets/usdc.png"
     property url networkIcon: action.networkId === "ethereum"
         ? "assets/ethereum.svg" : "assets/base.png"
-    readonly property int reviewCardWidth: 438
+    readonly property int reviewCardWidth: 458
     readonly property int accountY: root.isLending ? 0 : 50
     readonly property int recipientY: root.isLending ? 74 : 118
     readonly property int summaryY: root.isLending ? 154 : 190

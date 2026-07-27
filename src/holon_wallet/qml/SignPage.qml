@@ -18,11 +18,11 @@ TransactionFlowShell {
 
     function actionTitle() {
         if (!root.isLending) return (root.action.amount || "Transfer") + " on " + (root.action.network || "")
-        if (root.action.method === "approve") return "Step 1 of 2 · Approve " + root.action.protocolLabel
+        if (root.action.method === "approve") return "Step 1 of 2 · Approve"
         if (root.action.method === "supply" || root.action.method === "deposit")
-            return "Step 2 of 2 · Supply to " + root.action.protocolLabel
-        if (root.action.amountMode === "all") return "Withdraw all from " + root.action.protocolLabel
-        return "Withdraw from " + root.action.protocolLabel
+            return "Step 2 of 2 · Supply"
+        if (root.action.amountMode === "all") return "Withdraw all"
+        return "Withdraw"
     }
     function actionSubtitle() {
         if (!root.isLending) return "To " + (root.action.recipient || "")
@@ -41,25 +41,27 @@ TransactionFlowShell {
     onEnabledChanged: if (!enabled) passwordField.clear()
 
     SurfaceCard {
-        x: 0; y: 0; width: 458; height: 168; clip: true
+        x: 0; y: 0; width: 458; height: 128; clip: true
         Image {
-            visible: root.isLending; x: parent.width - 168; y: 18; width: 150; height: 32
+            objectName: "mainnetSignProtocolLogo"
+            visible: root.isLending; x: parent.width - 158; y: 18; width: 140; height: 28
             source: root.action.protocolLogo || ""; fillMode: Image.PreserveAspectFit
-            sourceSize: Qt.size(300, 64)
+            sourceSize: Qt.size(280, 56)
         }
         Text {
-            x: 18; y: root.isLending ? 70 : 18; width: root.isLending ? 420 : 350
+            objectName: "mainnetSignActionTitle"
+            x: 18; y: 18; width: root.isLending ? 270 : 350
             text: root.actionTitle(); color: Design.text
             font.family: Design.fontFamily; font.pixelSize: 19; font.weight: Font.DemiBold
         }
         Text {
-            x: 18; y: root.isLending ? 105 : 54; width: 350
+            x: 18; y: 58; width: 422
             text: root.actionSubtitle(); color: Design.textMuted
             font.family: Design.fontFamily; font.pixelSize: 11
             elide: Text.ElideMiddle
         }
         Text {
-            x: 18; y: 140
+            x: 18; y: 94
             text: "Maximum fee " + walletController.transferFeeUsd
             color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 11
         }
@@ -70,28 +72,28 @@ TransactionFlowShell {
         }
     }
     Text {
-        x: 0; y: 190; text: "Wallet password"; color: Design.textMuted
+        x: 18; y: 154; width: 422; horizontalAlignment: Text.AlignHCenter
+        text: "The button below authorizes only the exact action shown above."
+        color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 12
+        wrapMode: Text.Wrap
+    }
+    Text {
+        x: 0; y: 346; text: "Wallet password"; color: Design.textMuted
         font.family: Design.fontFamily; font.pixelSize: 13
     }
     PasswordInput {
         id: passwordField; objectName: "mainnetPasswordField"
         fieldObjectName: "mainnetPasswordInput"
-        x: 0; y: 218; width: 458; height: 56
+        x: 0; y: 370; width: 458; height: 56
         placeholderText: "Enter fresh password"
     }
     Text {
-        x: 0; y: 287; width: 458; horizontalAlignment: Text.AlignHCenter
+        x: 0; y: 436; width: 458; horizontalAlignment: Text.AlignHCenter
         text: "The password is used once and is not stored"
         color: Design.textFaint; font.family: Design.fontFamily; font.pixelSize: 11
     }
-    Text {
-        x: 18; y: 330; width: 422; horizontalAlignment: Text.AlignHCenter
-        text: "The button below authorizes only the exact action shown above."
-        color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 12
-        wrapMode: Text.Wrap
-    }
     FormButton {
-        objectName: "mainnetSendButton"; x: 0; y: 474; width: 458; height: 56
+        objectName: "mainnetSendButton"; x: 0; y: 466; width: 458; height: 56
         label: root.isLending
             ? "Sign and submit " + root.lendingMethod
             : "Sign and send " + (root.action.token || "asset")
@@ -99,7 +101,7 @@ TransactionFlowShell {
         onTriggered: root.submit()
     }
     FormButton {
-        objectName: "mainnetCancelButton"; x: 0; y: 542; width: 458; height: 42
+        objectName: "mainnetCancelButton"; x: 0; y: 534; width: 458; height: 42
         label: "Cancel"; primary: false
         onTriggered: walletController.cancelMainnetExecution()
     }
