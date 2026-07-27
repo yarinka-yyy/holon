@@ -1046,6 +1046,19 @@ def test_transaction_pages_have_password_click_only_and_semantic_copy() -> None:
     assert "irreversible" not in (sign + revoke).lower()
 
 
+def test_compound_logo_uses_original_mark_with_white_wordmark() -> None:
+    asset = (
+        Path(__file__).parents[1]
+        / "src" / "holon_wallet" / "qml" / "assets" / "compound-logo-white.svg"
+    ).read_text(encoding="utf-8")
+
+    assert "M18.5381 43.3951" in asset
+    assert 'fill="#00D395"' in asset
+    assert 'fill="white"' in asset
+    assert ">Compound</text>" in asset
+    assert "<circle" not in asset
+
+
 def test_terminal_result_icons_are_never_reused_from_the_rotating_spinner() -> None:
     qml = Path(__file__).parents[1] / "src" / "holon_wallet" / "qml"
     for name, spinner, terminal in (
