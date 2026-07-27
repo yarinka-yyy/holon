@@ -29,12 +29,13 @@ class FakeRpc:
         self.aave_position = 0
         self.compound_position = 1_250_000
         self.morpho_position = 2_500_001
+        self.timestamp = NOW - 10
 
     def begin(self) -> ChainSnapshot:
         self.calls.append("begin")
         if "begin" in self.fail:
             raise RuntimeError("offline")
-        return ChainSnapshot(BLOCK, NOW - 10)
+        return ChainSnapshot(BLOCK, self.timestamp)
 
     def aave(self, snapshot: ChainSnapshot, account: str | None = None):
         del snapshot
@@ -92,6 +93,11 @@ class FakeMorpho:
     def query(self):
         self.calls += 1
         return copy.deepcopy(self.value)
+
+
+def refresh_fake_time(rpc: FakeRpc, morpho: FakeMorpho, now: int) -> None:
+    rpc.timestamp = now - 10
+    morpho.value["state"]["timestamp"] = now - 30
 
 
 @pytest.fixture
@@ -270,7 +276,8 @@ def test_portfolio_tracks_positions_earnings_cache_and_history(tmp_path) -> None
     compound = second["protocols"][1]
     assert compound["tracked_earnings_atomic"] == "50000"
     assert second["summary"]["tracked_earnings_atomic"] == "50000"
-    assert len(second["history"]["points"]) == 2
+    assert len(second["history"]["points"]) == 1
+    assert second["history"]["granularity"] == "day"
 
     calls = len(rpc.calls)
     now[0] += 30
@@ -336,35 +343,99 @@ def test_portfolio_marks_earnings_unknown_without_reliable_wallet_history(tmp_pa
     assert all(item["earnings_status"] == "NOT_ENOUGH_HISTORY" for item in result["protocols"])
 
 
-def test_portfolio_replaces_same_minute_and_keeps_last_two_thousand_points(tmp_path) -> None:
+def test_portfolio_keeps_contribution_total_after_wallet_history_rotation(tmp_path) -> None:
     now = [NOW]
-    service, _rpc, _morpho = runtime.__wrapped__()  # type: ignore[attr-defined]
+    rpc, morpho = FakeRpc(), FakeMorpho()
+    rpc.aave_position = 1_000_000
+    store = LendingAnalyticsStore(tmp_path / "analytics.json")
+    reader = LendingReadService(
+        ReadProfilesState.load(), lambda: rpc, morpho, clock=lambda: now[0],
+    )
+    portfolio = LendingPortfolioService(reader, store, clock=lambda: now[0])
+    portfolio.read(ACCOUNT, [])
+
+    now[0] += 86_400
+    refresh_fake_time(rpc, morpho, now[0])
+    rpc.aave_position = 1_000_100
+    first = [{
+        "action_id": "old-supply", "protocol": "aave-v3", "direction": "supply",
+        "amount_atomic": "100", "verified": True,
+        "updated_at": "2027-01-16T08:00:00Z",
+    }]
+    portfolio.read(ACCOUNT, first, force_refresh=True)
+    first_baseline = store.load(ACCOUNT["address"])["baselines"]["aave-v3"]
+    assert first_baseline["net_contributions_atomic"] == "100"
+    assert first_baseline["processed_action_ids"] == ["old-supply"]
+
+    now[0] += 86_400
+    refresh_fake_time(rpc, morpho, now[0])
+    rpc.aave_position = 1_000_300
+    current_history = [{
+        "action_id": "current-supply", "protocol": "aave-v3", "direction": "supply",
+        "amount_atomic": "200", "verified": True,
+        "updated_at": "2027-01-17T08:00:00Z",
+    }]
+    rotated = portfolio.read(ACCOUNT, current_history, force_refresh=True)
+    baseline = store.load(ACCOUNT["address"])["baselines"]["aave-v3"]
+    assert baseline["net_contributions_atomic"] == "300"
+    assert baseline["processed_action_ids"] == ["current-supply"]
+    assert rotated["protocols"][0]["tracked_earnings_atomic"] == "0"
+
+    restarted = LendingPortfolioService(reader, store, clock=lambda: now[0])
+    repeated = restarted.read(ACCOUNT, current_history, force_refresh=True)
+    assert repeated["protocols"][0]["tracked_earnings_atomic"] == "0"
+    assert store.load(ACCOUNT["address"])["baselines"]["aave-v3"][
+        "net_contributions_atomic"
+    ] == "300"
+
+
+def test_portfolio_sparse_history_does_not_invent_missing_days(tmp_path) -> None:
+    now = [NOW]
+    service, rpc, morpho = runtime.__wrapped__()  # type: ignore[attr-defined]
+    portfolio = LendingPortfolioService(
+        service, LendingAnalyticsStore(tmp_path / "analytics.json"), clock=lambda: now[0],
+    )
+    portfolio.read(ACCOUNT, [], force_refresh=True)
+    for days in (3, 12):
+        now[0] += days * 86_400
+        refresh_fake_time(rpc, morpho, now[0])
+        result = portfolio.read(ACCOUNT, [], force_refresh=True, history_period="all")
+    assert result["history"]["granularity"] == "ten_day"
+    assert len(result["history"]["points"]) == 2
+
+    now[0] += 25 * 86_400
+    refresh_fake_time(rpc, morpho, now[0])
+    monthly = portfolio.read(ACCOUNT, [], force_refresh=True, history_period="all")
+    assert monthly["history"]["granularity"] == "month"
+    assert len(monthly["history"]["points"]) == 2
+
+
+def test_portfolio_replaces_same_day_and_compacts_old_days_to_months(tmp_path) -> None:
+    now = [NOW]
+    service, rpc, morpho = runtime.__wrapped__()  # type: ignore[attr-defined]
     store = LendingAnalyticsStore(tmp_path / "analytics.json")
     portfolio = LendingPortfolioService(service, store, clock=lambda: now[0])
     portfolio.read(ACCOUNT, [])
     now[0] += 30
     portfolio.read(ACCOUNT, [], force_refresh=True)
     state = store.load(ACCOUNT["address"])
-    assert state is not None and len(state["observations"]) == 1
+    assert state is not None and len(state["daily_history"]) == 1
+    assert state["daily_history"][0]["observation_count"] == 2
 
-    prototype = state["observations"][0]
-    state["observations"] = [
-        dict(
-            prototype,
-            observed_at=(
-                f"2026-01-{1 + index // 1440:02d}T"
-                f"{index % 1440 // 60:02d}:{index % 60:02d}:00Z"
-            ),
-        )
-        for index in range(2_000)
-    ]
-    store.save(state)
-    now[0] += 61
-    refreshed = LendingPortfolioService(service, store, clock=lambda: now[0])
-    refreshed.read(ACCOUNT, [], force_refresh=True)
+    for _ in range(35):
+        now[0] += 86_400
+        refresh_fake_time(rpc, morpho, now[0])
+        portfolio.read(ACCOUNT, [], force_refresh=True)
     retained = store.load(ACCOUNT["address"])
-    assert retained is not None and len(retained["observations"]) == 2_000
-    assert retained["observations"][0]["observed_at"] != state["observations"][0]["observed_at"]
+    assert retained is not None and len(retained["daily_history"]) == 31
+    assert len(retained["monthly_history"]) == 1
+
+    seven = portfolio.read(ACCOUNT, [], history_period="7d")["history"]
+    thirty = portfolio.read(ACCOUNT, [], history_period="30d")["history"]
+    all_time = portfolio.read(ACCOUNT, [], history_period="all")["history"]
+    assert seven["granularity"] == "day" and len(seven["points"]) == 7
+    assert thirty["granularity"] == "ten_day" and len(thirty["points"]) == 3
+    assert all_time["granularity"] == "month" and len(all_time["points"]) == 2
 
 
 def test_portfolio_uses_persisted_protocol_fallback(tmp_path) -> None:
@@ -388,20 +459,49 @@ def test_portfolio_uses_persisted_protocol_fallback(tmp_path) -> None:
 
 
 def test_portfolio_contract_is_bounded(tmp_path) -> None:
-    service, _rpc, _morpho = runtime.__wrapped__()  # type: ignore[attr-defined]
+    service, rpc, morpho = runtime.__wrapped__()  # type: ignore[attr-defined]
     now = [NOW]
     portfolio = LendingPortfolioService(
         service, LendingAnalyticsStore(tmp_path / "analytics.json"),
         clock=lambda: now[0],
     )
-    for _ in range(12):
+    for _ in range(14):
         result = portfolio.read(
-            ACCOUNT, [], force_refresh=True, history_period="7d", history_limit=12,
+            ACCOUNT, [], force_refresh=True, history_period="all", history_limit=12,
         )
-        now[0] += 61
+        now[0] += 31 * 86_400
+        refresh_fake_time(rpc, morpho, now[0])
     envelope = make_envelope(MessageKind.LENDING_PORTFOLIO, result)
     assert len(result["history"]["points"]) == 12
+    assert result["history"]["granularity"] == "month"
     assert len(encode_message(make_response(envelope))) < 8 * 1024
+
+
+def test_portfolio_migrates_valid_schema_v1_atomically(tmp_path) -> None:
+    path = tmp_path / "analytics.json"
+    service, _rpc, _morpho = runtime.__wrapped__()  # type: ignore[attr-defined]
+    original_store = LendingAnalyticsStore(path)
+    current = LendingPortfolioService(service, original_store, clock=lambda: NOW).read(
+        ACCOUNT, [], history_period="all",
+    )
+    state = original_store.load(ACCOUNT["address"])
+    assert state is not None
+    legacy = {
+        "schema_version": 1,
+        "accounts": [{
+            "address": state["address"], "label": state["label"],
+            "saved_at": state["saved_at"], "current": state["current"],
+            "baselines": state["baselines"],
+            "observations": [current["history"]["points"][0]],
+        }],
+    }
+    path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    migrated = LendingAnalyticsStore(path).load(ACCOUNT["address"])
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert migrated is not None and len(migrated["daily_history"]) == 1
+    assert persisted["schema_version"] == 2
+    assert "observations" not in persisted["accounts"][0]
 
 
 def test_portfolio_ignores_invalid_nested_persisted_state(tmp_path) -> None:
@@ -422,3 +522,19 @@ def test_portfolio_ignores_invalid_nested_persisted_state(tmp_path) -> None:
         service, LendingAnalyticsStore(path), clock=lambda: NOW,
     )
     assert portfolio.cached(ACCOUNT)["status"] == "DEGRADED"
+    assert json.loads(path.read_text(encoding="utf-8"))["schema_version"] == 1
+
+
+def test_portfolio_does_not_overwrite_damaged_schema_v2(tmp_path) -> None:
+    path = tmp_path / "analytics.json"
+    damaged = '{"schema_version": 2, "accounts": ['
+    path.write_text(damaged, encoding="utf-8")
+    service, _rpc, _morpho = runtime.__wrapped__()  # type: ignore[attr-defined]
+    portfolio = LendingPortfolioService(
+        service, LendingAnalyticsStore(path), clock=lambda: NOW,
+    )
+
+    result = portfolio.read(ACCOUNT, [], force_refresh=True, history_period="all")
+
+    assert result["history"]["granularity"] == "none"
+    assert path.read_text(encoding="utf-8") == damaged

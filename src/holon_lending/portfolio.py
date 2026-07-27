@@ -18,39 +18,154 @@ from web3 import Web3
 
 from .runtime import ASSET, COMPARE_CACHE_SECONDS, NETWORK, PROTOCOLS, LendingReader
 
-ANALYTICS_SCHEMA_VERSION = 1
+ANALYTICS_SCHEMA_VERSION = 2
+LEGACY_ANALYTICS_SCHEMA_VERSION = 1
 MAX_ACCOUNTS = 20
-MAX_OBSERVATIONS = 2_000
+MAX_DAILY_HISTORY = 31
+MAX_PROCESSED_ACTIONS = 500
 PROTOCOL_IDS = tuple(item[0] for item in PROTOCOLS)
 PROTOCOL_LABELS = {item[0]: item[2] for item in PROTOCOLS}
 HISTORY_PERIODS = frozenset({"none", "7d", "30d", "all"})
 
 
+def _parse_timestamp(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _format_timestamp(value: datetime) -> str:
+    return value.astimezone(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _day_bounds(timestamp: str) -> tuple[str, str]:
+    observed = _parse_timestamp(timestamp).astimezone(UTC)
+    start = observed.replace(hour=0, minute=0, second=0, microsecond=0)
+    return _format_timestamp(start), _format_timestamp(start + timedelta(days=1, seconds=-1))
+
+
+def _month_bounds(timestamp: str) -> tuple[str, str]:
+    observed = _parse_timestamp(timestamp).astimezone(UTC)
+    start = observed.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    following = (
+        start.replace(year=start.year + 1, month=1)
+        if start.month == 12 else start.replace(month=start.month + 1)
+    )
+    return _format_timestamp(start), _format_timestamp(following - timedelta(seconds=1))
+
+
+def _decimal_text(value: Decimal) -> str:
+    text = format(value, "f")
+    return text.rstrip("0").rstrip(".") if "." in text else text
+
+
+def _merge_into_period(
+    target: list[dict[str, Any]], source: Mapping[str, Any],
+    period_start: str, period_end: str,
+) -> None:
+    existing = next(
+        (item for item in target if item.get("period_start") == period_start), None,
+    )
+    if "rates" in source:
+        source_totals = {
+            protocol: (str(source["rates"].get(protocol))
+                       if source["rates"].get(protocol) is not None else None)
+            for protocol in PROTOCOL_IDS
+        }
+        source_counts = {
+            protocol: 1 if source_totals[protocol] is not None else 0
+            for protocol in PROTOCOL_IDS
+        }
+        source_count = 1
+    else:
+        source_totals = dict(source["rate_totals"])
+        source_counts = dict(source["rate_counts"])
+        source_count = int(source["observation_count"])
+    if existing is None:
+        target.append({
+            "period_start": period_start,
+            "period_end": period_end,
+            "observed_at": str(source["observed_at"]),
+            "total_position_atomic": source.get("total_position_atomic"),
+            "tracked_earnings_atomic": source.get("tracked_earnings_atomic"),
+            "rate_totals": source_totals,
+            "rate_counts": source_counts,
+            "observation_count": source_count,
+        })
+        target.sort(key=lambda item: str(item["period_start"]))
+        return
+    for protocol in PROTOCOL_IDS:
+        incoming = source_totals[protocol]
+        if incoming is None:
+            continue
+        current = existing["rate_totals"].get(protocol)
+        existing["rate_totals"][protocol] = _decimal_text(
+            Decimal(str(current or "0")) + Decimal(incoming),
+        )
+        existing["rate_counts"][protocol] += source_counts[protocol]
+    existing["observation_count"] += source_count
+    if str(source["observed_at"]) >= str(existing["observed_at"]):
+        existing["observed_at"] = str(source["observed_at"])
+        existing["total_position_atomic"] = source.get("total_position_atomic")
+        existing["tracked_earnings_atomic"] = source.get("tracked_earnings_atomic")
+
+
+def _compact_daily(
+    daily: list[dict[str, Any]], monthly: list[dict[str, Any]], reference: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    reference_day = _parse_timestamp(reference).astimezone(UTC).date()
+    cutoff = reference_day - timedelta(days=30)
+    retained: list[dict[str, Any]] = []
+    compacted: list[dict[str, Any]] = []
+    for item in sorted(daily, key=lambda value: str(value["period_start"])):
+        day = _parse_timestamp(str(item["period_start"])).astimezone(UTC).date()
+        (compacted if day < cutoff else retained).append(item)
+    while len(retained) > MAX_DAILY_HISTORY:
+        compacted.append(retained.pop(0))
+    for item in compacted:
+        start, end = _month_bounds(str(item["observed_at"]))
+        _merge_into_period(monthly, item, start, end)
+    return retained, sorted(monthly, key=lambda value: str(value["period_start"]))
+
+
+class LendingAnalyticsMigrationError(ValueError):
+    """Legacy public analytics cannot be migrated without data loss."""
+
+
 class LendingAnalyticsStore:
-    """Best-effort atomic persistence for public Lending observations."""
+    """Best-effort atomic persistence for compact public Lending analytics."""
 
     def __init__(self, path: Path) -> None:
         self.path = path
         self._lock = threading.RLock()
+        self._write_blocked = False
 
     def load(self, address: str) -> dict[str, Any] | None:
         with self._lock:
             try:
                 envelope = self._load_envelope()
-                value = next(
+            except LendingAnalyticsMigrationError:
+                self._write_blocked = True
+                return None
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                self._write_blocked = self.path.exists()
+                return None
+            value = next(
+                (
                     item for item in envelope["accounts"]
                     if item.get("address") == address
-                )
-                if not self._valid_account_state(value):
-                    return None
-                return deepcopy(value)
-            except (OSError, ValueError, StopIteration, TypeError, json.JSONDecodeError):
+                ),
+                None,
+            )
+            if value is None:
                 return None
+            if not self._valid_account_state(value):
+                self._write_blocked = True
+                return None
+            return deepcopy(value)
 
-    def save(self, value: Mapping[str, Any]) -> None:
+    def save(self, value: Mapping[str, Any]) -> bool:
         address = value.get("address")
-        if not isinstance(address, str):
-            return
+        if not isinstance(address, str) or self._write_blocked:
+            return False
         with self._lock:
             try:
                 envelope = self._load_envelope()
@@ -65,12 +180,26 @@ class LendingAnalyticsStore:
                 "schema_version": ANALYTICS_SCHEMA_VERSION,
                 "accounts": retained,
             })
+            return True
 
     def _load_envelope(self) -> dict[str, Any]:
         if not self.path.exists():
             return {"schema_version": ANALYTICS_SCHEMA_VERSION, "accounts": []}
         with self.path.open("r", encoding="utf-8") as stream:
             value = json.load(stream)
+        if (
+            isinstance(value, dict)
+            and value.get("schema_version") == LEGACY_ANALYTICS_SCHEMA_VERSION
+        ):
+            try:
+                migrated = self._migrate_envelope(value)
+            except (TypeError, ValueError) as error:
+                raise LendingAnalyticsMigrationError(
+                    "Legacy Lending analytics migration failed"
+                ) from error
+            self._atomic_write(migrated)
+            self._write_blocked = False
+            return migrated
         if (
             not isinstance(value, dict)
             or set(value) != {"schema_version", "accounts"}
@@ -105,7 +234,8 @@ class LendingAnalyticsStore:
     def _valid_account_state(value: Mapping[str, Any]) -> bool:
         current = value.get("current")
         protocols = current.get("protocols") if isinstance(current, Mapping) else None
-        observations = value.get("observations")
+        daily = value.get("daily_history")
+        monthly = value.get("monthly_history")
         baselines = value.get("baselines")
         if (
             not isinstance(value.get("address"), str)
@@ -119,9 +249,11 @@ class LendingAnalyticsStore:
                 not LendingAnalyticsStore._valid_protocol(item)
                 for item in protocols
             )
-            or not isinstance(observations, list)
-            or len(observations) > MAX_OBSERVATIONS
-            or any(not LendingAnalyticsStore._valid_observation(item) for item in observations)
+            or not isinstance(daily, list)
+            or len(daily) > MAX_DAILY_HISTORY
+            or any(not LendingAnalyticsStore._valid_bucket(item) for item in daily)
+            or not isinstance(monthly, list)
+            or any(not LendingAnalyticsStore._valid_bucket(item) for item in monthly)
             or not isinstance(baselines, Mapping)
             or any(
                 protocol not in PROTOCOL_IDS
@@ -166,13 +298,37 @@ class LendingAnalyticsStore:
         return True
 
     @staticmethod
-    def _valid_observation(value: object) -> bool:
+    def _valid_bucket(value: object) -> bool:
         if (
             not isinstance(value, Mapping)
-            or not LendingAnalyticsStore._valid_timestamp(value.get("observed_at"))
+            or set(value) != {
+                "period_start", "period_end", "observed_at",
+                "total_position_atomic", "tracked_earnings_atomic",
+                "rate_totals", "rate_counts", "observation_count",
+            }
+            or not all(
+                LendingAnalyticsStore._valid_timestamp(value.get(name))
+                for name in ("period_start", "period_end", "observed_at")
+            )
+            or not LendingAnalyticsStore._optional_atomic(
+                value.get("total_position_atomic"), signed=False,
+            )
+            or not LendingAnalyticsStore._optional_atomic(
+                value.get("tracked_earnings_atomic"), signed=True,
+            )
         ):
             return False
-        return isinstance(value.get("rates"), Mapping)
+        totals = value.get("rate_totals")
+        counts = value.get("rate_counts")
+        return bool(
+            isinstance(totals, Mapping) and set(totals) == set(PROTOCOL_IDS)
+            and all(item is None or LendingAnalyticsStore._decimal(item) for item in totals.values())
+            and isinstance(counts, Mapping) and set(counts) == set(PROTOCOL_IDS)
+            and all(type(item) is int and item >= 0 for item in counts.values())
+            and all((totals[key] is None) == (counts[key] == 0) for key in PROTOCOL_IDS)
+            and type(value.get("observation_count")) is int
+            and value["observation_count"] > 0
+        )
 
     @staticmethod
     def _valid_baseline(value: object) -> bool:
@@ -186,10 +342,95 @@ class LendingAnalyticsStore:
             and isinstance(value.get("net_contributions_atomic"), str)
             and value["net_contributions_atomic"].lstrip("-").isdecimal()
             and isinstance(processed, list)
-            and len(processed) <= 500
+            and len(processed) <= MAX_PROCESSED_ACTIONS
             and all(isinstance(item, str) for item in processed)
             and type(value.get("history_complete")) is bool
         )
+
+    @staticmethod
+    def _optional_atomic(value: object, *, signed: bool) -> bool:
+        return bool(
+            value is None
+            or isinstance(value, str)
+            and (value.lstrip("-").isdecimal() if signed else value.isdecimal())
+        )
+
+    @staticmethod
+    def _decimal(value: object) -> bool:
+        try:
+            parsed = Decimal(str(value))
+        except Exception:
+            return False
+        return parsed.is_finite() and parsed >= 0
+
+    def _migrate_envelope(self, value: Mapping[str, Any]) -> dict[str, Any]:
+        accounts = value.get("accounts")
+        if (
+            set(value) != {"schema_version", "accounts"}
+            or not isinstance(accounts, list)
+            or len(accounts) > MAX_ACCOUNTS
+            or any(not isinstance(item, Mapping) for item in accounts)
+        ):
+            raise ValueError("Legacy Lending analytics envelope is invalid")
+        migrated = {
+            "schema_version": ANALYTICS_SCHEMA_VERSION,
+            "accounts": [self._migrate_account(item) for item in accounts],
+        }
+        if any(not self._valid_account_state(item) for item in migrated["accounts"]):
+            raise ValueError("Migrated Lending analytics state is invalid")
+        return migrated
+
+    def _migrate_account(self, value: Mapping[str, Any]) -> dict[str, Any]:
+        required = {
+            "address", "label", "saved_at", "current", "baselines", "observations",
+        }
+        if set(value) != required or not isinstance(value.get("observations"), list):
+            raise ValueError("Legacy Lending analytics Account is invalid")
+        reference = str(value["saved_at"])
+        if not self._valid_timestamp(reference):
+            raise ValueError("Legacy Lending analytics timestamp is invalid")
+        daily: list[dict[str, Any]] = []
+        monthly: list[dict[str, Any]] = []
+        for observation in sorted(
+            value["observations"], key=lambda item: str(item.get("observed_at", ""))
+            if isinstance(item, Mapping) else "",
+        ):
+            normalized = self._legacy_observation(observation)
+            day_start, day_end = _day_bounds(normalized["observed_at"])
+            _merge_into_period(daily, normalized, day_start, day_end)
+        daily, monthly = _compact_daily(daily, monthly, reference)
+        return {
+            "address": value["address"],
+            "label": value["label"],
+            "saved_at": reference,
+            "current": deepcopy(value["current"]),
+            "baselines": deepcopy(value["baselines"]),
+            "daily_history": daily,
+            "monthly_history": monthly,
+        }
+
+    def _legacy_observation(self, value: object) -> dict[str, Any]:
+        if not isinstance(value, Mapping) or set(value) != {
+            "observed_at", "total_position_atomic", "tracked_earnings_atomic", "rates",
+        }:
+            raise ValueError("Legacy Lending observation is invalid")
+        observed = value.get("observed_at")
+        rates = value.get("rates")
+        if (
+            not self._valid_timestamp(observed)
+            or not self._optional_atomic(value.get("total_position_atomic"), signed=False)
+            or not self._optional_atomic(value.get("tracked_earnings_atomic"), signed=True)
+            or not isinstance(rates, Mapping)
+            or set(rates) != set(PROTOCOL_IDS)
+            or any(item is not None and not self._decimal(item) for item in rates.values())
+        ):
+            raise ValueError("Legacy Lending observation is invalid")
+        return {
+            "observed_at": observed,
+            "total_position_atomic": value.get("total_position_atomic"),
+            "tracked_earnings_atomic": value.get("tracked_earnings_atomic"),
+            "rates": dict(rates),
+        }
 
 
 class LendingPortfolioService:
@@ -243,13 +484,16 @@ class LendingPortfolioService:
         response = self._response(account, markets, protocols, now, force_refresh)
         account_state = self._account_state(account, response, baselines, stored, now)
         try:
-            self._store.save(account_state)
+            history_available = self._store.save(account_state)
         except OSError:
-            pass
+            history_available = False
         with self._lock:
             self._cache[address] = (now, deepcopy(response))
-        response["history"] = self._filter_history(
-            account_state["observations"], history_period, now, history_limit,
+        response["history"] = self._history_from_state(
+            account_state if history_available else None,
+            history_period,
+            now,
+            history_limit,
         )
         return response
 
@@ -291,8 +535,8 @@ class LendingPortfolioService:
         response["delivery"] = self._delivery(
             fetched, now, False, "PERSISTED_FALLBACK",
         )
-        response["history"] = self._filter_history(
-            stored.get("observations", []), history_period, now, history_limit,
+        response["history"] = self._history_from_state(
+            stored, history_period, now, history_limit,
         )
         return response
 
@@ -459,7 +703,14 @@ class LendingPortfolioService:
                     net += delta if operation.get("direction") == "supply" else -delta
                     processed.add(action_id)
             baseline["net_contributions_atomic"] = str(net)
-            baseline["processed_action_ids"] = sorted(processed)[-500:]
+            current_action_ids = [
+                str(operation["action_id"]) for operation in (operations or ())
+                if operation.get("protocol") == protocol
+                and isinstance(operation.get("action_id"), str)
+            ]
+            baseline["processed_action_ids"] = [
+                action_id for action_id in current_action_ids if action_id in processed
+            ][-MAX_PROCESSED_ACTIONS:]
             baseline["history_complete"] = complete
             result[protocol] = baseline
         return result
@@ -531,7 +782,7 @@ class LendingPortfolioService:
             "protocols": protocols,
             "recommendation": deepcopy(market_payload.get("recommendation")),
             "delivery": self._delivery(now, now, force_refresh, "LIVE_READ"),
-            "history": {"period": "none", "points": []},
+            "history": self._empty_history("none"),
             "code": code,
             "message": message,
         }
@@ -566,7 +817,8 @@ class LendingPortfolioService:
         stored: Mapping[str, Any] | None,
         now: int,
     ) -> dict[str, Any]:
-        observations = list(stored.get("observations", [])) if stored else []
+        daily = deepcopy(stored.get("daily_history", [])) if stored else []
+        monthly = deepcopy(stored.get("monthly_history", [])) if stored else []
         current = {
             "protocols": deepcopy(response["protocols"]),
             "summary": deepcopy(response["summary"]),
@@ -577,56 +829,142 @@ class LendingPortfolioService:
             "total_position_atomic": response["summary"]["total_position_atomic"],
             "tracked_earnings_atomic": response["summary"]["tracked_earnings_atomic"],
             "rates": {
-                item["protocol"]: item["confirmed_total_annual_percent"]
+                item["protocol"]: (
+                    item["confirmed_total_annual_percent"]
+                    if item["data_state"] in {"LIVE", "STALE"} else None
+                )
                 for item in response["protocols"]
             },
         }
-        minute = observation["observed_at"][:16]
-        if observations and str(observations[-1].get("observed_at", ""))[:16] == minute:
-            observations[-1] = observation
-        else:
-            observations.append(observation)
+        day_start, day_end = _day_bounds(observation["observed_at"])
+        _merge_into_period(daily, observation, day_start, day_end)
+        daily, monthly = _compact_daily(daily, monthly, observation["observed_at"])
         return {
             "address": account["address"],
             "label": account["label"],
             "saved_at": self._timestamp(now),
             "current": current,
             "baselines": deepcopy(dict(baselines)),
-            "observations": observations[-MAX_OBSERVATIONS:],
+            "daily_history": daily,
+            "monthly_history": monthly,
         }
 
     def _history(
         self, address: str, period: str, now: int, limit: int,
     ) -> dict[str, Any]:
         stored = self._store.load(address)
-        observations = stored.get("observations", []) if stored else []
-        return self._filter_history(observations, period, now, limit)
+        return self._history_from_state(stored, period, now, limit)
 
-    @staticmethod
-    def _filter_history(
-        observations: Sequence[Any], period: str, now: int, limit: int,
+    def _history_from_state(
+        self, stored: Mapping[str, Any] | None, period: str, now: int, limit: int,
     ) -> dict[str, Any]:
         if period == "none":
-            return {"period": period, "points": []}
-        cutoff = None
-        if period in {"7d", "30d"}:
-            cutoff = datetime.fromtimestamp(now, UTC) - timedelta(days=7 if period == "7d" else 30)
-        points = [
-            deepcopy(item) for item in observations
-            if isinstance(item, Mapping) and (
-                cutoff is None
-                or datetime.fromisoformat(str(item.get("observed_at", "")).replace("Z", "+00:00")) >= cutoff
-            )
-        ]
+            return self._empty_history(period)
+        if stored is None:
+            return self._empty_history(period)
+        daily = deepcopy(list(stored.get("daily_history", [])))
+        monthly = deepcopy(list(stored.get("monthly_history", [])))
+        today = datetime.fromtimestamp(now, UTC).date()
+        buckets: list[dict[str, Any]]
+        granularity: str
+        if period == "7d":
+            cutoff = today - timedelta(days=6)
+            buckets = [
+                item for item in daily
+                if _parse_timestamp(str(item["period_start"])).date() >= cutoff
+            ]
+            granularity = "day"
+        elif period == "30d":
+            cutoff = today - timedelta(days=29)
+            selected = [
+                item for item in daily
+                if _parse_timestamp(str(item["period_start"])).date() >= cutoff
+            ]
+            buckets = self._ten_day_buckets(selected, cutoff, today)
+            granularity = "ten_day"
+        else:
+            source = sorted(monthly + daily, key=lambda item: str(item["period_start"]))
+            if not source:
+                return self._empty_history(period)
+            first_day = _parse_timestamp(str(source[0]["period_start"])).date()
+            age = (today - first_day).days + 1
+            if age <= 7:
+                buckets, granularity = daily, "day"
+            elif age <= 30:
+                buckets = self._ten_day_buckets(daily, first_day, today)
+                granularity = "ten_day"
+            else:
+                buckets = deepcopy(monthly)
+                for item in daily:
+                    start, end = _month_bounds(str(item["observed_at"]))
+                    _merge_into_period(buckets, item, start, end)
+                granularity = "month"
+        buckets.sort(key=lambda item: str(item["period_start"]))
         if limit == 0:
-            points = []
-        elif len(points) > limit:
+            buckets = []
+        elif len(buckets) > limit:
             indexes = {
-                round(index * (len(points) - 1) / (limit - 1))
+                round(index * (len(buckets) - 1) / (limit - 1))
                 for index in range(limit)
-            } if limit > 1 else {len(points) - 1}
-            points = [item for index, item in enumerate(points) if index in indexes]
-        return {"period": period, "points": points}
+            } if limit > 1 else {len(buckets) - 1}
+            buckets = [item for index, item in enumerate(buckets) if index in indexes]
+        return {
+            "period": period,
+            "granularity": granularity if buckets else "none",
+            "period_start": buckets[0]["period_start"] if buckets else None,
+            "period_end": buckets[-1]["period_end"] if buckets else None,
+            "points": [self._bucket_point(item) for item in buckets],
+        }
+
+    @staticmethod
+    def _ten_day_buckets(
+        daily: Sequence[Mapping[str, Any]], start_day, end_day,
+    ) -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
+        for item in daily:
+            day = _parse_timestamp(str(item["period_start"])).date()
+            if day < start_day or day > end_day:
+                continue
+            index = (day - start_day).days // 10
+            group_start = datetime.combine(
+                start_day + timedelta(days=index * 10), datetime.min.time(), UTC,
+            )
+            group_end_day = min(start_day + timedelta(days=index * 10 + 9), end_day)
+            group_end = datetime.combine(group_end_day, datetime.max.time(), UTC).replace(
+                microsecond=0,
+            )
+            _merge_into_period(
+                result, item, _format_timestamp(group_start), _format_timestamp(group_end),
+            )
+        return result
+
+    @staticmethod
+    def _bucket_point(value: Mapping[str, Any]) -> dict[str, Any]:
+        rates: dict[str, str | None] = {}
+        for protocol in PROTOCOL_IDS:
+            count = int(value["rate_counts"][protocol])
+            total = value["rate_totals"][protocol]
+            rates[protocol] = (
+                _decimal_text(
+                    (Decimal(str(total)) / Decimal(count)).quantize(
+                        Decimal("0.000001"), rounding=ROUND_HALF_UP,
+                    )
+                )
+                if count and total is not None else None
+            )
+        return {
+            "observed_at": value["observed_at"],
+            "total_position_atomic": value["total_position_atomic"],
+            "tracked_earnings_atomic": value["tracked_earnings_atomic"],
+            "rates": rates,
+        }
+
+    @staticmethod
+    def _empty_history(period: str) -> dict[str, Any]:
+        return {
+            "period": period, "granularity": "none",
+            "period_start": None, "period_end": None, "points": [],
+        }
 
     @classmethod
     def unavailable(
@@ -664,7 +1002,7 @@ class LendingPortfolioService:
             },
             "protocols": protocols, "recommendation": None,
             "delivery": cls._delivery(0, int(time.time()), False, "UNAVAILABLE"),
-            "history": {"period": history_period, "points": []},
+            "history": cls._empty_history(history_period),
             "code": "LENDING_PORTFOLIO_UNAVAILABLE",
             "message": "Lending portfolio is unavailable.",
         }

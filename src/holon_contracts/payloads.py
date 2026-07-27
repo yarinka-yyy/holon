@@ -618,11 +618,28 @@ def validate_lending_portfolio(payload: Mapping[str, Any]) -> None:
     ):
         raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending delivery status.")
     history = payload.get("history")
-    if not isinstance(history, Mapping) or set(history) != {"period", "points"} or history["period"] not in {"none", "7d", "30d", "all"}:
+    if (
+        not isinstance(history, Mapping)
+        or set(history) != {
+            "period", "granularity", "period_start", "period_end", "points",
+        }
+        or history["period"] not in {"none", "7d", "30d", "all"}
+        or history["granularity"] not in {"none", "day", "ten_day", "month"}
+    ):
         raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending history.")
+    for name in ("period_start", "period_end"):
+        value = history[name]
+        if value is not None and (
+            not isinstance(value, str) or UTC_TIMESTAMP_RE.fullmatch(value) is None
+        ):
+            raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending history range.")
     points = history["points"]
     if not isinstance(points, list) or len(points) > 12:
         raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending history points.")
+    if bool(points) != bool(history["period_start"] and history["period_end"]):
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Inconsistent Lending history range.")
+    if (not points) != (history["granularity"] == "none"):
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Inconsistent Lending history granularity.")
     for point in points:
         _lending_history_point(point)
     expected = {
