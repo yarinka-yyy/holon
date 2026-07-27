@@ -124,6 +124,7 @@ class RevokePolicy:
     enabled: Mapping[str, bool]
     spenders: Mapping[str, str | None]
     fee_caps: Mapping[str, int | None]
+    uncapped_networks: frozenset[str] = frozenset()
 
     @classmethod
     def from_environment(
@@ -145,9 +146,14 @@ class RevokePolicy:
             }),
         )
 
-    def with_builtin_base(self, spender: str, fee_cap_wei: int) -> RevokePolicy:
+    def with_builtin_base(
+        self, spender: str, fee_cap_wei: int | None = None,
+    ) -> RevokePolicy:
         """Pin one caller-owned Base revoke route without environment policy."""
-        if not ADDRESS_RE.fullmatch(spender) or fee_cap_wei <= 0:
+        if (
+            not ADDRESS_RE.fullmatch(spender)
+            or fee_cap_wei is not None and fee_cap_wei <= 0
+        ):
             raise ValueError("Invalid built-in revoke route")
         enabled = dict(self.enabled)
         spenders = dict(self.spenders)
@@ -155,9 +161,14 @@ class RevokePolicy:
         enabled["base"] = True
         spenders["base"] = Web3.to_checksum_address(spender)
         fee_caps["base"] = fee_cap_wei
+        uncapped = set(self.uncapped_networks)
+        if fee_cap_wei is None:
+            uncapped.add("base")
+        else:
+            uncapped.discard("base")
         return RevokePolicy(
             MappingProxyType(enabled), MappingProxyType(spenders),
-            MappingProxyType(fee_caps),
+            MappingProxyType(fee_caps), frozenset(uncapped),
         )
 
     def spender_for(self, network_id: str, owner: str) -> str | None:
@@ -167,13 +178,18 @@ class RevokePolicy:
         return spender
 
     def fee_display(self, network_id: str) -> str:
+        if network_id in self.uncapped_networks:
+            return "No fixed cap"
         value = self.fee_caps.get(network_id)
         return "Not configured" if value is None else f"≤ {_format_wei(value)} ETH"
 
     def signing_available(self, network_id: str, owner: str) -> bool:
         return (
             self.enabled.get(network_id, False)
-            and self.fee_caps.get(network_id) is not None
+            and (
+                network_id in self.uncapped_networks
+                or self.fee_caps.get(network_id) is not None
+            )
             and self.spender_for(network_id, owner) is not None
         )
 
@@ -186,6 +202,8 @@ class RevokePolicy:
         ):
             return RevokePolicyCode.POLICY_UNAVAILABLE
         fee_cap = self.fee_caps.get(action.network_id)
+        if action.network_id in self.uncapped_networks:
+            return None
         if fee_cap is None:
             return RevokePolicyCode.POLICY_UNAVAILABLE
         if action.max_total_fee_wei > fee_cap:
@@ -441,9 +459,10 @@ class RevokePreflightService:
         gas = _positive(rpc.estimate_gas(estimate_transaction))
         max_total_fee = gas * max_fee
         fee_cap = self.policy.fee_caps.get(route.network_id)
-        if fee_cap is None:
+        uncapped = route.network_id in self.policy.uncapped_networks
+        if fee_cap is None and not uncapped:
             raise RevokePreflightError(RevokePreflightCode.POLICY_UNAVAILABLE)
-        if max_total_fee > fee_cap:
+        if fee_cap is not None and max_total_fee > fee_cap:
             raise RevokePreflightError(RevokePreflightCode.FEE_LIMIT_EXCEEDED)
         if native_balance < max_total_fee:
             raise RevokePreflightError(RevokePreflightCode.INSUFFICIENT_ETH)

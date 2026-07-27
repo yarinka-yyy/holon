@@ -6,9 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from holon_contracts import RefusalCode
-from holon_lending.action_profiles import (
-    ACTION_PROFILE_DIGESTS, AAVE_MAX_TOTAL_FEE_WEI,
-)
+from holon_lending.action_profiles import ACTION_PROFILE_DIGESTS
 
 from .model import LendingRule, Policy, RecipientRule, TransferRule
 
@@ -174,10 +172,6 @@ class PolicyEngine:
             if type(max_total_fee_wei) is not int or max_total_fee_wei <= 0:
                 return PolicyDecision.refuse(
                     RefusalCode.MAX_FEE_REQUIRED, "Maximum fee is required.",
-                )
-            if max_total_fee_wei > AAVE_MAX_TOTAL_FEE_WEI:
-                return PolicyDecision.refuse(
-                    RefusalCode.MAX_FEE_EXCEEDED, "Maximum fee exceeds the built-in limit.",
                 )
             return PolicyDecision.allow()
         if next_action not in rule.allowed_actions:

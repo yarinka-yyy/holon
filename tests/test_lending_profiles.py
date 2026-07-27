@@ -225,7 +225,7 @@ def test_only_guard_runtime_imports_lending() -> None:
             importing.append(path.name)
     assert sorted(importing) == [
         "__main__.py", "authority.py", "authority_audit.py",
-        "lending_authority.py", "lifecycle.py",
+        "lifecycle.py",
     ]
 
 

@@ -107,6 +107,16 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(over.code, RefusalCode.AMOUNT_LIMIT_EXCEEDED.value)
         self.assertEqual(supply.code, RefusalCode.ACTION_NOT_ALLOWED.value)
 
+    def test_builtin_lending_requires_a_fee_estimate_but_has_no_fixed_cap(self) -> None:
+        engine = PolicyEngine(Policy("4", "3", False, ()))
+        self.assertTrue(
+            engine.evaluate_lending_prepared(
+                "redeem", 1_000_000, 10**30, None,
+            ).allowed,
+        )
+        missing = engine.evaluate_lending_prepared("redeem", 1_000_000, 0, None)
+        self.assertEqual(missing.code, RefusalCode.MAX_FEE_REQUIRED.value)
+
     def test_production_baseline_is_pinned_and_authority_disabled(self) -> None:
         policy = load_baseline_policy()
         self.assertFalse(policy.authority_enabled)

@@ -16,13 +16,10 @@ from .morpho import MORPHO_VAULT_ADDRESS
 ACTION_PROFILES_PATH = Path(__file__).with_name("action-profiles.json")
 MAX_ACTION_PROFILES_BYTES = 32 * 1024
 ACTION_PROFILES_DIGEST = "83640cdbbbbb8476eb1b34f0347430a5388a65034a63269f25e177c2671539be"
-AAVE_MAX_TOTAL_FEE_WEI = 100_000_000_000_000
-LENDING_MAX_TOTAL_FEE_WEI = AAVE_MAX_TOTAL_FEE_WEI
 AAVE_SAFETY_PROFILE = {
     "allowed_intents": ["supply:exact", "supply:all", "withdraw:exact", "withdraw:all"],
     "allowed_methods": ["approve", "supply", "withdraw"],
     "beneficiary": "active_wallet_account",
-    "max_total_fee_wei": str(AAVE_MAX_TOTAL_FEE_WEI),
     "native_value_wei": "0",
     "profile_id": "aave-v3-base-usdc",
     "safety_schema_version": "1",
@@ -67,7 +64,7 @@ def _additional_profile(
         "allowed_intents": ["supply:exact", "supply:all", "withdraw:exact", "withdraw:all"],
         "allowed_methods": ["approve", *methods], "asset": BASE_USDC,
         "beneficiary": "active_wallet_account", "chain_id": BASE_CHAIN_ID,
-        "max_total_fee_wei": str(LENDING_MAX_TOTAL_FEE_WEI), "native_value_wei": "0",
+        "native_value_wei": "0",
         "profile_id": profile_id, "profile_version": "1", "protocol_id": protocol_id,
         "spender": target, "target": target,
     }

@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from requests import exceptions as request_errors
 from web3 import Web3
-from holon_lending import AAVE_CONTRACTS, AAVE_MAX_TOTAL_FEE_WEI
+from holon_lending import AAVE_CONTRACTS
 
 from holon_wallet.approval import (
     APPROVAL_ROUTES,
@@ -60,12 +60,37 @@ def policy_env(*, enabled: bool = True, network_id: str = "base") -> dict[str, s
 
 def test_builtin_aave_revoke_overrides_legacy_base_environment() -> None:
     policy = RevokePolicy.from_environment(policy_env()).with_builtin_base(
-        AAVE_CONTRACTS["pool"], AAVE_MAX_TOTAL_FEE_WEI,
+        AAVE_CONTRACTS["pool"],
     )
 
     assert policy.enabled["base"]
     assert policy.spenders["base"] == Web3.to_checksum_address(AAVE_CONTRACTS["pool"])
-    assert policy.fee_caps["base"] == AAVE_MAX_TOTAL_FEE_WEI
+    assert policy.fee_caps["base"] is None
+    assert policy.fee_display("base") == "No fixed cap"
+    assert "base" in policy.uncapped_networks
+
+
+def test_builtin_lending_revoke_high_fee_is_not_blocked(tmp_path) -> None:
+    repository = VaultRepository(WalletPaths(tmp_path))
+    summary = profile(repository)
+    environ = policy_env()
+    policy = RevokePolicy.from_environment(environ).with_builtin_base(
+        AAVE_CONTRACTS["pool"],
+    )
+    rpc = ApprovalRpcStub()
+    rpc.base_fee = 2_000_000_000
+    rpc.priority_fee = 100_000_000
+    action = RevokePreflightService(
+        policy, lambda _endpoint: rpc, environ,
+    ).prepare(
+        RevokeFlowCoordinator(
+            action_id_factory=lambda: "act-lending-revoke-high-fee",
+        ).begin(summary.profile_id, "base"),
+        summary,
+    )
+
+    assert action.max_total_fee_wei > 100_000_000_000_000
+    assert policy.evaluate(action) is None
 
 
 class ApprovalRpcStub:

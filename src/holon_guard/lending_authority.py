@@ -9,8 +9,6 @@ from holon_contracts import MessageKind, RefusalCode
 from holon_guard_ipc import GuardState
 from holon_journal import EventType
 from holon_lending.preflight import parse_lending_intent
-from holon_lending import AAVE_MAX_TOTAL_FEE_WEI
-
 from .actions import ActionLedgerFailure
 
 
@@ -116,7 +114,7 @@ def prepare_lending_authority(service, request, owner_pid: int):
         },
         resolved_amount,
         service.policy.policy.policy_version,
-        str(AAVE_MAX_TOTAL_FEE_WEI) if rule is None else rule.max_total_fee_wei,
+        None if rule is None else rule.max_total_fee_wei,
         None if rule is None else rule.max_amount_atomic,
         service.policy_snapshot.policy_revision, service.policy_snapshot.policy_digest,
         profile.digest,

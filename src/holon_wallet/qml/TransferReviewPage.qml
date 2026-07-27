@@ -12,6 +12,7 @@ TransactionFlowShell {
     property bool detailsOpen: false
     property var action: walletController.transferAction
     property bool isLending: action.actionType === "lending"
+    property bool highLendingFee: root.isLending && walletController.lendingHighFeeWarning
     property string lendingMethod: action.method === "withdraw" && action.amountMode === "all"
         ? "withdraw all" : (action.method || "action")
     property url assetIcon: action.assetId === "eth"
@@ -22,7 +23,8 @@ TransactionFlowShell {
     readonly property int accountY: root.isLending ? 0 : 50
     readonly property int recipientY: root.isLending ? 74 : 118
     readonly property int summaryY: root.isLending ? 154 : 190
-    readonly property int detailsY: root.isLending ? 340 : 372
+    readonly property int detailsY: root.isLending
+        ? (root.highLendingFee ? 384 : 340) : 372
     readonly property int collapsedContentHeight: root.detailsY + 48
 
     function lendingTitle() {
@@ -124,6 +126,18 @@ TransactionFlowShell {
             label: "Maximum fee"; value: walletController.transferFeeUsd
             iconSource: "assets/info.svg"
         }
+        Rectangle {
+            objectName: "lendingHighFeeWarning"
+            visible: root.highLendingFee
+            x: 0; y: root.summaryY + 174; width: root.reviewCardWidth; height: 38
+            radius: 10; color: "#332C261B"; border.width: 1; border.color: "#66D5AA64"
+            Text {
+                anchors.centerIn: parent; width: parent.width - 24
+                text: "Base network fee is unusually high. You can still continue."
+                horizontalAlignment: Text.AlignHCenter; wrapMode: Text.Wrap
+                color: Design.warning; font.family: Design.fontFamily; font.pixelSize: 10
+            }
+        }
 
         Item {
             objectName: "transferDetailsButton"; x: 0; y: root.detailsY
@@ -171,7 +185,7 @@ TransactionFlowShell {
                         ["Maximum fee (ETH)", root.action.maxFeeDisplay || "Unavailable"],
                         ["L2 fee ceiling", (root.action.l2FeeCeilingWei || "0") + " wei"],
                         ["L1 fee upper bound", (root.action.l1FeeUpperBoundWei || "0") + " wei"],
-                        ["Local fee cap", walletController.mainnetFeeLimit],
+                        ["Local fee rule", walletController.mainnetFeeLimit],
                         ["Local amount cap", walletController.mainnetAmountLimit],
                         ["Action ID", root.action.shortActionId || ""],
                         ["Digest", root.action.shortDigest || ""]

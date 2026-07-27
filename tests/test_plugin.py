@@ -13,6 +13,7 @@ class StaticConnector:
     def __init__(self, health: GuardHealth) -> None:
         self.health = health
         self.ensure_calls = 0
+        self.action_state = "AWAITING_LOCAL_CONFIRMATION"
 
     def probe(self) -> GuardHealth:
         return self.health
@@ -120,7 +121,7 @@ class StaticConnector:
         )
 
     def transfer_status(self, action_id):
-        return self._action_status(action_id, "AWAITING_LOCAL_CONFIRMATION")
+        return self._action_status(action_id, self.action_state)
 
     def cancel_transfer(self, action_id):
         return self._action_status(action_id, "REJECTED")
@@ -142,7 +143,9 @@ class StaticConnector:
         return make_envelope(
             MessageKind.ACTION_STATUS,
             {
-                "guard_state": "NORMAL" if state == "REJECTED" else "ACTIVE",
+                "guard_state": (
+                    "ACTIVE" if state == "AWAITING_LOCAL_CONFIRMATION" else "NORMAL"
+                ),
                 "action_state": state,
                 "flow_id": None,
                 "code": "ACTION_STATUS",
@@ -402,6 +405,30 @@ class PluginTests(unittest.TestCase):
         }))
         self.assertEqual(supply["status"], "AWAITING_LOCAL_CONFIRMATION")
         self.assertEqual(supply["action"], "supply")
+
+    def test_failed_lending_status_offers_only_confirmed_fresh_retry(self) -> None:
+        connector = StaticConnector(GuardHealth.available(GuardState.NORMAL))
+        runtime = plugin.PluginRuntime(connector)
+        prepared = json.loads(runtime.handle_lending_execute({
+            "protocol": "morpho-v1", "action": "withdraw",
+            "amount_mode": "all", "amount": None,
+        }))
+        connector.action_state = "FAILED"
+        failed = json.loads(runtime.handle_transfer_status({
+            "action_id": prepared["action_id"],
+        }))
+
+        self.assertEqual(failed["status"], "FAILED")
+        self.assertTrue(failed["retry"]["available"])
+        self.assertFalse(failed["retry"]["automatic"])
+        self.assertTrue(failed["retry"]["requires_user_confirmation"])
+        self.assertTrue(failed["retry"]["fresh_preflight"])
+        self.assertTrue(failed["retry"]["new_action_id"])
+        self.assertEqual(failed["retry"]["request"], {
+            "protocol": "morpho-v1", "action": "withdraw",
+            "amount_mode": "all", "amount": None,
+        })
+        self.assertIn("explicit confirmation", failed["next_step"])
 
     def test_status_and_cancel_expose_no_internal_flow(self) -> None:
         runtime = plugin.PluginRuntime(

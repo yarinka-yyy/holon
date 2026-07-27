@@ -20,6 +20,8 @@ BASE_RPC_ENV = "HOLON_BASE_RPC_URL"
 BASE_PUBLIC_RPC = "https://base-rpc.publicnode.com"
 SEQUENCER_FEED = "0xBCF85224fc0756B9Fa45aA7892530B47e10b6433"
 SEQUENCER_GRACE_SECONDS = 3_600
+BASE_HIGH_FEE_WARNING_USD = Decimal("0.05")
+BASE_HIGH_FEE_WARNING_WEI = 20_000_000_000_000
 
 AGGREGATOR_ABI = (
     {
@@ -277,6 +279,19 @@ def estimate_wei_usd(maximum_fee_wei: int, prices: PriceSnapshot) -> str:
         return "Data unavailable"
     value = Decimal(maximum_fee_wei).scaleb(-18) * eth.value
     return f"≈ {format_usd(value)}"
+
+
+def is_unusually_high_base_fee(
+    maximum_fee_wei: int, prices: PriceSnapshot,
+) -> bool:
+    """Soft Base warning only; it never grants or refuses signing authority."""
+    if maximum_fee_wei <= 0:
+        return False
+    eth = prices.by_asset.get("eth")
+    if eth is None or eth.value is None:
+        return maximum_fee_wei >= BASE_HIGH_FEE_WARNING_WEI
+    value = Decimal(maximum_fee_wei).scaleb(-18) * eth.value
+    return value >= BASE_HIGH_FEE_WARNING_USD
 
 
 def estimate_asset_usd(

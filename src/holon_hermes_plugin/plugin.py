@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections import OrderedDict
 from typing import Any, Optional
 
 from holon_contracts import MessageKind, new_action_id
@@ -167,6 +168,18 @@ class PluginRuntime:
         self._connector = connector
         self._protected_latch = False
         self._protected_action_id: str | None = None
+        self._lending_requests: OrderedDict[str, dict[str, object]] = OrderedDict()
+
+    def _remember_lending_request(
+        self, action_id: str, params: dict[str, object],
+    ) -> None:
+        self._lending_requests[action_id] = {
+            "protocol": params["protocol"], "action": params["action"],
+            "amount_mode": params["amount_mode"], "amount": params["amount"],
+        }
+        self._lending_requests.move_to_end(action_id)
+        while len(self._lending_requests) > 32:
+            self._lending_requests.popitem(last=False)
 
     def _observe(self, health: GuardHealth) -> None:
         if health.availability is not GuardAvailability.AVAILABLE:
@@ -362,6 +375,10 @@ class PluginRuntime:
         if response.kind is MessageKind.PROTECTED_FLOW_STARTED:
             self._protected_latch = True
             self._protected_action_id = action_id
+            self._remember_lending_request(action_id, {
+                "protocol": protocol, "action": params["action"],
+                "amount_mode": params["amount_mode"], "amount": params["amount"],
+            })
             return json.dumps({
                 "status": "AWAITING_LOCAL_CONFIRMATION", "authority_available": True,
                 "action_id": action_id, "protocol": protocol, "action": params["action"],
@@ -369,7 +386,10 @@ class PluginRuntime:
                 "code": response.payload["code"],
                 "message": f"Review and confirm the independent {protocol} action in Wallet.",
                 "turn_state": "END_REQUIRED",
-                "next_step": "End this turn and wait for the user's decision in Wallet.",
+                "next_step": (
+                    "End this turn and wait for the user's Wallet decision. When the user "
+                    "returns, call holon_action_status with this action_id."
+                ),
             }, separators=(",", ":"))
         return json.dumps({
             "status": "REFUSED", "authority_available": False, "action_id": action_id,
@@ -453,14 +473,32 @@ class PluginRuntime:
         if response.kind is MessageKind.ACTION_STATUS:
             state = payload["action_state"]
             self._observe_action_payload(payload, action_id)
+            result: dict[str, object] = {
+                "status": state,
+                "authority_available": state == "AWAITING_LOCAL_CONFIRMATION",
+                "action_id": action_id,
+                "code": payload["code"],
+                "message": payload["message"],
+            }
+            remembered = self._lending_requests.get(action_id)
+            if state == "FAILED" and remembered is not None:
+                result["retry"] = {
+                    "available": True,
+                    "automatic": False,
+                    "requires_user_confirmation": True,
+                    "fresh_preflight": True,
+                    "new_action_id": True,
+                    "request": remembered,
+                }
+                result["next_step"] = (
+                    "Explain the failure using code and message, then ask whether the user "
+                    "wants to repeat this Lending request. Only after explicit confirmation, "
+                    "call holon_lending_execute with retry.request; it creates a new action."
+                )
+            elif state in {"COMPLETED", "REJECTED", "REFUSED"}:
+                self._lending_requests.pop(action_id, None)
             return json.dumps(
-                {
-                    "status": state,
-                    "authority_available": state == "AWAITING_LOCAL_CONFIRMATION",
-                    "action_id": action_id,
-                    "code": payload["code"],
-                    "message": payload["message"],
-                },
+                result,
                 ensure_ascii=False,
                 separators=(",", ":"),
             )
@@ -745,7 +783,9 @@ def register(ctx: Any) -> None:
             "name": LENDING_EXECUTE_TOOL,
             "description": (
                 "Prepare one protected Base USDC Lending operation for an explicitly confirmed "
-                "protocol. If no protocol was chosen, compare first and wait for confirmation."
+                "protocol. If no protocol was chosen, compare first and wait for confirmation. "
+                "After the user returns from Wallet, call holon_action_status for the returned "
+                "action_id. Never repeat a failed action without a new explicit user confirmation."
             ),
             "parameters": {
                 "type": "object", "properties": {
@@ -823,7 +863,11 @@ def register(ctx: Any) -> None:
         description="Finish safe recovery for an interrupted transfer.",
     )
     for name, handler, description in (
-        (ACTION_STATUS_TOOL, _handle_transfer_status, "Read generic protected action status."),
+        (
+            ACTION_STATUS_TOOL, _handle_transfer_status,
+            "Read protected action status. A failed Lending action may return a safe retry "
+            "proposal that requires explicit user confirmation and a fresh action.",
+        ),
         (CANCEL_ACTION_TOOL, _handle_cancel_transfer, "Cancel a generic protected action."),
         (RECOVER_ACTION_TOOL, _handle_recover_transfer, "Recover a generic interrupted action."),
     ):

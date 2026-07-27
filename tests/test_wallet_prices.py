@@ -13,6 +13,7 @@ from holon_wallet.prices import (
     estimate_wei_usd,
     estimate_asset_usd,
     format_usd,
+    is_unusually_high_base_fee,
     portfolio_to_map,
 )
 from holon_wallet.public_data import PublicDataStatus
@@ -151,6 +152,9 @@ def test_decimal_format_and_fee_estimate_do_not_use_float() -> None:
     )
     assert format_usd(Decimal("1.005")) == "$1.01"
     assert estimate_wei_usd(100_000_000_000_000, snapshot) == "≈ $0.25"
+    assert not is_unusually_high_base_fee(19_999_999_999_999, snapshot)
+    assert is_unusually_high_base_fee(20_000_000_000_000, snapshot)
     assert estimate_asset_usd(1_000_000, 6, "usdc", snapshot) == "≈ $1.00"
     unavailable = replace(snapshot, prices=(replace(snapshot.prices[0], answer=None),))
     assert estimate_wei_usd(1, unavailable) == "Data unavailable"
+    assert is_unusually_high_base_fee(20_000_000_000_000, unavailable)

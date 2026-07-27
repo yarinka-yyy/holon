@@ -28,7 +28,7 @@ from holon_policy import (
     Policy, PolicyEngine, PolicyRevisionStore, PolicyRevisionUnavailable,
     PolicySnapshot, policy_digest,
 )
-from holon_lending import AAVE_MAX_TOTAL_FEE_WEI, ActionProfilesState
+from holon_lending import ActionProfilesState
 from holon_lending.preflight import (
     BASE_GAS_PRICE_ORACLE, MAX_UINT256, Web3AavePreflightRpc, encode_approve,
     encode_compound_supply, encode_compound_withdraw, encode_morpho_deposit,
@@ -222,7 +222,7 @@ class MainnetBroadcastPolicy:
                 return (
                     OfflineSigningPolicy(int(rule.max_total_fee_wei)).display
                     if rule is not None
-                    else OfflineSigningPolicy(AAVE_MAX_TOTAL_FEE_WEI).display
+                    else "No fixed cap"
                 )
             rule = self._shared_rule(action.network_id, action.asset_id)
             return (

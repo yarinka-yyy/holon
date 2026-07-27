@@ -18,7 +18,7 @@ from holon_guard_ipc.policy_control import ControlProtocolError, ControlUnavaila
 from holon_wallet_control.lending_operation import LendingOperationStateError, LendingOperationStore
 from holon_policy import Policy, policy_digest
 from holon_lending import (
-    AAVE_CONTRACTS, AAVE_MAX_TOTAL_FEE_WEI, ActionProfilesState,
+    AAVE_CONTRACTS, ActionProfilesState,
     LendingPreflightError, LendingPreflightService, parse_lending_intent,
 )
 
@@ -73,6 +73,7 @@ from .prices import (
     PriceStatus,
     estimate_asset_usd,
     estimate_wei_usd,
+    is_unusually_high_base_fee,
     portfolio_to_map,
     price_snapshot_to_map,
 )
@@ -249,7 +250,7 @@ class WalletController(QObject):
             and shared_policy.policy.schema_version == "4"
         ):
             revoke_policy = revoke_policy.with_builtin_base(
-                AAVE_CONTRACTS["pool"], AAVE_MAX_TOTAL_FEE_WEI,
+                AAVE_CONTRACTS["pool"],
             )
             self._mainnet_executor.revoke_policy = revoke_policy
         self._revoke_policy = revoke_policy
@@ -678,6 +679,17 @@ class WalletController(QObject):
         if action is None:
             return "Data unavailable"
         return estimate_wei_usd(action.max_total_fee_wei, prices)
+
+    @Property(bool, notify=transferChanged)
+    def lendingHighFeeWarning(self) -> bool:
+        action = self._transfer_flow.current
+        prices = self._flow_price_snapshot or self._price_snapshot
+        return bool(
+            action is not None
+            and action.action_type == "lending"
+            and action.network_id == "base"
+            and is_unusually_high_base_fee(action.max_total_fee_wei, prices)
+        )
 
     @Property(str, notify=transferChanged)
     def transferAmountUsd(self) -> str:
@@ -2944,7 +2956,7 @@ class WalletController(QObject):
         )
 
     def _activate_lending_revoke_profile(self, spender: str) -> None:
-        policy = self._revoke_policy.with_builtin_base(spender, AAVE_MAX_TOTAL_FEE_WEI)
+        policy = self._revoke_policy.with_builtin_base(spender)
         self._revoke_policy = policy
         self._mainnet_executor.revoke_policy = policy
         environ = getattr(self._mainnet_executor, "_environ", None)

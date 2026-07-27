@@ -77,6 +77,18 @@ TransactionFlowShell {
         color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 12
         wrapMode: Text.Wrap
     }
+    Rectangle {
+        objectName: "lendingSignHighFeeWarning"
+        visible: root.isLending && walletController.lendingHighFeeWarning
+        x: 0; y: 196; width: 458; height: 46
+        radius: 10; color: "#332C261B"; border.width: 1; border.color: "#66D5AA64"
+        Text {
+            anchors.centerIn: parent; width: parent.width - 24
+            text: "Base network fee is unusually high. Signing is still available."
+            horizontalAlignment: Text.AlignHCenter; wrapMode: Text.Wrap
+            color: Design.warning; font.family: Design.fontFamily; font.pixelSize: 11
+        }
+    }
     Text {
         x: 0; y: 346; text: "Wallet password"; color: Design.textMuted
         font.family: Design.fontFamily; font.pixelSize: 13

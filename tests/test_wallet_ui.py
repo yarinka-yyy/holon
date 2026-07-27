@@ -1019,6 +1019,10 @@ def test_transaction_pages_have_password_click_only_and_semantic_copy() -> None:
     assert "Change action" in review and "Edit transfer" in review
     assert 'source: root.action.protocolLogo || ""' in review
     assert "semanticLendingAction" in review
+    assert "lendingHighFeeWarning" in review
+    assert "You can still continue" in review
+    assert "lendingSignHighFeeWarning" in sign
+    assert "Signing is still available" in sign
     assert "compound-logo-white.svg" in (
         Path(__file__).parents[1] / "src" / "holon_wallet" / "transfer.py"
     ).read_text(encoding="utf-8")

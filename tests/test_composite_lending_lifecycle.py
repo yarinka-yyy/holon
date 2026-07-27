@@ -9,7 +9,7 @@ from holon_wallet_control.lending_operation import (
 )
 from holon_guard.wallet import WalletPreparedResult
 from holon_guard_ipc import GuardState
-from holon_lending import AAVE_MAX_TOTAL_FEE_WEI, AAVE_SAFETY_DIGEST
+from holon_lending import AAVE_SAFETY_DIGEST
 
 from guard_support import ACTION_ID, FINGERPRINT, make_ledger
 
@@ -72,7 +72,7 @@ def test_approve_receipt_creates_fresh_supply_phase_without_auto_signing(tmp_pat
     result, prepared = guard.start_lending_intent(
         101, ACTION_ID, FINGERPRINT,
         {"action": "supply", "amount_mode": "exact", "amount": "2"},
-        2_000_000, "3", str(AAVE_MAX_TOTAL_FEE_WEI), None, 7,
+        2_000_000, "3", None, None, 7,
         "1" * 64, "2" * 64, operation_id=ACTION_ID,
     )
     assert result.ok and prepared["next_action"] == "approve"
@@ -134,7 +134,7 @@ def test_failed_approve_review_clears_current_lending_operation(tmp_path: Path) 
     result, _prepared = guard.start_lending_intent(
         101, ACTION_ID, FINGERPRINT,
         {"action": "supply", "amount_mode": "exact", "amount": "2"},
-        2_000_000, "3", str(AAVE_MAX_TOTAL_FEE_WEI), None, 7,
+        2_000_000, "3", None, None, 7,
         "1" * 64, "2" * 64, operation_id=ACTION_ID,
     )
     assert result.ok

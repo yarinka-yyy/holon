@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 
 from holon_contracts import ActionState, RefusalCode, SecurityCode
 from holon_guard_ipc import GuardState
-from holon_lending import AAVE_MAX_TOTAL_FEE_WEI, AAVE_SAFETY_DIGEST
+from holon_lending import AAVE_SAFETY_DIGEST
 from holon_wallet_control import AUTHORITY_VERSION
 from holon_wallet_control.lending_operation import (
     LendingOperation,
@@ -62,7 +62,7 @@ class GuardLifecycle(GuardCore):
                     "amount": operation.amount,
                     "protocol_profile_id": operation.protocol_profile_id,
                 }, operation.resolved_amount_atomic, operation.policy_version,
-                str(AAVE_MAX_TOTAL_FEE_WEI), None, operation.policy_revision,
+                None, None, operation.policy_revision,
                 operation.policy_digest, operation.action_profile_digest,
                 operation_id=operation.operation_id, phase="supply",
                 safety_digest=operation.safety_digest,
@@ -265,7 +265,7 @@ class GuardLifecycle(GuardCore):
     def start_lending_intent(
         self, owner_pid: int, action_id: str, fingerprint: str,
         intent: dict[str, object], resolved_amount_atomic: int,
-        policy_version: str, fee_cap_wei: str,
+        policy_version: str, fee_cap_wei: str | None,
         amount_cap_atomic: str | None,
         policy_revision: int, policy_digest: str, action_profile_digest: str,
         operation_id: str | None = None, phase: str = "approve_or_supply",
@@ -330,7 +330,8 @@ class GuardLifecycle(GuardCore):
                 prepared_profile_id = str(payload["profile_id"])
                 prepared_sender = str(payload["sender"])
                 if (
-                    fee <= 0 or fee > int(fee_cap_wei)
+                    fee <= 0
+                    or fee_cap_wei is not None and fee > int(fee_cap_wei)
                     or amount <= 0
                     or not prepared_profile_id or not prepared_sender
                     or amount_cap_atomic is not None and amount > int(amount_cap_atomic)
