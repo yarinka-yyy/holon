@@ -10,8 +10,8 @@ from holon_wallet.storage import StorageError, WalletPaths, atomic_write_json
 from holon_wallet.vault import VaultRepository
 from holon_wallet.wallet_crypto import generate_mnemonic
 from wallet_public_support import (
-    DeferredExecutor, ImmediateExecutor, StubPriceService, StubPublicDataService,
-    public_snapshot,
+    DeferredExecutor, ImmediateExecutor, StubLendingPortfolioService,
+    StubPriceService, StubPublicDataService, public_snapshot,
 )
 
 
@@ -87,6 +87,7 @@ def test_controller_displays_cache_immediately_while_refresh_is_pending(tmp_path
         StubPublicDataService(),
         public_data_executor=deferred,
         price_service=StubPriceService(),
+        lending_portfolio_service=StubLendingPortfolioService(),
     )
     try:
         assert controller.currentScreen == "main"
@@ -120,6 +121,7 @@ def test_failed_refresh_preserves_last_known_values_and_marks_them_cached(tmp_pa
         service,
         public_data_executor=ImmediateExecutor(),
         price_service=StubPriceService(PriceStatus.UNAVAILABLE),
+        lending_portfolio_service=StubLendingPortfolioService(),
     )
     try:
         assert not controller.publicDataRefreshing
@@ -151,6 +153,7 @@ def test_partial_refresh_atomically_keeps_old_network_and_saves_live_one(tmp_pat
         }),
         public_data_executor=ImmediateExecutor(),
         price_service=StubPriceService(PriceStatus.UNAVAILABLE),
+        lending_portfolio_service=StubLendingPortfolioService(),
     )
     try:
         assert controller.ethereumData["ethValue"] == "3 ETH"

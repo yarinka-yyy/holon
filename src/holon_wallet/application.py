@@ -23,7 +23,6 @@ from holon_wallet_control import (
     AUTHORITY_PIPE_NAME, CONTROL_PIPE_NAME, WalletAuthorityServer,
     WalletControlServer,
 )
-from holon_lending import LendingPortfolioService
 
 from .approval import AllowanceReadService, RevokePreflightService
 from .broadcast import (
@@ -162,7 +161,7 @@ class WalletApplication:
         authority_server_factory=WalletAuthorityServer,
         status_client: WalletStatusClient | None = None,
         policy_control_client=None,
-        lending_portfolio_service: LendingPortfolioService | None = None,
+        lending_portfolio_service: object | None = None,
     ) -> None:
         self.qt_app = qt_app or QGuiApplication.instance()
         if self.qt_app is None:

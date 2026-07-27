@@ -41,6 +41,8 @@ class LendingAnalyticsStore:
                     item for item in envelope["accounts"]
                     if item.get("address") == address
                 )
+                if not self._valid_account_state(value):
+                    return None
                 return deepcopy(value)
             except (OSError, ValueError, StopIteration, TypeError, json.JSONDecodeError):
                 return None
@@ -98,6 +100,96 @@ class LendingAnalyticsStore:
             if descriptor >= 0:
                 os.close(descriptor)
             temporary.unlink(missing_ok=True)
+
+    @staticmethod
+    def _valid_account_state(value: Mapping[str, Any]) -> bool:
+        current = value.get("current")
+        protocols = current.get("protocols") if isinstance(current, Mapping) else None
+        observations = value.get("observations")
+        baselines = value.get("baselines")
+        if (
+            not isinstance(value.get("address"), str)
+            or not isinstance(value.get("label"), str)
+            or not LendingAnalyticsStore._valid_timestamp(value.get("saved_at"))
+            or not isinstance(protocols, list)
+            or len(protocols) != len(PROTOCOL_IDS)
+            or {item.get("protocol") for item in protocols if isinstance(item, Mapping)}
+            != set(PROTOCOL_IDS)
+            or any(
+                not LendingAnalyticsStore._valid_protocol(item)
+                for item in protocols
+            )
+            or not isinstance(observations, list)
+            or len(observations) > MAX_OBSERVATIONS
+            or any(not LendingAnalyticsStore._valid_observation(item) for item in observations)
+            or not isinstance(baselines, Mapping)
+            or any(
+                protocol not in PROTOCOL_IDS
+                or not LendingAnalyticsStore._valid_baseline(baseline)
+                for protocol, baseline in baselines.items()
+            )
+        ):
+            return False
+        return True
+
+    @staticmethod
+    def _valid_protocol(value: object) -> bool:
+        if not isinstance(value, Mapping):
+            return False
+        required = {
+            "protocol", "position_atomic", "tracked_earnings_atomic", "data_state",
+            "caveats", "confirmed_total_annual_percent",
+        }
+        position = value.get("position_atomic")
+        earnings = value.get("tracked_earnings_atomic")
+        rate = value.get("confirmed_total_annual_percent")
+        return bool(
+            required <= set(value)
+            and value.get("data_state") in {"LIVE", "STALE", "CACHED", "UNAVAILABLE"}
+            and isinstance(value.get("caveats"), list)
+            and (position is None or isinstance(position, str) and position.isdecimal())
+            and (
+                earnings is None
+                or isinstance(earnings, str) and earnings.lstrip("-").isdecimal()
+            )
+            and (rate is None or isinstance(rate, str))
+        )
+
+    @staticmethod
+    def _valid_timestamp(value: object) -> bool:
+        if not isinstance(value, str):
+            return False
+        try:
+            datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        return True
+
+    @staticmethod
+    def _valid_observation(value: object) -> bool:
+        if (
+            not isinstance(value, Mapping)
+            or not LendingAnalyticsStore._valid_timestamp(value.get("observed_at"))
+        ):
+            return False
+        return isinstance(value.get("rates"), Mapping)
+
+    @staticmethod
+    def _valid_baseline(value: object) -> bool:
+        if not isinstance(value, Mapping):
+            return False
+        processed = value.get("processed_action_ids")
+        return bool(
+            LendingAnalyticsStore._valid_timestamp(value.get("started_at"))
+            and isinstance(value.get("position_atomic"), str)
+            and value["position_atomic"].isdecimal()
+            and isinstance(value.get("net_contributions_atomic"), str)
+            and value["net_contributions_atomic"].lstrip("-").isdecimal()
+            and isinstance(processed, list)
+            and len(processed) <= 500
+            and all(isinstance(item, str) for item in processed)
+            and type(value.get("history_complete")) is bool
+        )
 
 
 class LendingPortfolioService:
