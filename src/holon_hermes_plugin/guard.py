@@ -31,6 +31,10 @@ class GuardClient(Protocol):
 
     def lending_positions(self) -> ContractEnvelope: ...
 
+    def lending_portfolio(
+        self, force_refresh: bool = False, history_period: str = "none",
+    ) -> ContractEnvelope: ...
+
     def lending_action_preview(
         self, payload: dict[str, object],
     ) -> ContractEnvelope: ...
@@ -67,6 +71,12 @@ class UnavailableGuardClient:
         raise RuntimeError("Guard is unavailable")
 
     def lending_positions(self) -> ContractEnvelope:
+        raise RuntimeError("Guard is unavailable")
+
+    def lending_portfolio(
+        self, force_refresh: bool = False, history_period: str = "none",
+    ) -> ContractEnvelope:
+        del force_refresh, history_period
         raise RuntimeError("Guard is unavailable")
 
     def lending_action_preview(
@@ -159,6 +169,14 @@ class GuardConnector:
         if health.availability is not GuardAvailability.AVAILABLE:
             raise RuntimeError("Guard is unavailable")
         return self._client.lending_positions()
+
+    def lending_portfolio(
+        self, force_refresh: bool = False, history_period: str = "none",
+    ) -> ContractEnvelope:
+        health = self.ensure_available()
+        if health.availability is not GuardAvailability.AVAILABLE:
+            raise RuntimeError("Guard is unavailable")
+        return self._client.lending_portfolio(force_refresh, history_period)
 
     def lending_action_preview(
         self, payload: dict[str, object],

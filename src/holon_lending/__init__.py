@@ -43,6 +43,7 @@ from .profiles import (
     read_profiles_digest,
 )
 from .runtime import LendingReadError, LendingReader, LendingReadService
+from .portfolio import LendingAnalyticsStore, LendingPortfolioService
 from .preflight import (
     LendingIntent,
     LendingPreflightCode,
@@ -81,6 +82,8 @@ __all__ = [
     "LendingReadError",
     "LendingReader",
     "LendingReadService",
+    "LendingAnalyticsStore",
+    "LendingPortfolioService",
     "MORPHO_BLUE_ADDRESS",
     "MORPHO_ACTION_PROFILE",
     "MORPHO_VAULT_ADDRESS",

@@ -4,6 +4,8 @@ from concurrent.futures import Executor, Future
 
 from web3 import Web3
 
+from holon_lending import LendingPortfolioService
+
 from holon_wallet.approval import APPROVAL_ROUTES, RevokePolicy
 from holon_wallet.broadcast import (
     BASE_RPC_ENV,
@@ -104,6 +106,49 @@ class StubPriceService:
             1,
             None if self.status is PriceStatus.LIVE else "UNAVAILABLE",
         )
+
+
+class StubLendingPortfolioService:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def read(
+        self, account, operations, *, force_refresh=False,
+        history_period="none", history_limit=120,
+    ):
+        del operations, history_limit
+        self.calls.append((dict(account), force_refresh, history_period))
+        return self._value(account, history_period, "LIVE_READ")
+
+    def cached(self, account, history_period="none", history_limit=120):
+        del history_limit
+        return self._value(account, history_period, "PERSISTED_FALLBACK")
+
+    @staticmethod
+    def _value(account, history_period, source):
+        value = LendingPortfolioService.unavailable(account, history_period)
+        value.update({
+            "status": "READY", "code": "LENDING_PORTFOLIO_READY",
+            "message": "Lending portfolio is available.",
+        })
+        for item in value["protocols"]:
+            item.update({
+                "position_atomic": "0", "display_position": "0 USDC",
+                "tracked_earnings_atomic": "0",
+                "display_tracked_earnings": "0 USDC",
+                "earnings_status": "AVAILABLE", "data_state": "LIVE",
+                "caveats": [],
+            })
+        value["summary"].update({
+            "total_position_atomic": "0", "display_total_position": "0 USDC",
+            "tracked_earnings_atomic": "0",
+            "display_tracked_earnings": "0 USDC", "earnings_status": "AVAILABLE",
+            "yield_completeness": "EMPTY",
+        })
+        value["delivery"].update({
+            "fetched_at": "2026-07-27T12:00:00Z", "source": source,
+        })
+        return value
 
 
 class StubTransferRpc:

@@ -30,6 +30,7 @@ REQUEST_KINDS = frozenset(
         MessageKind.READ_WALLET_BALANCES,
         MessageKind.READ_LENDING_MARKETS,
         MessageKind.READ_LENDING_POSITIONS,
+        MessageKind.READ_LENDING_PORTFOLIO,
         MessageKind.LENDING_ACTION_INTENT,
         MessageKind.LENDING_AUTHORITY_INTENT,
         MessageKind.PREPARE_TRANSFER,
@@ -46,6 +47,7 @@ PAYLOAD_FIELDS = {
     MessageKind.READ_WALLET_BALANCES: frozenset(),
     MessageKind.READ_LENDING_MARKETS: frozenset(),
     MessageKind.READ_LENDING_POSITIONS: frozenset(),
+    MessageKind.READ_LENDING_PORTFOLIO: frozenset(),
     MessageKind.LENDING_ACTION_INTENT: frozenset(
         {
             "module_id", "module_version", "protocol_profile_id",
@@ -96,6 +98,13 @@ PAYLOAD_FIELDS = {
         {
             "status", "authority_available", "account", "network", "asset",
             "positions", "code", "message",
+        }
+    ),
+    MessageKind.LENDING_PORTFOLIO: frozenset(
+        {
+            "status", "authority_available", "account", "network", "asset",
+            "summary", "protocols", "recommendation", "delivery", "history",
+            "code", "message",
         }
     ),
     MessageKind.LENDING_ACTION_PREVIEW: frozenset(

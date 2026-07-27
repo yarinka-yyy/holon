@@ -4,7 +4,9 @@ from __future__ import annotations
 from holon_contracts import ContractEnvelope, MessageKind, SecurityCode
 from holon_guard_ipc import GuardState
 from holon_journal import EventType, JournalFailure
-from holon_lending import ActionProfilesState, LendingReader, LendingReadService
+from holon_lending import (
+    ActionProfilesState, LendingPortfolioService, LendingReader, LendingReadService,
+)
 from holon_lending.preflight import unavailable_preview
 from holon_policy import (
     PolicyEngine, PolicyRevisionStore, PolicyRevisionUnavailable, PolicySnapshot,
@@ -29,6 +31,8 @@ class AuthorityService(ResponseMixin):
         revision_store: PolicyRevisionStore | None = None,
         lending: LendingReader | None = None,
         lending_actions: ActionProfilesState | None = None,
+        lending_portfolio: LendingPortfolioService | None = None,
+        lending_history=None,
     ) -> None:
         self.lifecycle = lifecycle
         self.policy = policy
@@ -40,6 +44,8 @@ class AuthorityService(ResponseMixin):
         self.revision_store = revision_store
         self.lending = lending or LendingReadService.unavailable()
         self.lending_actions = lending_actions or ActionProfilesState.load()
+        self.lending_portfolio = lending_portfolio
+        self.lending_history = lending_history
 
     def replace_policy_snapshot(self, snapshot: PolicySnapshot) -> None:
         self.policy_snapshot = snapshot
@@ -204,6 +210,29 @@ class AuthorityService(ResponseMixin):
             except Exception:
                 payload = LendingReadService.unavailable().positions(None)
             return self._response(request, MessageKind.LENDING_POSITIONS, payload)
+        if request.kind is MessageKind.READ_LENDING_PORTFOLIO:
+            account = None
+            operations = None
+            try:
+                result = self.lifecycle.wallet.read_public_balances()
+                if result.ok and result.payload is not None:
+                    account = result.payload.get("account")
+                if account is not None and callable(self.lending_history):
+                    operations = self.lending_history(account["address"])
+                if self.lending_portfolio is None:
+                    raise RuntimeError("Lending portfolio is unavailable")
+                payload = self.lending_portfolio.read(
+                    account,
+                    operations,
+                    force_refresh=request.payload.get("force_refresh", False),
+                    history_period=request.payload.get("history_period", "none"),
+                    history_limit=12,
+                )
+            except Exception:
+                payload = LendingPortfolioService.unavailable(
+                    account, request.payload.get("history_period", "none"),
+                )
+            return self._response(request, MessageKind.LENDING_PORTFOLIO, payload)
         if request.kind is MessageKind.LENDING_ACTION_INTENT:
             action = request.payload.get("action")
             mode = request.payload.get("amount_mode")

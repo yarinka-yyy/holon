@@ -14,6 +14,7 @@ from .violations import ContractViolation
 NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 DECIMAL_RE = re.compile(r"^[1-9][0-9]{0,77}$")
 NON_NEGATIVE_RE = re.compile(r"^(?:0|[1-9][0-9]{0,77})$")
+SIGNED_ATOMIC_RE = re.compile(r"^-?(?:0|[1-9][0-9]{0,77})$")
 ADDRESS_RE = re.compile(r"^0x[0-9A-Fa-f]{40}$")
 HUMAN_AMOUNT_RE = re.compile(r"^[0-9]+(?:[.,][0-9]+)?$")
 CODE_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
@@ -562,6 +563,132 @@ def validate_lending_positions(payload: Mapping[str, Any]) -> None:
         raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Inconsistent Lending status.")
 
 
+def validate_lending_portfolio(payload: Mapping[str, Any]) -> None:
+    if set(payload) != PAYLOAD_FIELDS[MessageKind.LENDING_PORTFOLIO]:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending portfolio.")
+    _safe_text(payload)
+    _lending_identity(payload)
+    if payload.get("authority_available") is not False:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending authority status.")
+    account = payload.get("account")
+    if account is not None and (
+        not isinstance(account, Mapping) or set(account) != {"label", "address"}
+        or not isinstance(account["label"], str) or not account["label"]
+        or not isinstance(account["address"], str) or ADDRESS_RE.fullmatch(account["address"]) is None
+    ):
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending account.")
+    summary = payload.get("summary")
+    summary_fields = {
+        "total_position_atomic", "display_total_position", "tracked_earnings_atomic",
+        "display_tracked_earnings", "earnings_status",
+        "weighted_confirmed_annual_percent", "yield_completeness",
+    }
+    if not isinstance(summary, Mapping) or set(summary) != summary_fields:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending summary.")
+    _optional_atomic(summary["total_position_atomic"], signed=False)
+    _optional_atomic(summary["tracked_earnings_atomic"], signed=True)
+    weighted = summary["weighted_confirmed_annual_percent"]
+    if weighted is not None and (
+        not isinstance(weighted, str) or LENDING_PERCENT_RE.fullmatch(weighted) is None
+    ):
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending weighted yield.")
+    if summary["earnings_status"] not in {"AVAILABLE", "NOT_ENOUGH_HISTORY"} or summary["yield_completeness"] not in {"COMPLETE", "PARTIAL", "EMPTY"}:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending summary status.")
+    protocols = payload.get("protocols")
+    if not isinstance(protocols, list) or len(protocols) != 3:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending protocols.")
+    for item, expected in zip(protocols, LENDING_CONTRACTS, strict=True):
+        _lending_portfolio_protocol(item, expected)
+    delivery = payload.get("delivery")
+    if not isinstance(delivery, Mapping) or set(delivery) != {
+        "fetched_at", "cache_age_seconds", "cache_max_age_seconds",
+        "force_refreshed", "source",
+    }:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending delivery.")
+    fetched = delivery["fetched_at"]
+    if fetched is not None and (not isinstance(fetched, str) or UTC_TIMESTAMP_RE.fullmatch(fetched) is None):
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending delivery time.")
+    if (
+        type(delivery["cache_age_seconds"]) is not int or delivery["cache_age_seconds"] < 0
+        or delivery["cache_max_age_seconds"] != 30
+        or type(delivery["force_refreshed"]) is not bool
+        or delivery["source"] not in {
+            "LIVE_READ", "MEMORY_CACHE", "PERSISTED_FALLBACK", "UNAVAILABLE",
+        }
+    ):
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending delivery status.")
+    history = payload.get("history")
+    if not isinstance(history, Mapping) or set(history) != {"period", "points"} or history["period"] not in {"none", "7d", "30d", "all"}:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending history.")
+    points = history["points"]
+    if not isinstance(points, list) or len(points) > 12:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending history points.")
+    for point in points:
+        _lending_history_point(point)
+    expected = {
+        "READY": ("LENDING_PORTFOLIO_READY", "Lending portfolio is available."),
+        "PARTIAL": ("LENDING_PORTFOLIO_PARTIAL", "Some Lending portfolio data is unavailable or cached."),
+        "DEGRADED": ("LENDING_PORTFOLIO_UNAVAILABLE", "Lending portfolio is unavailable."),
+    }.get(payload.get("status"))
+    if expected is None or (payload.get("code"), payload.get("message")) != expected:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending portfolio status.")
+
+
+def _optional_atomic(value: object, *, signed: bool) -> None:
+    pattern = SIGNED_ATOMIC_RE if signed else NON_NEGATIVE_RE
+    if value is not None and (not isinstance(value, str) or pattern.fullmatch(value) is None):
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending amount.")
+
+
+def _lending_portfolio_protocol(
+    value: object, expected: tuple[str, str, str],
+) -> None:
+    fields = {
+        "protocol", "market_id", "display_name", "contract_address",
+        "position_atomic", "display_position", "base_yield", "incentives",
+        "confirmed_total_annual_percent", "total_completeness",
+        "tracked_earnings_atomic", "display_tracked_earnings", "earnings_status",
+        "tracked_since", "data_state", "observed_at", "caveats",
+    }
+    if not isinstance(value, Mapping) or set(value) != fields or tuple(
+        value[name] for name in ("protocol", "market_id")
+    ) != expected[:2]:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending protocol.")
+    contract = value["contract_address"]
+    if contract is not None and (not isinstance(contract, str) or ADDRESS_RE.fullmatch(contract) is None):
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending contract.")
+    _optional_atomic(value["position_atomic"], signed=False)
+    _optional_atomic(value["tracked_earnings_atomic"], signed=True)
+    rate = value["confirmed_total_annual_percent"]
+    if rate is not None and (not isinstance(rate, str) or LENDING_PERCENT_RE.fullmatch(rate) is None):
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending rate.")
+    if value["earnings_status"] not in {"AVAILABLE", "NOT_ENOUGH_HISTORY"} or value["data_state"] not in {"LIVE", "STALE", "CACHED", "UNAVAILABLE"}:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending protocol status.")
+    for name in ("tracked_since", "observed_at"):
+        timestamp = value[name]
+        if timestamp is not None and (not isinstance(timestamp, str) or UTC_TIMESTAMP_RE.fullmatch(timestamp) is None):
+            raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending timestamp.")
+    if not isinstance(value["caveats"], list) or len(value["caveats"]) > 16:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending caveats.")
+
+
+def _lending_history_point(value: object) -> None:
+    if not isinstance(value, Mapping) or set(value) != {
+        "observed_at", "total_position_atomic", "tracked_earnings_atomic", "rates",
+    }:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending history point.")
+    if not isinstance(value["observed_at"], str) or UTC_TIMESTAMP_RE.fullmatch(value["observed_at"]) is None:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending history time.")
+    _optional_atomic(value["total_position_atomic"], signed=False)
+    _optional_atomic(value["tracked_earnings_atomic"], signed=True)
+    rates = value["rates"]
+    if not isinstance(rates, Mapping) or set(rates) != {item[0] for item in LENDING_CONTRACTS}:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending history rates.")
+    for rate in rates.values():
+        if rate is not None and (not isinstance(rate, str) or LENDING_PERCENT_RE.fullmatch(rate) is None):
+            raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending history rate.")
+
+
 def _bounded_codes(value: object, allowed: frozenset[str], name: str) -> None:
     if (
         not isinstance(value, list) or len(value) > 16
@@ -719,6 +846,14 @@ def validate_payload(kind: MessageKind, payload: Mapping[str, Any]) -> None:
         ):
             raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending refresh request.")
         return
+    if kind is MessageKind.READ_LENDING_PORTFOLIO:
+        if set(payload) - {"force_refresh", "history_period"}:
+            raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending portfolio request.")
+        if "force_refresh" in payload and type(payload["force_refresh"]) is not bool:
+            raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending portfolio refresh.")
+        if payload.get("history_period", "none") not in {"none", "7d", "30d", "all"}:
+            raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending history period.")
+        return
     if kind in {MessageKind.LENDING_ACTION_INTENT, MessageKind.LENDING_AUTHORITY_INTENT}:
         validate_lending_action_intent(payload)
         return
@@ -736,6 +871,9 @@ def validate_payload(kind: MessageKind, payload: Mapping[str, Any]) -> None:
         return
     if kind is MessageKind.LENDING_POSITIONS:
         validate_lending_positions(payload)
+        return
+    if kind is MessageKind.LENDING_PORTFOLIO:
+        validate_lending_portfolio(payload)
         return
     if kind is MessageKind.LENDING_ACTION_PREVIEW:
         validate_lending_action_preview(payload)

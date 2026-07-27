@@ -7,6 +7,7 @@ provides_tools:
   - holon_wallet_balances
   - holon_lending_compare
   - holon_lending_positions
+  - holon_lending_portfolio
   - holon_lending_prepare
   - holon_prepare_transfer
   - holon_transfer_status

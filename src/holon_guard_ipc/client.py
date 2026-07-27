@@ -125,6 +125,15 @@ class PipeGuardClient:
             response_timeout=50.0,
         )
 
+    def lending_portfolio(
+        self, force_refresh: bool = False, history_period: str = "none",
+    ) -> ContractEnvelope:
+        return self.client.request(
+            MessageKind.READ_LENDING_PORTFOLIO,
+            {"force_refresh": force_refresh, "history_period": history_period},
+            response_timeout=50.0,
+        )
+
     def lending_action_preview(
         self, payload: dict[str, object],
     ) -> ContractEnvelope:

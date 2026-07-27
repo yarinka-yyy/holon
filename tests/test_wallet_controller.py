@@ -45,6 +45,7 @@ from wallet_public_support import (
     DeferredExecutor,
     ImmediateExecutor,
     StubPublicDataService,
+    StubLendingPortfolioService,
     StubPriceService,
     StubTransferPreflightService,
     mainnet_services,
@@ -129,6 +130,7 @@ def controller(tmp_path, policy_control_client=None) -> WalletController:
         receipt_executor=ImmediateExecutor(),
         price_service=StubPriceService(),
         policy_control_client=policy_control_client,
+        lending_portfolio_service=StubLendingPortfolioService(),
     )
     item._test_mainnet_rpc = rpc
     return item

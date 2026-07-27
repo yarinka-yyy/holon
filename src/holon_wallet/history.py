@@ -358,6 +358,62 @@ def history_record_to_map(record: WalletHistoryRecord) -> dict[str, object]:
     }
 
 
+def lending_cashflows(
+    records: tuple[WalletHistoryRecord, ...], profile_id: str,
+) -> list[dict[str, object]]:
+    """Return public, confirmed Lending cash flows used by local analytics."""
+    result: list[dict[str, object]] = []
+    for record in records:
+        if (
+            record.profile_id != profile_id
+            or record.status is not HistoryStatus.CONFIRMED
+            or record.simulated
+            or record.protocol_id is None
+            or record.action_type not in {
+                "lending_supply", "lending_deposit", "lending_withdraw",
+                "lending_withdraw_all", "lending_redeem",
+            }
+        ):
+            continue
+        amount = record.amount_atomic
+        if record.action_type in {"lending_withdraw_all", "lending_redeem"}:
+            if (
+                record.position_before_atomic is None
+                or record.position_after_atomic is None
+                or record.position_verified is not True
+            ):
+                amount = None
+            else:
+                before = int(record.position_before_atomic)
+                after = int(record.position_after_atomic)
+                amount = str(before - after) if before >= after else None
+        result.append({
+            "action_id": record.action_id,
+            "protocol": record.protocol_id,
+            "direction": (
+                "supply" if record.action_type in {"lending_supply", "lending_deposit"}
+                else "withdraw"
+            ),
+            "amount_atomic": amount,
+            "verified": record.position_verified is True,
+            "updated_at": record.updated_at,
+        })
+    return result
+
+
+def lending_cashflows_for_address(
+    records: tuple[WalletHistoryRecord, ...], address: str,
+) -> list[dict[str, object]]:
+    profile_ids = {
+        record.profile_id for record in records
+        if record.sender.lower() == address.lower()
+    }
+    result: list[dict[str, object]] = []
+    for profile_id in profile_ids:
+        result.extend(lending_cashflows(records, profile_id))
+    return sorted(result, key=lambda item: str(item["updated_at"]))
+
+
 def _validate_record(record: WalletHistoryRecord) -> None:
     if not isinstance(record.action_id, str) or not 1 <= len(record.action_id) <= 128:
         raise HistoryValidationError("History action ID is invalid")

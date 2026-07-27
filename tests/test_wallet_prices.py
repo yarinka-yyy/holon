@@ -158,3 +158,38 @@ def test_decimal_format_and_fee_estimate_do_not_use_float() -> None:
     unavailable = replace(snapshot, prices=(replace(snapshot.prices[0], answer=None),))
     assert estimate_wei_usd(1, unavailable) == "Data unavailable"
     assert is_unusually_high_base_fee(20_000_000_000_000, unavailable)
+
+
+def test_lending_positions_extend_all_and_base_without_double_counting() -> None:
+    prices = PriceSnapshot(
+        8453, PriceStatus.LIVE,
+        (
+            AssetPrice("eth", "ETH", PriceStatus.LIVE, 250_000_000_000, 8, NOW),
+            AssetPrice("usdc", "USDC", PriceStatus.LIVE, 100_000_000, 8, NOW),
+        ), NOW,
+    )
+    snapshots = {
+        "ethereum": public_snapshot("ethereum", eth=10**18, usdc=2_000_000),
+        "base": public_snapshot("base", eth=2 * 10**18, usdc=3_000_000),
+    }
+    lending = [
+        {"protocol": "aave-v3", "position_atomic": "10000000", "data_state": "LIVE"},
+        {"protocol": "compound-v3", "position_atomic": "20000000", "data_state": "LIVE"},
+        {"protocol": "morpho-v1", "position_atomic": "0", "data_state": "LIVE"},
+    ]
+
+    combined = portfolio_to_map(snapshots, prices, "all", lending)
+    assert combined["totalUsd"] == "$7,535.00"
+    assert [item["assetId"] for item in combined["assets"]] == [
+        "eth", "usdc", "aave-v3", "compound-v3",
+    ]
+    assert combined["networks"][1]["totalUsd"] == "$5,033.00"
+
+    ethereum = portfolio_to_map(snapshots, prices, "ethereum", lending)
+    assert ethereum["totalUsd"] == "$2,502.00"
+    assert [item["assetId"] for item in ethereum["assets"]] == ["eth", "usdc"]
+
+    lending[1]["position_atomic"] = None
+    incomplete = portfolio_to_map(snapshots, prices, "base", lending)
+    assert incomplete["totalAvailable"] is False
+    assert incomplete["totalUsd"] == "$ —"

@@ -19,7 +19,10 @@ from holon_policy.baseline import (
     load_baseline_policy,
 )
 from holon_journal import EventType
-from holon_lending import ActionProfilesState, LendingReadService
+from holon_lending import (
+    ActionProfilesState, LendingAnalyticsStore, LendingPortfolioService,
+    LendingReadService,
+)
 from holon_installation import verify_installed
 
 from .action_model import ActionStateSnapshot
@@ -43,6 +46,9 @@ from .wallet import (
     WindowsOwnerProbe,
 )
 from holon_wallet.storage import WalletPaths
+from holon_wallet.history import (
+    HistoryStore, HistoryUnavailableError, lending_cashflows_for_address,
+)
 from holon_wallet.trusted_recipients import TrustedPolicyDraftStore
 
 
@@ -171,12 +177,26 @@ def main(argv: list[str] | None = None) -> int:
                 }
             ):
                 lifecycle.enable_signing("AAVE_CAPABILITY_READY")
+            lending_reader = LendingReadService.default()
+            history_store = HistoryStore(WalletPaths(data_dir))
+
+            def lending_history(address: str):
+                try:
+                    return lending_cashflows_for_address(history_store.load(), address)
+                except HistoryUnavailableError:
+                    return None
+
             authority = AuthorityService(
                 lifecycle, PolicyEngine(policy_snapshot.policy), audit,
                 security_failure=failure, policy_snapshot=policy_snapshot,
                 revision_store=revision_store,
-                lending=LendingReadService.default(),
+                lending=lending_reader,
                 lending_actions=ActionProfilesState.load(),
+                lending_portfolio=LendingPortfolioService(
+                    lending_reader,
+                    LendingAnalyticsStore(data_dir / "lending-analytics.json"),
+                ),
+                lending_history=lending_history,
             )
             if lifecycle.snapshot.state.value == "SIGNING_DISABLED":
                 authority.audit_system(

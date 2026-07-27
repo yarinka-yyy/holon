@@ -46,6 +46,7 @@ Item {
         SubmitPage { objectName: "submitPage"; anchors.fill: parent; active: walletController.currentScreen === "submit_transfer" }
         MainnetResultPage { objectName: "mainnetResultPage"; anchors.fill: parent; active: walletController.currentScreen === "transfer_result" }
         LendingRecoveryPage { objectName: "lendingRecoveryPage"; anchors.fill: parent; active: walletController.currentScreen === "lending_recovery" }
+        LendingPage { objectName: "lendingPage"; anchors.fill: parent; active: walletController.currentScreen === "lending" }
         UnavailablePage { objectName: "unavailablePage"; anchors.fill: parent; active: walletController.currentScreen === "unavailable" }
         Chrome { anchors.fill: parent; window: walletWindow; z: 50 }
 

@@ -231,7 +231,9 @@ class AuthorityTests(unittest.TestCase):
         self.assertNotIn("private", str(response.to_dict()).lower())
 
     def test_lending_reads_are_public_and_work_when_signing_disabled(self) -> None:
-        from holon_lending import LendingReadService
+        from holon_lending import (
+            LendingAnalyticsStore, LendingPortfolioService, LendingReadService,
+        )
 
         self.service.lending = LendingReadService.unavailable()
         compare = self.service.handle(
@@ -248,6 +250,22 @@ class AuthorityTests(unittest.TestCase):
         self.assertEqual(positions.kind, MessageKind.LENDING_POSITIONS)
         self.assertEqual(positions.payload["code"], "LENDING_POSITIONS_UNAVAILABLE")
         self.assertEqual(self.wallet.balance_calls, 1)
+        self.service.lending_portfolio = LendingPortfolioService(
+            LendingReadService.unavailable(),
+            LendingAnalyticsStore(
+                Path(self.temporary.name) / "lending-analytics.json",
+            ),
+        )
+        portfolio = self.service.handle(
+            make_envelope(
+                MessageKind.READ_LENDING_PORTFOLIO,
+                {"force_refresh": False, "history_period": "7d"},
+            ),
+            None,
+        )
+        self.assertEqual(portfolio.kind, MessageKind.LENDING_PORTFOLIO)
+        self.assertEqual(portfolio.payload["code"], "LENDING_PORTFOLIO_UNAVAILABLE")
+        self.assertEqual(portfolio.payload["history"]["period"], "7d")
         self.assertIsNone(self.lifecycle.ledger.snapshot.current)
 
     def test_lending_preview_works_when_signing_disabled_without_action_state(self) -> None:

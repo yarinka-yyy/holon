@@ -34,6 +34,7 @@ from wallet_public_support import (
     DeferredExecutor,
     ImmediateExecutor,
     StubPublicDataService,
+    StubLendingPortfolioService,
     StubPriceService,
     StubTransferPreflightService,
     mainnet_services,
@@ -138,9 +139,42 @@ def make_app(
         receipt_executor=ImmediateExecutor(),
         price_service=StubPriceService(),
         policy_control_client=policy_control_client,
+        lending_portfolio_service=StubLendingPortfolioService(),
     )
     app._test_mainnet_rpc = rpc
     return app
+
+
+def test_lending_tile_settings_gear_and_dashboard_at_minimum_size(
+    tmp_path, qt_app,
+) -> None:
+    repository = VaultRepository(WalletPaths(tmp_path))
+    repository.create_new(
+        fresh_password(), repository.new_record(generate_mnemonic(), "Main Account"),
+    )
+    app = make_app(qt_app, repository)
+    try:
+        assert app.window.width() == 430
+        assert app.window.height() == 703
+        assert child(app, "settingsGearButton").property("enabled")
+        assert child(app, "lendingAction").property("enabled")
+        assert app.window.findChild(QObject, "lendingAssetRow-aave-v3") is None
+
+        invoke(child(app, "lendingAction"), "trigger")
+        qt_app.processEvents()
+        assert app.controller.currentScreen == "lending"
+        assert child(app, "lendingHistoryChart") is not None
+        assert len(app.controller.lendingData["protocols"]) == 3
+        assert child(app, "lendingProtocolColumn").property("height") == pytest.approx(606)
+        invoke(child(app, "lendingRefreshButton"), "trigger")
+        assert app.controller.lendingHistoryPeriod == "7d"
+        invoke(child(app, "lendingHeaderBackButton"), "trigger")
+        assert app.controller.currentScreen == "main"
+        invoke(child(app, "settingsGearButton"), "trigger")
+        assert app.controller.currentScreen == "settings"
+        assert app.qml_warnings == []
+    finally:
+        app.close()
 
 
 class UiPolicyControl:
@@ -187,7 +221,7 @@ def test_token_approvals_v2_review_confirm_submit_and_policy_gate(tmp_path, qt_a
         invoke(child(app, "passwordSubmitButton"), "trigger")
         invoke(child(app, "finishBackupButton"), "trigger")
         qt_app.processEvents()
-        invoke(child(app, "settingsAction"), "trigger")
+        invoke(child(app, "settingsGearButton"), "trigger")
         QTest.qWait(220)
         invoke(child(app, "settingsSecurity"), "trigger")
         QTest.qWait(220)
@@ -232,7 +266,7 @@ def test_token_approvals_v2_review_confirm_submit_and_policy_gate(tmp_path, qt_a
         invoke(child(disabled, "passwordSubmitButton"), "trigger")
         invoke(child(disabled, "finishBackupButton"), "trigger")
         qt_app.processEvents()
-        invoke(child(disabled, "settingsAction"), "trigger")
+        invoke(child(disabled, "settingsGearButton"), "trigger")
         QTest.qWait(220)
         invoke(child(disabled, "settingsSecurity"), "trigger")
         QTest.qWait(220)
@@ -294,7 +328,8 @@ def test_create_ui_persists_after_done_and_enables_wallet_controls(
     assert QGuiApplication.clipboard().text() == ""
     assert child(app, "sendAction").property("enabled")
     assert child(app, "transactionsAction").property("enabled")
-    assert child(app, "settingsAction").property("enabled")
+    assert child(app, "lendingAction").property("enabled")
+    assert child(app, "settingsGearButton").property("enabled")
     assert child(app, "allNetworksCard").property("enabled")
     assert child(app, "ethereumNetworkCard").property("enabled")
     assert child(app, "baseNetworkCard").property("enabled")
@@ -309,7 +344,7 @@ def test_create_ui_persists_after_done_and_enables_wallet_controls(
     invoke(child(app, "historyBackButton"), "trigger")
     assert app.controller.currentScreen == "main"
 
-    invoke(child(app, "settingsAction"), "trigger")
+    invoke(child(app, "settingsGearButton"), "trigger")
     qt_app.processEvents()
     assert app.controller.currentScreen == "settings"
     assert child(app, "settingsAccounts").property("enabled")
@@ -394,7 +429,7 @@ def test_protected_recovery_review_confirm_reveal_and_clipboard(tmp_path, qt_app
     vault_before = repository.paths.vault.read_bytes()
     app = make_app(qt_app, repository)
     try:
-        invoke(child(app, "settingsAction"), "trigger")
+        invoke(child(app, "settingsGearButton"), "trigger")
         invoke(child(app, "settingsSecurity"), "trigger")
         assert app.controller.currentScreen == "settings_info"
         assert child(app, "settingsRecoveryMaterial").property("enabled")
@@ -656,7 +691,7 @@ def test_trusted_recipients_qml_review_and_password_save(tmp_path, qt_app) -> No
     )
     app = make_app(qt_app, repository)
     try:
-        invoke(child(app, "settingsAction"), "trigger")
+        invoke(child(app, "settingsGearButton"), "trigger")
         QTest.qWait(220)
         invoke(child(app, "settingsSecurity"), "trigger")
         QTest.qWait(220)
@@ -953,7 +988,7 @@ def test_v2_receive_settings_privacy_and_transaction_details(tmp_path, qt_app) -
         invoke(child(app, "receiveBackButton"), "trigger")
         assert app.controller.currentScreen == "main"
 
-        invoke(child(app, "settingsAction"), "trigger")
+        invoke(child(app, "settingsGearButton"), "trigger")
         invoke(child(app, "settingsNetworkData"), "trigger")
         assert app.controller.currentScreen == "settings_info"
         assert app.controller.settingsSection == "network"

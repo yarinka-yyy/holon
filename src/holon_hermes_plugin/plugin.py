@@ -23,6 +23,7 @@ OPEN_WALLET_TOOL = "holon_open_wallet"
 WALLET_BALANCES_TOOL = "holon_wallet_balances"
 LENDING_COMPARE_TOOL = "holon_lending_compare"
 LENDING_POSITIONS_TOOL = "holon_lending_positions"
+LENDING_PORTFOLIO_TOOL = "holon_lending_portfolio"
 LENDING_PREPARE_TOOL = "holon_lending_prepare"
 LENDING_EXECUTE_TOOL = "holon_lending_execute"
 PREPARE_TRANSFER_TOOL = "holon_prepare_transfer"
@@ -35,7 +36,7 @@ RECOVER_ACTION_TOOL = "holon_recover_action"
 CAPABILITIES = [
     "health", "open_wallet", "wallet_balances", "prepare_transfer",
     "transfer_status", "cancel_transfer", "recover_transfer", "lending_compare",
-    "lending_positions", "lending_prepare", "lending_execute",
+    "lending_positions", "lending_portfolio", "lending_prepare", "lending_execute",
     "action_status", "cancel_action", "recover_action",
 ]
 PROTECTED_TOOL_ALLOWLIST = frozenset({
@@ -159,6 +160,46 @@ def _unavailable_lending_positions() -> dict[str, Any]:
         } for protocol, market, contract in LENDING_IDENTITIES],
         "code": "LENDING_POSITIONS_UNAVAILABLE",
         "message": "Lending positions are unavailable.",
+    })
+    return value
+
+
+def _unavailable_lending_portfolio(history_period: str = "none") -> dict[str, Any]:
+    value = _lending_root()
+    value.update({
+        "account": None,
+        "summary": {
+            "total_position_atomic": None, "display_total_position": None,
+            "tracked_earnings_atomic": None, "display_tracked_earnings": None,
+            "earnings_status": "NOT_ENOUGH_HISTORY",
+            "weighted_confirmed_annual_percent": None,
+            "yield_completeness": "PARTIAL",
+        },
+        "protocols": [{
+            "protocol": protocol, "market_id": market,
+            "display_name": {
+                "aave-v3": "Aave V3", "compound-v3": "Compound III",
+                "morpho-v1": "Morpho Gauntlet USDC Prime",
+            }[protocol],
+            "contract_address": contract, "position_atomic": None,
+            "display_position": None, "base_yield": None, "incentives": None,
+            "confirmed_total_annual_percent": None,
+            "total_completeness": "UNAVAILABLE",
+            "tracked_earnings_atomic": None,
+            "display_tracked_earnings": None,
+            "earnings_status": "NOT_ENOUGH_HISTORY", "tracked_since": None,
+            "data_state": "UNAVAILABLE", "observed_at": None,
+            "caveats": ["LENDING_PORTFOLIO_UNAVAILABLE"],
+        } for protocol, market, contract in LENDING_IDENTITIES],
+        "recommendation": None,
+        "delivery": {
+            "fetched_at": None, "cache_age_seconds": 0,
+            "cache_max_age_seconds": 30, "force_refreshed": False,
+            "source": "UNAVAILABLE",
+        },
+        "history": {"period": history_period, "points": []},
+        "code": "LENDING_PORTFOLIO_UNAVAILABLE",
+        "message": "Lending portfolio is unavailable.",
     })
     return value
 
@@ -301,6 +342,28 @@ class PluginRuntime:
             pass
         return json.dumps(
             _unavailable_lending_positions(), ensure_ascii=False, separators=(",", ":"),
+        )
+
+    def handle_lending_portfolio(
+        self, params: Optional[dict] = None, **kwargs: Any,
+    ) -> str:
+        del kwargs
+        values = {} if params is None else params
+        if not isinstance(values, dict) or set(values) - {"force_refresh", "history_period"}:
+            return json.dumps(_unavailable_lending_portfolio(), separators=(",", ":"))
+        force_refresh = values.get("force_refresh", False)
+        history_period = values.get("history_period", "none")
+        if type(force_refresh) is not bool or history_period not in {"none", "7d", "30d", "all"}:
+            return json.dumps(_unavailable_lending_portfolio(), separators=(",", ":"))
+        try:
+            response = self._connector.lending_portfolio(force_refresh, history_period)
+            if response.kind is MessageKind.LENDING_PORTFOLIO:
+                return json.dumps(response.payload, ensure_ascii=False, separators=(",", ":"))
+        except Exception:
+            pass
+        return json.dumps(
+            _unavailable_lending_portfolio(history_period),
+            ensure_ascii=False, separators=(",", ":"),
         )
 
     def handle_lending_prepare(
@@ -638,6 +701,10 @@ def _handle_lending_positions(params: Optional[dict] = None, **kwargs: Any) -> s
     return _runtime.handle_lending_positions(params, **kwargs)
 
 
+def _handle_lending_portfolio(params: Optional[dict] = None, **kwargs: Any) -> str:
+    return _runtime.handle_lending_portfolio(params, **kwargs)
+
+
 def _handle_lending_prepare(params: Optional[dict] = None, **kwargs: Any) -> str:
     return _runtime.handle_lending_prepare(params, **kwargs)
 
@@ -750,6 +817,31 @@ def register(ctx: Any) -> None:
         },
         handler=_handle_lending_positions,
         description="Read supported public Lending positions.",
+    )
+    ctx.register_tool(
+        name=LENDING_PORTFOLIO_TOOL,
+        toolset="holon",
+        schema={
+            "name": LENDING_PORTFOLIO_TOOL,
+            "description": (
+                "Read the active Account's combined Base USDC Lending portfolio, "
+                "tracked earnings, current confirmed yield, and optional local history "
+                "for Aave V3, Compound III, and Morpho V1 without unlocking Wallet."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "force_refresh": {"type": "boolean", "default": False},
+                    "history_period": {
+                        "type": "string", "enum": ["none", "7d", "30d", "all"],
+                        "default": "none",
+                    },
+                },
+                "required": [], "additionalProperties": False,
+            },
+        },
+        handler=_handle_lending_portfolio,
+        description="Read the combined public Lending portfolio and analytics.",
     )
     ctx.register_tool(
         name=LENDING_PREPARE_TOOL,

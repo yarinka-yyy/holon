@@ -7,7 +7,10 @@ import pytest
 
 from holon_contracts import ContractViolation, MessageKind, make_envelope
 from holon_guard_ipc.codec import encode_message, make_response
-from holon_lending import BASE_USDC, LendingReadService, ReadProfilesState
+from holon_lending import (
+    BASE_USDC, LendingAnalyticsStore, LendingPortfolioService,
+    LendingReadService, ReadProfilesState,
+)
 from holon_lending.runtime import ChainSnapshot, _freshness
 
 NOW = 1_800_000_000
@@ -22,6 +25,9 @@ class FakeRpc:
     def __init__(self) -> None:
         self.calls: list[str] = []
         self.fail: set[str] = set()
+        self.aave_position = 0
+        self.compound_position = 1_250_000
+        self.morpho_position = 2_500_001
 
     def begin(self) -> ChainSnapshot:
         self.calls.append("begin")
@@ -34,21 +40,27 @@ class FakeRpc:
         self.calls.append("aave")
         if "aave" in self.fail:
             raise RuntimeError("bad aave")
-        return 40_000_000_000_000_000_000_000_000, None if account is None else 0
+        return (
+            40_000_000_000_000_000_000_000_000,
+            None if account is None else self.aave_position,
+        )
 
     def compound(self, snapshot: ChainSnapshot, account: str | None = None):
         del snapshot
         self.calls.append("compound")
         if "compound" in self.fail:
             raise RuntimeError("bad compound")
-        return 800_000_000_000_000_000, 1_000_000_000, None if account is None else 1_250_000
+        return (
+            800_000_000_000_000_000, 1_000_000_000,
+            None if account is None else self.compound_position,
+        )
 
     def morpho(self, snapshot: ChainSnapshot, account: str | None = None):
         del snapshot
         self.calls.append("morpho")
         if "morpho" in self.fail:
             raise RuntimeError("bad morpho")
-        return None if account is None else 2_500_001
+        return None if account is None else self.morpho_position
 
 
 class FakeMorpho:
@@ -226,3 +238,71 @@ def test_contracts_accept_runtime_payloads_and_reject_nested_mutation(runtime) -
     with pytest.raises(ContractViolation):
         from holon_contracts import parse_envelope
         parse_envelope(invalid)
+
+
+def test_portfolio_tracks_positions_earnings_cache_and_history(tmp_path) -> None:
+    now = [NOW]
+    rpc, morpho = FakeRpc(), FakeMorpho()
+    reader = LendingReadService(
+        ReadProfilesState.load(), lambda: rpc, morpho, clock=lambda: now[0],
+    )
+    service = LendingPortfolioService(
+        reader, LendingAnalyticsStore(tmp_path / "analytics.json"),
+        clock=lambda: now[0],
+    )
+    first = service.read(ACCOUNT, [], history_period="all")
+    assert first["summary"]["total_position_atomic"] == "3750001"
+    assert first["summary"]["tracked_earnings_atomic"] == "0"
+    assert first["summary"]["yield_completeness"] == "COMPLETE"
+    assert len(first["history"]["points"]) == 1
+
+    now[0] += 61
+    rpc.compound_position = 1_550_000
+    operations = [{
+        "action_id": "supply-1", "protocol": "compound-v3",
+        "direction": "supply", "amount_atomic": "250000",
+        "verified": True, "updated_at": first["delivery"]["fetched_at"],
+    }]
+    second = service.read(
+        ACCOUNT, operations, force_refresh=True, history_period="all",
+    )
+    compound = second["protocols"][1]
+    assert compound["tracked_earnings_atomic"] == "50000"
+    assert second["summary"]["tracked_earnings_atomic"] == "50000"
+    assert len(second["history"]["points"]) == 2
+
+    calls = len(rpc.calls)
+    now[0] += 30
+    cached = service.read(ACCOUNT, operations)
+    assert len(rpc.calls) == calls
+    assert cached["delivery"]["source"] == "MEMORY_CACHE"
+
+
+def test_portfolio_uses_persisted_protocol_fallback(tmp_path) -> None:
+    now = [NOW]
+    rpc, morpho = FakeRpc(), FakeMorpho()
+    reader = LendingReadService(
+        ReadProfilesState.load(), lambda: rpc, morpho, clock=lambda: now[0],
+    )
+    service = LendingPortfolioService(
+        reader, LendingAnalyticsStore(tmp_path / "analytics.json"),
+        clock=lambda: now[0],
+    )
+    service.read(ACCOUNT, [])
+    now[0] += 31
+    rpc.fail.add("compound")
+    result = service.read(ACCOUNT, [], force_refresh=True)
+    assert result["status"] == "PARTIAL"
+    assert result["protocols"][1]["position_atomic"] == "1250000"
+    assert result["protocols"][1]["data_state"] == "CACHED"
+    assert "USING_CACHED_DATA" in result["protocols"][1]["caveats"]
+
+
+def test_portfolio_contract_is_bounded(tmp_path) -> None:
+    service, _rpc, _morpho = runtime.__wrapped__()  # type: ignore[attr-defined]
+    portfolio = LendingPortfolioService(
+        service, LendingAnalyticsStore(tmp_path / "analytics.json"),
+        clock=lambda: NOW,
+    ).read(ACCOUNT, [], history_period="7d", history_limit=12)
+    envelope = make_envelope(MessageKind.LENDING_PORTFOLIO, portfolio)
+    assert len(encode_message(make_response(envelope))) < 8 * 1024

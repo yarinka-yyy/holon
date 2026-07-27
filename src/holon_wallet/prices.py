@@ -243,6 +243,7 @@ def portfolio_to_map(
     snapshots: Mapping[str, NetworkSnapshot],
     prices: PriceSnapshot,
     selected_network: str,
+    lending_protocols: object = None,
 ) -> dict[str, object]:
     if selected_network not in {"all", "ethereum", "base"}:
         raise ValueError("Unsupported portfolio filter")
@@ -250,15 +251,50 @@ def portfolio_to_map(
         ("ethereum", "base") if selected_network == "all" else (selected_network,)
     )
     price_by_asset = prices.by_asset
-    asset_models = tuple(
+    wallet_assets = tuple(
         _asset_model(asset_id, snapshots, price_by_asset, selected_ids)
         for asset_id in ("eth", "usdc")
     )
+    lending_items = (
+        list(lending_protocols) if isinstance(lending_protocols, (list, tuple))
+        else []
+    )
+    lending_included = "base" in selected_ids and lending_protocols is not None
+    known_lending_complete = (
+        len(lending_items) == 3
+        and all(
+            isinstance(item, Mapping)
+            and isinstance(item.get("position_atomic"), str)
+            and item["position_atomic"].isdecimal()
+            for item in lending_items
+        )
+    )
+    lending_complete = not lending_included or known_lending_complete
+    lending_assets = tuple(
+        _lending_asset_model(item, price_by_asset)
+        for item in lending_items
+        if lending_included
+        and isinstance(item, Mapping)
+        and isinstance(item.get("position_atomic"), str)
+        and item["position_atomic"].isdecimal()
+        and int(item["position_atomic"]) > 0
+    )
+    asset_models = wallet_assets + lending_assets
+    all_lending_total = (
+        sum(int(item["position_atomic"]) for item in lending_items)
+        if known_lending_complete else None
+    )
     network_models = tuple(
-        _network_model(network_id, snapshots[network_id], price_by_asset)
+        _network_model(
+            network_id, snapshots[network_id], price_by_asset,
+            all_lending_total if network_id == "base" and lending_protocols is not None else 0,
+        )
         for network_id in ("ethereum", "base")
     )
-    total_available = all(bool(asset["totalAvailable"]) for asset in asset_models)
+    total_available = (
+        lending_complete
+        and all(bool(asset["totalAvailable"]) for asset in asset_models)
+    )
     total = (
         sum((Decimal(str(asset["usdRaw"])) for asset in asset_models), Decimal(0))
         if total_available
@@ -270,6 +306,7 @@ def portfolio_to_map(
         "totalUsd": format_usd(total) if total is not None else "$ —",
         "assets": list(asset_models),
         "networks": list(network_models),
+        "lendingComplete": lending_complete,
     }
 
 
@@ -418,6 +455,7 @@ def _network_model(
     network_id: str,
     snapshot: NetworkSnapshot,
     prices: Mapping[str, AssetPrice],
+    lending_atomic: int | None = 0,
 ) -> dict[str, object]:
     available = (
         snapshot.status in {PublicDataStatus.LIVE, PublicDataStatus.SIMULATED}
@@ -435,10 +473,12 @@ def _network_model(
         and usdc_price.value is not None
         and snapshot.eth is not None
         and snapshot.usdc is not None
+        and lending_atomic is not None
     ):
         total = (
             Decimal(snapshot.eth.atomic_units).scaleb(-18) * eth_price.value
             + Decimal(snapshot.usdc.atomic_units).scaleb(-6) * usdc_price.value
+            + Decimal(lending_atomic).scaleb(-6) * usdc_price.value
         )
     return {
         "networkId": network_id,
@@ -446,6 +486,40 @@ def _network_model(
         "status": snapshot.status.value,
         "totalAvailable": total is not None,
         "totalUsd": format_usd(total) if total is not None else "Data unavailable",
+    }
+
+
+def _lending_asset_model(
+    value: Mapping[str, object], prices: Mapping[str, AssetPrice],
+) -> dict[str, object]:
+    atomic = int(str(value["position_atomic"]))
+    price = prices.get("usdc")
+    usd = (
+        Decimal(atomic).scaleb(-6) * price.value
+        if price is not None and price.value is not None else None
+    )
+    protocol = str(value.get("protocol", ""))
+    label = {
+        "aave-v3": "Aave V3",
+        "compound-v3": "Compound III",
+        "morpho-v1": "Morpho V1",
+    }.get(protocol, str(value.get("display_name", "Lending")))
+    return {
+        "assetId": protocol,
+        "symbol": "USDC · Base Lending",
+        "label": label,
+        "balanceAvailable": True,
+        "amount": _format_token(atomic, 6, "USDC"),
+        "totalAvailable": usd is not None,
+        "usd": format_usd(usd) if usd is not None else "Data unavailable",
+        "usdRaw": format(usd, "f") if usd is not None else "",
+        "breakdown": [],
+        "dataState": str(value.get("data_state", "UNAVAILABLE")),
+        "iconSource": {
+            "aave-v3": "assets/aave-logo-white.png",
+            "compound-v3": "assets/compound-logo-white.svg",
+            "morpho-v1": "assets/morpho-logo-white.svg",
+        }.get(protocol, "assets/usdc.png"),
     }
 
 

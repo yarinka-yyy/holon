@@ -13,6 +13,7 @@ Item {
     Image {
         x: 14; y: 17; width: 40; height: 40
         source: root.iconSource; sourceSize: Qt.size(80, 80)
+        fillMode: Image.PreserveAspectFit
     }
     Text {
         x: 70; y: 15; text: root.asset.label || "Asset"; color: Design.text

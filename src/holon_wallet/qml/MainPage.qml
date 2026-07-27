@@ -9,7 +9,7 @@ PageState {
         id: scroll
         x: 0; y: 36; width: parent.width; height: parent.height - 42
         contentWidth: width
-        contentHeight: 786 + ethRow.height + usdcRow.height - 148
+        contentHeight: assetsCard.y + assetsCard.height + 76
         clip: true; boundsBehavior: Flickable.StopAtBounds
 
         Item {
@@ -33,6 +33,26 @@ PageState {
                     text: "Signing locked"; color: Design.textMuted
                     font.family: Design.fontFamily; font.pixelSize: 12
                     font.weight: Font.Medium
+                }
+            }
+            Item {
+                objectName: "settingsGearButton"
+                anchors.right: parent.right; anchors.rightMargin: 28
+                y: -3; width: 38; height: 38
+                function trigger() { walletController.showSettings() }
+                Rectangle {
+                    anchors.fill: parent; radius: 12
+                    color: settingsGearMouse.containsMouse ? Design.surfaceSecondary : "transparent"
+                    border.width: 1; border.color: settingsGearMouse.containsMouse ? Design.border : "transparent"
+                }
+                Image {
+                    anchors.centerIn: parent; width: 21; height: 21
+                    source: "assets/settings.svg"; sourceSize: Qt.size(42, 42)
+                }
+                MouseArea {
+                    id: settingsGearMouse; anchors.fill: parent; anchors.margins: -3
+                    hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                    onClicked: parent.trigger()
                 }
             }
             AccountCard {
@@ -91,9 +111,9 @@ PageState {
                 onTriggered: walletController.showHistory()
             }
             ActionCard {
-                objectName: "settingsAction"; x: 342; y: 286; width: 144; height: 102
-                label: "Settings"; iconSource: "assets/settings.svg"
-                onTriggered: walletController.showSettings()
+                objectName: "lendingAction"; x: 342; y: 286; width: 144; height: 102
+                label: "Lending"; iconSource: "assets/lending.svg"
+                onTriggered: walletController.showLending()
             }
 
             Row {
@@ -148,29 +168,55 @@ PageState {
                 }
             }
             SurfaceCard {
+                id: assetsCard
                 x: 28; y: 520; width: 458
-                height: ethRow.height + usdcRow.height
-                AssetRow {
-                    id: ethRow; objectName: "ethAssetRow"
-                    width: parent.width; y: 0
-                    asset: walletController.portfolioData.assets.length > 0
-                        ? walletController.portfolioData.assets[0] : ({})
-                    iconSource: "assets/ethereum.svg"
-                    amountsVisible: walletController.balancesVisible
-                }
-                AssetRow {
-                    id: usdcRow; objectName: "usdcAssetRow"
-                    width: parent.width; y: ethRow.height; divider: false
-                    asset: walletController.portfolioData.assets.length > 1
-                        ? walletController.portfolioData.assets[1] : ({})
-                    iconSource: "assets/usdc.png"
-                    amountsVisible: walletController.balancesVisible
+                height: assetRows.height
+                Column {
+                    id: assetRows; width: parent.width
+                    AssetRow {
+                        id: ethRow; objectName: "ethAssetRow"
+                        width: parent.width
+                        asset: walletController.portfolioData.assets.length > 0
+                            ? walletController.portfolioData.assets[0] : ({})
+                        iconSource: "assets/ethereum.svg"
+                        amountsVisible: walletController.balancesVisible
+                    }
+                    AssetRow {
+                        id: usdcRow; objectName: "usdcAssetRow"
+                        width: parent.width
+                        divider: walletController.portfolioData.assets.length > 2
+                        asset: walletController.portfolioData.assets.length > 1
+                            ? walletController.portfolioData.assets[1] : ({})
+                        iconSource: "assets/usdc.png"
+                        amountsVisible: walletController.balancesVisible
+                    }
+                    Repeater {
+                        model: walletController.portfolioData.assets.length > 2
+                            ? walletController.portfolioData.assets.slice(2) : []
+                        delegate: AssetRow {
+                            required property var modelData
+                            required property int index
+                            objectName: "lendingAssetRow-" + modelData.assetId
+                            width: assetRows.width
+                            asset: modelData
+                            iconSource: modelData.iconSource
+                            amountsVisible: walletController.balancesVisible
+                            divider: index < walletController.portfolioData.assets.length - 3
+                        }
+                    }
                 }
             }
             Text {
-                x: 28; y: 544 + ethRow.height + usdcRow.height
+                x: 28; y: assetsCard.y + assetsCard.height + 24
                 text: walletController.publicDataBanner
                 color: Design.textFaint; font.family: Design.fontFamily; font.pixelSize: 11
+            }
+            Text {
+                visible: walletController.selectedNetwork !== "ethereum"
+                    && !walletController.portfolioData.lendingComplete
+                x: 28; y: assetsCard.y + assetsCard.height + 43
+                text: "Some Lending positions are unavailable · total is not understated"
+                color: Design.warning; font.family: Design.fontFamily; font.pixelSize: 11
             }
         }
     }

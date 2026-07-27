@@ -42,6 +42,10 @@ class WalletPaths:
         return self.data_dir / "wallet-public-cache.json"
 
     @property
+    def lending_analytics(self) -> Path:
+        return self.data_dir / "lending-analytics.json"
+
+    @property
     def transfer_policy_draft(self) -> Path:
         return self.data_dir / "transfer-policy-draft.json"
 
