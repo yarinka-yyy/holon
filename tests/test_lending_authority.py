@@ -92,8 +92,9 @@ def request(
 
 
 class ExecutionRpc:
-    def __init__(self, profile, action, exact_l1_fee):
+    def __init__(self, profile, action, exact_l1_fee, position_growth=0):
         self.profile, self.action, self.exact_l1_fee = profile, action, exact_l1_fee
+        self.position_growth = position_growth
         self.send_calls = 0
     def chain_id(self): return 8453
     def latest_block(self): return self.action.block_number, 10
@@ -117,7 +118,7 @@ class ExecutionRpc:
     def lending_token_balance(self, token, account, block):
         del block
         if token == self.profile.a_token and account.lower() == self.action.sender.lower():
-            return self.action.amount_atomic
+            return self.action.amount_atomic + self.position_growth
         return 10_000_000
     def lending_allowance(self, token, owner, spender, block): del token, owner, spender, block; return 0
     def lending_simulate(self, transaction): del transaction; return b""
@@ -210,6 +211,35 @@ def test_wallet_builds_and_signer_accepts_generic_protocol_actions(
     assert prepared.method == method
     assert prepared.action_profile_digest == profile.digest
     assert validate_signing_action(prepared, prepared.digest, now) is None
+
+
+@pytest.mark.parametrize("profile_id", [
+    "aave-v3-base-usdc",
+    "compound-v3-base-usdc",
+    "morpho-v1-gauntlet-usdc-prime",
+])
+def test_withdraw_all_rebinds_to_fresh_yielding_position(profile_id) -> None:
+    state = ActionProfilesState.load()
+    profile = state.select(profile_id)
+    assert profile is not None
+    now = datetime.now(UTC).replace(microsecond=0)
+    account = ProfileSummary("p", "Main", SENDER, "mnemonic", "m", "2026-07-26T00:00:00Z")
+    value = request(now, "withdraw", "all", None)
+    value["protocol_profile_id"] = profile_id
+    value["action_profile_digest"] = profile.digest
+    value["resolved_amount_atomic"] = "1000000"
+    rpc = (
+        Rpc(profile, position=1_000_002)
+        if profile_id == "aave-v3-base-usdc"
+        else GenericRpc(profile, position=1_000_002)
+    )
+
+    prepared = prepare_lending_action(
+        LendingPreflightService(state, lambda: rpc), state, account, value,
+    )
+
+    assert prepared.amount_atomic == 1_000_002
+    assert prepared.amount_mode == "all"
 
 
 def test_withdraw_all_policy_caps_resolved_position_not_sentinel() -> None:
@@ -371,6 +401,7 @@ def test_withdraw_all_revalidates_resolved_position_and_broadcasts_once(tmp_path
     ))
     rpc = ExecutionRpc(
         state.profile, action, action.l1_fee_upper_bound_wei - 1,
+        position_growth=2,
     )
     result = MainnetTransferExecutor(
         repository, history, policy, lambda endpoint: rpc,

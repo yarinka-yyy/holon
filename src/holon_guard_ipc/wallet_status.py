@@ -127,7 +127,7 @@ def validate_update(value: Mapping[str, object]) -> dict[str, object]:
         not isinstance(operation, str) or ACTION_RE.fullmatch(operation) is None
         or phase_action != action
         or value.get("phase") not in {
-            "transfer", "approve", "supply", "deposit", "withdraw",
+            "transfer", "approve", "supply", "deposit", "withdraw", "redeem",
         }
     ):
         raise WalletStatusError("Invalid status update")

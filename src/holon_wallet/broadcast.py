@@ -1250,9 +1250,7 @@ def _final_protocol_revalidation(
             )
         elif action.method == "withdraw" and profile.protocol_id == "compound-v3":
             expected_data = encode_compound_withdraw(profile.asset, call_amount)
-            state_ok = liquidity >= action.amount_atomic and position >= action.amount_atomic and (
-                action.amount_mode != "all" or position == action.amount_atomic
-            )
+            state_ok = liquidity >= action.amount_atomic and position >= action.amount_atomic
         elif action.method == "withdraw":
             expected_data = encode_morpho_withdraw(action.amount_atomic, action.sender)
             state_ok = position >= action.amount_atomic and liquidity >= action.amount_atomic
@@ -1393,7 +1391,7 @@ def _final_lending_revalidation(rpc: MainnetRpc, action: PreparedTransferAction)
         action.method == "withdraw"
         and liquidity >= action.amount_atomic
         and (
-            position == action.amount_atomic
+            position >= action.amount_atomic
             if action.amount_mode == "all"
             else position >= action.amount_atomic
         )

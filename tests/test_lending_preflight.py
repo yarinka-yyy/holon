@@ -297,6 +297,7 @@ def test_compound_and_morpho_support_all_four_intents_without_signing(profile_id
     )
     assert rpc.last_transaction["data"] == expected_all
     assert withdraw_all["amount_atomic"] == str(rpc.position)
+    assert withdraw_all["gas"] == "90000"
 
 
 def test_compound_refuses_borrow_position_and_liquidity_overrun() -> None:

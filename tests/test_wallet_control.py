@@ -309,14 +309,15 @@ def test_lending_authority_protocol_has_only_semantics_and_material_digests() ->
     ) == withdraw_response
 
 
-def test_wallet_status_accepts_morpho_deposit_phase() -> None:
+@pytest.mark.parametrize("phase", ["deposit", "redeem"])
+def test_wallet_status_accepts_morpho_phases(phase) -> None:
     update = {
         "status_version": "1", "kind": "transfer_status",
         "flow_id": "11111111-1111-4111-8111-111111111111",
         "action_id": "act-22222222-2222-4222-8222-222222222222",
         "operation_id": "act-33333333-3333-4333-8333-333333333333",
         "phase_action_id": "act-22222222-2222-4222-8222-222222222222",
-        "phase": "deposit", "prepared_digest": "a" * 64,
+        "phase": phase, "prepared_digest": "a" * 64,
         "wallet_pid": 202, "event": "RECEIPT_CONFIRMED",
         "code": "CONFIRMED", "outcome": None,
         "transaction_hash": "0x" + "b" * 64, "receipt_state": "confirmed",

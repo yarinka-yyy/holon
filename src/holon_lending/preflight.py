@@ -22,7 +22,18 @@ FUTURE_TOLERANCE_SECONDS = 60
 MAX_UINT256 = 2**256 - 1
 BASE_GAS_PRICE_ORACLE = "0x420000000000000000000000000000000000000F"
 LENDING_TRANSACTION_SIZE_UPPER_BOUND = 512
+GAS_ESTIMATE_HEADROOM_BPS = 2_000
+GAS_BPS_DENOMINATOR = 10_000
 AMOUNT_RE = re.compile(r"^[0-9]+(?:[.,][0-9]+)?$")
+
+
+def gas_with_headroom(estimate: int) -> int:
+    if estimate <= 0:
+        raise LendingPreflightError(LendingPreflightCode.GAS_ESTIMATE_FAILED)
+    return (
+        estimate * (GAS_BPS_DENOMINATOR + GAS_ESTIMATE_HEADROOM_BPS)
+        + GAS_BPS_DENOMINATOR - 1
+    ) // GAS_BPS_DENOMINATOR
 ADDRESS_ABI = lambda name: [{
     "type": "function", "name": name, "stateMutability": "view",
     "inputs": [], "outputs": [{"name": "", "type": "address"}],
@@ -472,7 +483,7 @@ class LendingPreflightService:
             "maxFeePerGas": max_fee, "maxPriorityFeePerGas": priority_fee,
         }
         try:
-            gas = rpc.estimate_gas(transaction)
+            gas = gas_with_headroom(rpc.estimate_gas(transaction))
         except Exception as exc:
             raise LendingPreflightError(LendingPreflightCode.GAS_ESTIMATE_FAILED) from exc
         if gas <= 0 or max_fee <= 0:
@@ -639,7 +650,7 @@ class LendingPreflightService:
             "maxFeePerGas": max_fee, "maxPriorityFeePerGas": priority_fee,
         }
         try:
-            gas = rpc.estimate_gas(transaction)
+            gas = gas_with_headroom(rpc.estimate_gas(transaction))
             l1_fee = rpc.l1_fee_upper_bound(LENDING_TRANSACTION_SIZE_UPPER_BOUND, block)
         except Exception as exc:
             raise LendingPreflightError(LendingPreflightCode.GAS_ESTIMATE_FAILED) from exc

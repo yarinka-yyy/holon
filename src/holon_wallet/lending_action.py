@@ -48,15 +48,16 @@ def prepare_lending_action(
         or intent.amount_mode == "exact" and intent.amount_atomic != resolved_amount
     ):
         raise LendingPreflightError("LENDING_AMOUNT_MISMATCH")
+    stable_amount_required = intent.action == "supply" or intent.amount_mode == "exact"
     preview = service.prepare(
         raw_intent, {"label": profile.label, "address": profile.address},
         expected_profile_digest=action_profile.digest,
-        frozen_amount_atomic=resolved_amount,
+        frozen_amount_atomic=(resolved_amount if intent.action == "supply" else None),
     )
     if preview.get("status") != "PREVIEW_READY":
         raise LendingPreflightError(str(preview.get("code", "LENDING_ACTION_UNAVAILABLE")))
     amount = int(str(preview["amount_atomic"]))
-    if resolved_amount is not None and amount != resolved_amount:
+    if stable_amount_required and resolved_amount is not None and amount != resolved_amount:
         raise LendingPreflightError("LENDING_AMOUNT_MISMATCH")
     next_action = str(preview["next_action"])
     if next_action == "approve":
