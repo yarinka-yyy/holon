@@ -41,15 +41,18 @@ PageState {
                 y: -3; width: 38; height: 38
                 function trigger() { walletController.showSettings() }
                 Rectangle {
-                    anchors.fill: parent; radius: 12
+                    objectName: "settingsGearHover"
+                    anchors.centerIn: parent; width: 30; height: 30; radius: 10
                     color: settingsGearMouse.containsMouse ? Design.surfaceSecondary : "transparent"
                     border.width: 1; border.color: settingsGearMouse.containsMouse ? Design.border : "transparent"
                 }
                 Image {
-                    anchors.centerIn: parent; width: 21; height: 21
-                    source: "assets/settings.svg"; sourceSize: Qt.size(42, 42)
+                    objectName: "settingsGearIcon"
+                    anchors.centerIn: parent; width: 22; height: 22
+                    source: "assets/settings.svg"; sourceSize: Qt.size(64, 64)
                 }
                 MouseArea {
+                    objectName: "settingsGearMouseArea"
                     id: settingsGearMouse; anchors.fill: parent; anchors.margins: -3
                     hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                     onClicked: parent.trigger()

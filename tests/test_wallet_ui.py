@@ -157,6 +157,10 @@ def test_lending_tile_settings_gear_and_dashboard_at_minimum_size(
         assert app.window.width() == 430
         assert app.window.height() == 703
         assert child(app, "settingsGearButton").property("enabled")
+        assert child(app, "settingsGearHover").property("width") == pytest.approx(30)
+        assert child(app, "settingsGearHover").property("y") == pytest.approx(4)
+        assert child(app, "settingsGearIcon").property("width") == pytest.approx(22)
+        assert child(app, "settingsGearMouseArea").property("width") == pytest.approx(44)
         assert child(app, "lendingAction").property("enabled")
         assert app.window.findChild(QObject, "lendingAssetRow-aave-v3") is None
 
@@ -165,11 +169,19 @@ def test_lending_tile_settings_gear_and_dashboard_at_minimum_size(
         assert app.controller.currentScreen == "lending"
         assert child(app, "lendingHistoryChart") is not None
         assert len(app.controller.lendingData["protocols"]) == 3
+        assert app.controller.lendingData["hiddenProtocolCount"] == 3
+        assert child(app, "lendingProtocolColumn").property("height") == pytest.approx(0)
+        invoke(child(app, "lendingProtocolToggle"), "trigger")
+        qt_app.processEvents()
         assert child(app, "lendingProtocolColumn").property("height") == pytest.approx(606)
         invoke(child(app, "lendingRefreshButton"), "trigger")
         assert app.controller.lendingHistoryPeriod == "7d"
         invoke(child(app, "lendingHeaderBackButton"), "trigger")
         assert app.controller.currentScreen == "main"
+        invoke(child(app, "lendingAction"), "trigger")
+        qt_app.processEvents()
+        assert child(app, "lendingProtocolColumn").property("height") == pytest.approx(0)
+        invoke(child(app, "lendingHeaderBackButton"), "trigger")
         invoke(child(app, "settingsGearButton"), "trigger")
         assert app.controller.currentScreen == "settings"
         assert app.qml_warnings == []

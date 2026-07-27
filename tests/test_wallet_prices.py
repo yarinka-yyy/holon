@@ -16,7 +16,9 @@ from holon_wallet.prices import (
     is_unusually_high_base_fee,
     portfolio_to_map,
 )
+from holon_wallet.lending_view import lending_portfolio_to_map
 from holon_wallet.public_data import PublicDataStatus
+from holon_lending import LendingPortfolioService
 
 from wallet_public_support import public_snapshot
 
@@ -193,3 +195,35 @@ def test_lending_positions_extend_all_and_base_without_double_counting() -> None
     incomplete = portfolio_to_map(snapshots, prices, "base", lending)
     assert incomplete["totalAvailable"] is False
     assert incomplete["totalUsd"] == "$ —"
+
+
+def test_lending_cards_hide_only_live_confirmed_zero_positions() -> None:
+    prices = PriceSnapshot(
+        8453, PriceStatus.LIVE,
+        (AssetPrice("usdc", "USDC", PriceStatus.LIVE, 100_000_000, 8, NOW),),
+        NOW,
+    )
+    payload = LendingPortfolioService.unavailable({
+        "label": "Main Account",
+        "address": "0x1111111111111111111111111111111111111111",
+    })
+    payload["protocols"][0].update({
+        "position_atomic": "1000000", "display_position": "1 USDC",
+        "data_state": "CACHED",
+    })
+    payload["protocols"][1].update({
+        "position_atomic": "0", "display_position": "0 USDC", "data_state": "LIVE",
+    })
+    result = lending_portfolio_to_map(payload, prices)
+    assert [item["protocol"] for item in result["visibleProtocols"]] == [
+        "aave-v3", "morpho-v1",
+    ]
+    assert [item["protocol"] for item in result["emptyProtocols"]] == ["compound-v3"]
+    assert result["hiddenProtocolCount"] == 1
+
+    payload["protocols"][1]["data_state"] = "CACHED"
+    cached = lending_portfolio_to_map(payload, prices)
+    assert cached["hiddenProtocolCount"] == 0
+    assert [item["protocol"] for item in cached["visibleProtocols"]] == [
+        "aave-v3", "compound-v3", "morpho-v1",
+    ]
