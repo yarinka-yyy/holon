@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from holon_hermes_plugin import plugin
@@ -203,6 +204,36 @@ class PluginTests(unittest.TestCase):
         )
         self.assertEqual([name for name, _ in context.hooks], ["on_session_start", "pre_tool_call"])
 
+    def test_manifest_tools_exactly_match_registered_tools(self) -> None:
+        context = FakeContext()
+        plugin.register(context)
+        manifest = (
+            Path(plugin.__file__).with_name("plugin.yaml")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        )
+        start = manifest.index("provides_tools:") + 1
+        end = manifest.index("provides_hooks:")
+        declared = [line.removeprefix("  - ") for line in manifest[start:end]]
+        registered = [str(tool["name"]) for tool in context.tools]
+        self.assertEqual(len(declared), len(set(declared)))
+        self.assertEqual(set(declared), set(registered))
+
+    def test_private_fallbacks_are_valid_common_contracts(self) -> None:
+        fallbacks = (
+            (MessageKind.WALLET_BALANCES, plugin._unavailable_balances()),
+            (MessageKind.LENDING_MARKETS, plugin._unavailable_lending_markets()),
+            (MessageKind.LENDING_POSITIONS, plugin._unavailable_lending_positions()),
+            (MessageKind.LENDING_ACTION_PREVIEW, plugin._unavailable_lending_preview()),
+            (
+                MessageKind.LENDING_PORTFOLIO,
+                plugin._unavailable_lending_portfolio("30d"),
+            ),
+        )
+        for kind, payload in fallbacks:
+            with self.subTest(kind=kind.value):
+                self.assertEqual(make_envelope(kind, payload).kind, kind)
+
     def test_health_response_is_safe_and_authority_disabled(self) -> None:
         runtime = plugin.PluginRuntime(StaticConnector(GuardHealth.available(GuardState.NORMAL)))
         payload = json.loads(runtime.handle_health({"secret": "must-not-return"}))
@@ -247,7 +278,7 @@ class PluginTests(unittest.TestCase):
     def test_unavailable_balance_tool_keeps_two_networks_nonzero_ambiguous(self) -> None:
         payload = json.loads(plugin.PluginRuntime(RaisingConnector()).handle_wallet_balances())
         self.assertEqual(payload["status"], "DEGRADED")
-        self.assertEqual(payload["code"], "WALLET_BALANCES_UNAVAILABLE")
+        self.assertEqual(payload["code"], "BALANCES_UNAVAILABLE")
         self.assertEqual(len(payload["networks"]), 2)
         self.assertTrue(all(item["balances"] is None for item in payload["networks"]))
 

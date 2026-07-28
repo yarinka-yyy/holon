@@ -6,7 +6,7 @@ import json
 from collections import OrderedDict
 from typing import Any, Optional
 
-from holon_contracts import MessageKind, new_action_id
+from holon_contracts import MessageKind, make_envelope, new_action_id
 
 from .guard import (
     PROTECTED_STATES,
@@ -45,6 +45,10 @@ PROTECTED_TOOL_ALLOWLIST = frozenset({
 })
 
 
+def _validated_fallback(kind: MessageKind, value: dict[str, Any]) -> dict[str, Any]:
+    return dict(make_envelope(kind, value).payload)
+
+
 def _unavailable_balances() -> dict[str, Any]:
     networks = []
     for network, chain_id in (("ethereum", 1), ("base", 8453)):
@@ -55,18 +59,19 @@ def _unavailable_balances() -> dict[str, Any]:
                 "status": "UNAVAILABLE",
                 "block_number": None,
                 "updated_at": None,
-                "error_code": "WALLET_BALANCES_UNAVAILABLE",
+                "error_code": "WALLET_UNAVAILABLE",
                 "balances": None,
             }
         )
-    return {
+    value = {
         "status": "DEGRADED",
         "authority_available": False,
         "account": None,
         "networks": networks,
-        "code": "WALLET_BALANCES_UNAVAILABLE",
+        "code": "BALANCES_UNAVAILABLE",
         "message": "Wallet balances are unavailable.",
     }
+    return _validated_fallback(MessageKind.WALLET_BALANCES, value)
 
 
 LENDING_IDENTITIES = (
@@ -117,11 +122,11 @@ def _unavailable_lending_markets() -> dict[str, Any]:
         "code": "LENDING_UNAVAILABLE",
         "message": "Lending data is unavailable.",
     })
-    return value
+    return _validated_fallback(MessageKind.LENDING_MARKETS, value)
 
 
 def _unavailable_lending_preview() -> dict[str, Any]:
-    return {
+    value = {
         "status": "UNAVAILABLE", "authority_available": False,
         "execution_available": False, "account": None,
         "requested_action": None, "next_action": None,
@@ -140,9 +145,11 @@ def _unavailable_lending_preview() -> dict[str, Any]:
         "l2_fee_ceiling_wei": None, "l1_fee_upper_bound_wei": None,
         "max_total_fee_wei": None, "block_number": None, "observed_at": None,
         "expires_at": None, "preview_digest": None, "checks": [],
+        "position_before_atomic": None,
         "caveats": ["WALLET_UNAVAILABLE"], "code": "LENDING_ACTION_UNAVAILABLE",
         "message": "Lending action preview is unavailable.",
     }
+    return _validated_fallback(MessageKind.LENDING_ACTION_PREVIEW, value)
 
 
 def _unavailable_lending_positions() -> dict[str, Any]:
@@ -161,7 +168,7 @@ def _unavailable_lending_positions() -> dict[str, Any]:
         "code": "LENDING_POSITIONS_UNAVAILABLE",
         "message": "Lending positions are unavailable.",
     })
-    return value
+    return _validated_fallback(MessageKind.LENDING_POSITIONS, value)
 
 
 def _unavailable_lending_portfolio(history_period: str = "none") -> dict[str, Any]:
@@ -197,11 +204,14 @@ def _unavailable_lending_portfolio(history_period: str = "none") -> dict[str, An
             "cache_max_age_seconds": 30, "force_refreshed": False,
             "source": "UNAVAILABLE",
         },
-        "history": {"period": history_period, "points": []},
+        "history": {
+            "period": history_period, "granularity": "none",
+            "period_start": None, "period_end": None, "points": [],
+        },
         "code": "LENDING_PORTFOLIO_UNAVAILABLE",
         "message": "Lending portfolio is unavailable.",
     })
-    return value
+    return _validated_fallback(MessageKind.LENDING_PORTFOLIO, value)
 
 
 class PluginRuntime:

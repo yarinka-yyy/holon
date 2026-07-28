@@ -3522,6 +3522,8 @@ class WalletController(QObject):
                 "network": "base", "asset": "usdc",
                 "amount_atomic": str(action.amount_atomic),
                 "target": action.transaction.to, "method": action.method,
+                "selector": action.transaction.data[:10].lower(),
+                "calldata_hash": action.calldata_hash,
                 "max_total_fee_wei": str(action.max_total_fee_wei),
                 "l2_fee_ceiling_wei": str(action.l2_fee_ceiling_wei),
                 "l1_fee_upper_bound_wei": str(action.l1_fee_upper_bound_wei),
@@ -3542,6 +3544,12 @@ class WalletController(QObject):
             "profile_id": action.profile_id, "sender": action.sender,
             "recipient": action.recipient, "network": action.network_id,
             "asset": action.asset_id, "amount_atomic": str(action.amount_atomic),
+            "target": action.transaction.to,
+            "selector": (
+                action.transaction.data[:10].lower()
+                if len(action.transaction.data) >= 10 else None
+            ),
+            "calldata_hash": action.calldata_hash,
             "max_total_fee_wei": str(action.max_total_fee_wei),
             "prepared_digest": action.digest,
             "created_at": context["created_at"], "expires_at": context["expires_at"],

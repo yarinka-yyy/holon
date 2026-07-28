@@ -458,6 +458,62 @@ def test_portfolio_uses_persisted_protocol_fallback(tmp_path) -> None:
     assert "USING_CACHED_DATA" in result["protocols"][1]["caveats"]
 
 
+def test_portfolio_observation_uses_oldest_actual_amount_and_rate_source(tmp_path) -> None:
+    rpc, morpho = FakeRpc(), FakeMorpho()
+    reader = LendingReadService(
+        ReadProfilesState.load(), lambda: rpc, morpho, clock=lambda: NOW,
+    )
+    store = LendingAnalyticsStore(tmp_path / "analytics.json")
+    portfolio = LendingPortfolioService(reader, store, clock=lambda: NOW)
+    portfolio.read(ACCOUNT, [])
+    stored = store.load(ACCOUNT["address"])
+    assert stored is not None
+    previous_at = "2027-01-14T08:00:00Z"
+    stored["current"]["protocols"][1]["observed_at"] = previous_at
+
+    markets = reader.compare(True)
+    positions = reader.positions(ACCOUNT)
+    rate_at = "2027-01-15T08:00:10Z"
+    amount_at = "2027-01-15T08:00:20Z"
+    markets["markets"][1]["freshness"]["observed_at"] = rate_at
+    positions["positions"][1]["freshness"]["observed_at"] = amount_at
+
+    def combined(*, live_rate: bool, live_amount: bool) -> dict[str, object]:
+        market_payload = copy.deepcopy(markets)
+        position_payload = copy.deepcopy(positions)
+        market = market_payload["markets"][1]
+        position = position_payload["positions"][1]
+        if not live_rate:
+            market.update({
+                "base_yield": None,
+                "incentives": {
+                    "status": "UNAVAILABLE", "total_apr_percent": None,
+                    "components": [],
+                },
+                "confirmed_total_annual_percent": None,
+                "total_completeness": "UNAVAILABLE",
+            })
+            market["freshness"] = {
+                "state": "UNAVAILABLE", "observed_at": None,
+                "block_number": None,
+            }
+        if not live_amount:
+            position["amount_atomic"] = None
+            position["display_amount"] = None
+            position["freshness"] = {
+                "state": "UNAVAILABLE", "observed_at": None,
+                "block_number": None,
+            }
+        return portfolio._combine(market_payload, position_payload, stored)[1]
+
+    assert combined(live_rate=True, live_amount=True)["observed_at"] == rate_at
+    assert combined(live_rate=True, live_amount=False)["observed_at"] == previous_at
+    assert combined(live_rate=False, live_amount=True)["observed_at"] == previous_at
+    cached = combined(live_rate=False, live_amount=False)
+    assert cached["observed_at"] == previous_at
+    assert cached["data_state"] == "CACHED"
+
+
 def test_portfolio_contract_is_bounded(tmp_path) -> None:
     service, rpc, morpho = runtime.__wrapped__()  # type: ignore[attr-defined]
     now = [NOW]
@@ -475,6 +531,31 @@ def test_portfolio_contract_is_bounded(tmp_path) -> None:
     assert len(result["history"]["points"]) == 12
     assert result["history"]["granularity"] == "month"
     assert len(encode_message(make_response(envelope))) < 8 * 1024
+
+    mutations: list[tuple[str, dict[str, object]]] = []
+    for index in range(3):
+        invalid = copy.deepcopy(result)
+        invalid["protocols"][index]["contract_address"] = (
+            "0x1111111111111111111111111111111111111111"
+        )
+        mutations.append((f"pinned-contract-{index}", invalid))
+    for name, mutate in (
+        ("display-name", lambda value: value["protocols"][0].update(display_name="Other")),
+        ("position-display", lambda value: value["protocols"][0].update(display_position="999 USDC")),
+        ("base-yield", lambda value: value["protocols"][0]["base_yield"].update(metric="UNKNOWN")),
+        ("incentives", lambda value: value["protocols"][2]["incentives"].update(status="UNKNOWN")),
+        ("completeness", lambda value: value["protocols"][0].update(total_completeness="BASE_AND_INCENTIVES")),
+        ("earnings-display", lambda value: value["protocols"][0].update(display_tracked_earnings="wrong")),
+        ("observation", lambda value: value["protocols"][0].update(observed_at=None)),
+        ("summary", lambda value: value["summary"].update(display_total_position="wrong")),
+    ):
+        invalid = copy.deepcopy(result)
+        mutate(invalid)
+        mutations.append((name, invalid))
+    for name, invalid in mutations:
+        with pytest.raises(ContractViolation) as violation:
+            make_envelope(MessageKind.LENDING_PORTFOLIO, invalid)
+        assert violation.value.code == "REQUEST_INVALID", name
 
 
 def test_portfolio_migrates_valid_schema_v1_atomically(tmp_path) -> None:

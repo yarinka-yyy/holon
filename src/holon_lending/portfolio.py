@@ -16,7 +16,9 @@ from typing import Any, Callable, Mapping, Sequence
 
 from web3 import Web3
 
-from .runtime import ASSET, COMPARE_CACHE_SECONDS, NETWORK, PROTOCOLS, LendingReader
+from .runtime import (
+    ASSET, COMPARE_CACHE_SECONDS, NETWORK, PINNED_CONTRACTS, PROTOCOLS, LendingReader,
+)
 
 ANALYTICS_SCHEMA_VERSION = 2
 LEGACY_ANALYTICS_SCHEMA_VERSION = 1
@@ -585,11 +587,17 @@ class LendingPortfolioService:
             market_live = self._usable(market)
             position_live = self._usable(position)
             amount = position.get("amount_atomic") if position_live else None
+            amount_source = position if amount is not None else None
             if amount is None and previous is not None:
                 amount = previous.get("position_atomic")
+                if amount is not None:
+                    amount_source = previous
             rate = market.get("confirmed_total_annual_percent") if market_live else None
+            rate_source = market if rate is not None else None
             if rate is None and previous is not None:
                 rate = previous.get("confirmed_total_annual_percent")
+                if rate is not None:
+                    rate_source = previous
             data_state = (
                 "LIVE" if market_live and position_live
                 and market["freshness"]["state"] == "LIVE"
@@ -598,10 +606,8 @@ class LendingPortfolioService:
                 else "CACHED" if previous is not None and (amount is not None or rate is not None)
                 else "UNAVAILABLE"
             )
-            source = market if market_live else previous or {}
-            observed = self._observed_at(market, position)
-            if observed is None and previous is not None:
-                observed = previous.get("observed_at")
+            source = rate_source or {}
+            observed = self._observed_at(amount_source, rate_source)
             caveats = list(dict.fromkeys(
                 list((market or {}).get("caveats", []))
                 + list((position or {}).get("caveats", []))
@@ -651,11 +657,17 @@ class LendingPortfolioService:
 
     @staticmethod
     def _observed_at(*values: Mapping[str, Any] | None) -> str | None:
-        timestamps = [
-            value["freshness"]["observed_at"] for value in values
-            if value and isinstance(value.get("freshness"), Mapping)
-            and isinstance(value["freshness"].get("observed_at"), str)
-        ]
+        timestamps: list[str] = []
+        for value in values:
+            if not value:
+                continue
+            freshness = value.get("freshness")
+            observed = (
+                freshness.get("observed_at")
+                if isinstance(freshness, Mapping) else value.get("observed_at")
+            )
+            if isinstance(observed, str):
+                timestamps.append(observed)
         return min(timestamps) if timestamps else None
 
     def _baselines(
@@ -974,7 +986,7 @@ class LendingPortfolioService:
             "protocol": protocol,
             "market_id": market,
             "display_name": label,
-            "contract_address": None,
+            "contract_address": contract,
             "position_atomic": None,
             "display_position": None,
             "base_yield": None,
@@ -988,7 +1000,9 @@ class LendingPortfolioService:
             "data_state": "UNAVAILABLE",
             "observed_at": None,
             "caveats": ["LENDING_PORTFOLIO_UNAVAILABLE"],
-        } for protocol, market, label in PROTOCOLS]
+        } for (protocol, market, label), contract in zip(
+            PROTOCOLS, PINNED_CONTRACTS, strict=True,
+        )]
         return {
             "status": "DEGRADED", "authority_available": False,
             "account": dict(account) if account else None,

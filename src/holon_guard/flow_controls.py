@@ -19,13 +19,25 @@ def cancel_flow(guard, action_id: str) -> GuardResult:
             return guard._result(False, "ACTION_ID_MISMATCH", "Action identifier does not match.")
         if guard.wallet_handle is None:
             return guard._recover("WALLET_INTERRUPTED")
+        previous = guard.snapshot
+        handle = guard.wallet_handle
+        digest = guard.prepared_digest
         exiting = GuardSnapshot(
             GuardState.EXITING, guard.snapshot.flow_id, guard.snapshot.owner_pid,
             guard.snapshot.wallet_pid, "FLOW_EXITING", guard.clock(),
             guard.snapshot.action_id, guard.snapshot.action_fingerprint,
         )
         if not guard._persist(exiting):
-            return guard._result(False, "SIGNING_DISABLED", "Wallet authority is disabled.")
+            if digest is not None:
+                return guard._contain_prepared_failure(
+                    previous, digest, handle, "STATE_WRITE_FAILED",
+                    lending=guard.lending_operation_snapshot.current is not None,
+                )
+            try:
+                guard.wallet.request_close(handle)
+            except Exception:
+                pass
+            return guard._force_prepared_recovery(previous, "STATE_WRITE_FAILED")
         try:
             guard.wallet.request_close(guard.wallet_handle)
         except Exception:

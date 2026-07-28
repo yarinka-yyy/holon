@@ -39,6 +39,10 @@ class CompositeWallet:
             "max_total_fee_wei": "50000", "amount_atomic": "2000000",
             "next_action": method, "profile_id": "profile-1",
             "sender": "0x1111111111111111111111111111111111111111",
+            "network": "base", "asset": "usdc",
+            "target": "0x3333333333333333333333333333333333333333",
+            "selector": "0x095ea7b3" if method == "approve" else "0x617ba037",
+            "calldata_hash": ("c" if method == "approve" else "d") * 64,
         }, self.handle)
 
     def cancel_transfer(self, request):

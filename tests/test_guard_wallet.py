@@ -43,6 +43,8 @@ class GuardWalletTests(unittest.TestCase):
             "sender": "0x2222222222222222222222222222222222222222",
             "recipient": request["recipient"], "network": request["network"],
             "asset": request["asset"], "amount_atomic": request["amount_atomic"],
+            "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "selector": "0xa9059cbb", "calldata_hash": "b" * 64,
             "policy_revision": request["policy_revision"],
             "policy_digest": request["policy_digest"],
             "max_total_fee_wei": "500", "prepared_digest": "a" * 64,

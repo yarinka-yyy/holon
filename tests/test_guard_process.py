@@ -11,12 +11,27 @@ import uuid
 from pathlib import Path
 
 from holon_contracts import MessageKind
+from holon_guard.__main__ import build_parser
 from holon_guard_ipc import PipeClient
 from holon_guard_ipc.client import wait_for_pipe
+from holon_guard_ipc.policy_control import POLICY_CONTROL_PIPE_NAME
+from holon_guard_ipc.wallet_status import STATUS_PIPE_NAME
 from guard_support import transfer_request
 
 
 HERMES_PYTHON_ENV = "HOLON_TEST_HERMES_PYTHON"
+
+
+def test_auxiliary_pipe_arguments_keep_production_defaults_and_allow_isolation() -> None:
+    defaults = build_parser().parse_args([])
+    assert defaults.wallet_status_pipe_name == STATUS_PIPE_NAME
+    assert defaults.policy_control_pipe_name == POLICY_CONTROL_PIPE_NAME
+    isolated = build_parser().parse_args([
+        "--wallet-status-pipe-name", r"\\.\pipe\Holon.Guard.Wallet.test",
+        "--policy-control-pipe-name", r"\\.\pipe\Holon.Guard.Policy.test",
+    ])
+    assert isolated.wallet_status_pipe_name.endswith("Wallet.test")
+    assert isolated.policy_control_pipe_name.endswith("Policy.test")
 
 
 @unittest.skipUnless(sys.version_info >= (3, 13), "Guard server requires Python 3.13")
@@ -30,6 +45,8 @@ class GuardProcessTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.data_dir = Path(self.temporary.name) / "guard-data"
         self.pipe = rf"\\.\pipe\Holon.Guard.process.{uuid.uuid4()}"
+        self.status_pipe = rf"\\.\pipe\Holon.Guard.Wallet.process.{uuid.uuid4()}"
+        self.policy_pipe = rf"\\.\pipe\Holon.Guard.Policy.process.{uuid.uuid4()}"
         self.source = Path(__file__).parents[1] / "src"
         self.processes: list[subprocess.Popen[str]] = []
         self.addCleanup(self._stop_processes)
@@ -40,7 +57,9 @@ class GuardProcessTests(unittest.TestCase):
             f"sys.path.insert(0,{str(self.source)!r});"
             "from holon_guard.__main__ import main;"
             f"raise SystemExit(main(['--data-dir',{str(self.data_dir)!r},"
-            f"'--pipe-name',{self.pipe!r}]))"
+            f"'--pipe-name',{self.pipe!r},"
+            f"'--wallet-status-pipe-name',{self.status_pipe!r},"
+            f"'--policy-control-pipe-name',{self.policy_pipe!r}]))"
         )
         return [sys.executable, "-I", "-c", code]
 

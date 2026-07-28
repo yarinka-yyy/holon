@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 from holon_contracts import MessageKind, SecurityCode, make_envelope
 from holon_guard import GuardLifecycle, SnapshotStore
 from holon_guard.actions import ActionLedgerFailure
 from holon_guard.authority import AuthorityService
 from holon_guard.wallet import WalletPreparedResult
+from holon_journal import EventType, JournalFailure
 from holon_policy import Policy, PolicyEngine, PolicySnapshot
 from guard_support import ACTION_ID, RECIPIENT, enabled_policy, make_audit, make_ledger
 
@@ -36,6 +38,7 @@ class AuthorityWallet:
         self.prepares.append(request)
         if self.refusal:
             return WalletPreparedResult(False, self.refusal, None, self.handle)
+        native = request["asset"] == "eth"
         return WalletPreparedResult(True, "TRANSFER_PREPARED", {
             "authority_version": request["authority_version"], "kind": "transfer_prepared",
             "flow_id": request["flow_id"], "action_id": request["action_id"],
@@ -43,6 +46,12 @@ class AuthorityWallet:
             "sender": "0x2222222222222222222222222222222222222222",
             "recipient": request["recipient"], "network": request["network"],
             "asset": request["asset"], "amount_atomic": request["amount_atomic"],
+            "target": (
+                request["recipient"] if native
+                else "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+            ),
+            "selector": None if native else "0xa9059cbb",
+            "calldata_hash": "c" * 64,
             "policy_revision": request["policy_revision"],
             "policy_digest": request["policy_digest"],
             "max_total_fee_wei": self.fee, "prepared_digest": "a" * 64,
@@ -97,7 +106,7 @@ def test_exact_intent_waits_for_wallet_preflight_and_completes_status():
         assert request["policy_revision"] == 0
         assert len(request["policy_digest"]) == 64
         assert "max_total_fee_wei" not in intent().payload
-        assert lifecycle.accept_wallet_status({
+        assert authority.accept_wallet_status({
             "flow_id": lifecycle.snapshot.flow_id,
             "action_id": ACTION_ID,
             "prepared_digest": "a" * 64,
@@ -108,6 +117,121 @@ def test_exact_intent_waits_for_wallet_preflight_and_completes_status():
         })
         assert lifecycle.snapshot.state.value == "NORMAL"
         assert lifecycle.ledger.find(ACTION_ID).state.value == "COMPLETED"
+        events = authority.audit.journal.events()
+        lifecycle_events = [event for event in events if event.event_type in {
+            EventType.LOCAL_APPROVED, EventType.CONTRACT_ACTION,
+            EventType.BROADCAST_RESULT,
+        }]
+        assert [event.event_type for event in lifecycle_events] == [
+            EventType.LOCAL_APPROVED, EventType.CONTRACT_ACTION,
+            EventType.BROADCAST_RESULT,
+        ]
+        for event in lifecycle_events:
+            assert event.public_fields["wallet_address"] == (
+                "0x2222222222222222222222222222222222222222"
+            )
+            assert event.public_fields["recipient"] == RECIPIENT
+            assert event.public_fields["asset"] == "usdc"
+            assert event.public_fields["amount_atomic"] == "1000000"
+        contract = lifecycle_events[1].public_fields
+        assert contract["contract"] == "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+        assert contract["selector"] == "0xa9059cbb"
+        assert contract["calldata_hash"] == "c" * 64
+        assert "password" not in str([event.to_dict() for event in events]).lower()
+
+
+def test_local_rejection_writes_only_rejection_outcome():
+    with tempfile.TemporaryDirectory() as temporary:
+        wallet = AuthorityWallet()
+        lifecycle, authority = service(Path(temporary), wallet)
+        authority.handle(intent(), owner_pid=123)
+        assert authority.accept_wallet_status({
+            "flow_id": lifecycle.snapshot.flow_id,
+            "action_id": ACTION_ID,
+            "prepared_digest": "a" * 64,
+            "wallet_pid": 404,
+            "event": "REJECTED", "code": "LOCAL_CANCELLED",
+        })
+        types = [event.event_type for event in authority.audit.journal.events()]
+        assert types.count(EventType.LOCAL_REJECTED) == 1
+        assert EventType.LOCAL_APPROVED not in types
+        assert EventType.CONTRACT_ACTION not in types
+        assert EventType.BROADCAST_RESULT not in types
+
+
+def test_wallet_outcome_journal_failure_disables_signing():
+    with tempfile.TemporaryDirectory() as temporary:
+        wallet = AuthorityWallet()
+        lifecycle, authority = service(Path(temporary), wallet)
+        authority.handle(intent(), owner_pid=123)
+        update = {
+            "flow_id": lifecycle.snapshot.flow_id,
+            "action_id": ACTION_ID,
+            "prepared_digest": "a" * 64,
+            "wallet_pid": 404,
+            "event": "COMPLETED", "code": "PENDING",
+            "outcome": "pending",
+        }
+        with patch.object(
+            authority.audit.journal, "emit",
+            side_effect=JournalFailure("JOURNAL_WRITE_FAILED"),
+        ):
+            assert not authority.accept_wallet_status(update)
+        assert lifecycle.snapshot.state.value == "SIGNING_DISABLED"
+        assert authority.security_failure == "JOURNAL_WRITE_FAILED"
+
+
+def test_native_eth_completion_has_no_contract_action():
+    policy = PolicyEngine(Policy.from_dict({
+        "schema_version": "2", "policy_version": "1",
+        "authority_enabled": True,
+        "transfer_rules": [{
+            "network": "base", "asset": "eth", "chain_id": 8453,
+            "max_amount_atomic": "1000000000000000",
+            "max_total_fee_wei": "500",
+            "recipients": [{
+                "address": RECIPIENT,
+                "max_amount_atomic": "1000000000000000",
+            }],
+        }],
+    }))
+    with tempfile.TemporaryDirectory() as temporary:
+        wallet = AuthorityWallet()
+        lifecycle, authority = service(Path(temporary), wallet, policy)
+        response = authority.handle(
+            intent(asset="eth", amount="0.001"), owner_pid=123,
+        )
+        assert response.kind is MessageKind.PROTECTED_FLOW_STARTED
+        assert authority.accept_wallet_status({
+            "flow_id": lifecycle.snapshot.flow_id,
+            "action_id": ACTION_ID,
+            "prepared_digest": "a" * 64,
+            "wallet_pid": 404,
+            "event": "COMPLETED", "code": "PENDING",
+            "outcome": "pending",
+        })
+        types = [event.event_type for event in authority.audit.journal.events()]
+        assert EventType.LOCAL_APPROVED in types
+        assert EventType.BROADCAST_RESULT in types
+        assert EventType.CONTRACT_ACTION not in types
+
+
+def test_prebroadcast_wallet_failure_records_technical_error_only():
+    with tempfile.TemporaryDirectory() as temporary:
+        wallet = AuthorityWallet()
+        lifecycle, authority = service(Path(temporary), wallet)
+        authority.handle(intent(), owner_pid=123)
+        assert authority.accept_wallet_status({
+            "flow_id": lifecycle.snapshot.flow_id,
+            "action_id": ACTION_ID,
+            "prepared_digest": "a" * 64,
+            "wallet_pid": 404,
+            "event": "FAILED", "code": "WALLET_PREPARE_FAILED",
+        })
+        types = [event.event_type for event in authority.audit.journal.events()]
+        assert EventType.TECHNICAL_ERROR in types
+        assert EventType.LOCAL_APPROVED not in types
+        assert EventType.BROADCAST_RESULT not in types
 
 
 def test_guard_revision_change_interrupts_active_flow_without_retry():

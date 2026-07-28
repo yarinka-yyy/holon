@@ -240,6 +240,8 @@ def test_authority_protocol_is_exact_correlated_and_fee_bounded() -> None:
         "sender": "0x2222222222222222222222222222222222222222",
         "recipient": request["recipient"], "network": "base", "asset": "usdc",
         "amount_atomic": "1000000", "max_total_fee_wei": "500",
+        "target": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "selector": "0xa9059cbb", "calldata_hash": "b" * 64,
         "policy_revision": request["policy_revision"],
         "policy_digest": request["policy_digest"],
         "prepared_digest": "a" * 64, "created_at": request["created_at"],
@@ -279,7 +281,8 @@ def test_lending_authority_protocol_has_only_semantics_and_material_digests() ->
         "requested_action": "supply", "amount_mode": "exact", "next_action": "approve",
         "network": "base", "asset": "usdc", "amount_atomic": "1000000",
         "target": "0x3333333333333333333333333333333333333333",
-        "method": "approve", "max_total_fee_wei": "100000000000000",
+        "method": "approve", "selector": "0x095ea7b3",
+        "calldata_hash": "b" * 64, "max_total_fee_wei": "100000000000000",
         "l2_fee_ceiling_wei": "90000000000000",
         "l1_fee_upper_bound_wei": "10000000000000",
         "prepared_digest": "a" * 64, "created_at": request["created_at"],
@@ -292,8 +295,9 @@ def test_lending_authority_protocol_has_only_semantics_and_material_digests() ->
     }
     assert validate_authority_response(response, checked, 202) == response
     wire = _authority_encode(response)
-    for secret_field in (b"password", b"calldata", b"private", b"rawSigned"):
+    for secret_field in (b"password", b'"calldata":', b"private", b"rawSigned"):
         assert secret_field not in wire
+    assert b'"calldata_hash"' in wire
 
     withdraw_request = dict(
         request, action="withdraw", amount_mode="all", amount=None,

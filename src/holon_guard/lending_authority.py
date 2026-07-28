@@ -172,9 +172,7 @@ def prepare_lending_authority(service, request, owner_pid: int):
         phase=("withdraw" if intent.action == "withdraw" else "approve_or_supply"),
     )
     if not result.ok:
-        if result.state is GuardState.RECOVERY_REQUIRED:
-            return service._status(request, MessageKind.RECOVERY_REQUIRED, result.code)
-        return service.refusal(request, result.code, result.message)
+        return service._failure(request, result)
     if prepared is None:
         return service.error(request, "WALLET_UNAVAILABLE", "Wallet is unavailable.")
     if not service.audit_transfer(

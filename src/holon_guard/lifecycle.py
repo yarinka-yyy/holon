@@ -259,6 +259,7 @@ class GuardLifecycle(GuardCore):
                     pass
                 return self.disable_signing(SecurityCode.ACTION_STATE_INVALID.value), None
             self.prepared_digest = digest
+            self._set_prepared_audit_context(payload, "transfer")
             self.authority_expires_at = expires.timestamp()
             return self._result(True, "AWAITING_LOCAL_CONFIRMATION", "Protected flow started."), payload
 
@@ -380,6 +381,7 @@ class GuardLifecycle(GuardCore):
                     pass
                 return self.disable_signing(SecurityCode.ACTION_STATE_INVALID.value), None
             self.prepared_digest = digest
+            self._set_prepared_audit_context(payload, "lending")
             self.authority_expires_at = expires.timestamp()
             if intent.get("action") == "supply":
                 current_operation = self.lending_operation_snapshot.current
@@ -416,7 +418,10 @@ class GuardLifecycle(GuardCore):
                 if not self._save_lending_operations(LendingOperationSnapshot(
                     operation, self.lending_operation_snapshot.terminal,
                 )):
-                    return self._result(False, "LENDING_OPERATION_STATE_INVALID", "Operation state failed."), None
+                    return self._contain_prepared_failure(
+                        active, digest, prepared.handle,
+                        "LENDING_OPERATION_STATE_INVALID", lending=True,
+                    ), None
             return self._result(True, "AWAITING_LOCAL_CONFIRMATION", "Protected flow started."), payload
 
     def accept_wallet_status(self, update: dict[str, object]) -> bool:
@@ -532,6 +537,7 @@ class GuardLifecycle(GuardCore):
                 return False
             self.wallet_handle = None
             self.prepared_digest = None
+            self.prepared_audit_context = None
             self.authority_expires_at = None
             self._persist(idle_snapshot(GuardState.NORMAL, str(update["code"]), self.clock()))
             return True
@@ -580,6 +586,7 @@ class GuardLifecycle(GuardCore):
                 return self.disable_signing(SecurityCode.ACTION_STATE_INVALID.value)
             self.wallet_handle = None
             self.prepared_digest = None
+            self.prepared_audit_context = None
             self.authority_expires_at = None
             self._persist(idle_snapshot(GuardState.NORMAL, "ACTION_CANCELLED", self.clock()))
             if operation is not None:

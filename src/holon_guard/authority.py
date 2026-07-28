@@ -136,6 +136,63 @@ class AuthorityService(ResponseMixin):
             fields["flow_id"] = flow_id
         self.audit_system(event_type, result.code, **fields)
 
+    def accept_wallet_status(self, update: dict[str, object]) -> bool:
+        context = self.lifecycle.prepared_audit_context
+        if context is None or not self.lifecycle.accept_wallet_status(update):
+            return False
+        common = {
+            "action_id": str(update["action_id"]),
+            "flow_id": str(update["flow_id"]),
+            "action_type": str(context["action_type"]),
+            "network": str(context["network"]),
+            "wallet_address": str(context["wallet_address"]),
+            "recipient": str(context["recipient"]),
+            "asset": str(context["asset"]),
+            "amount_atomic": str(context["amount_atomic"]),
+        }
+        event = str(update["event"])
+        if event == "REJECTED":
+            return self.audit_system(
+                EventType.LOCAL_REJECTED, str(update["code"]), **common,
+            )
+        if event in {"BROADCASTED", "COMPLETED"}:
+            if context.get("local_approved_recorded") is not True:
+                if not self.audit_system(
+                    EventType.LOCAL_APPROVED, "LOCAL_APPROVED", **common,
+                ):
+                    return False
+                context["local_approved_recorded"] = True
+            if (
+                context.get("selector") is not None
+                and context.get("contract_action_recorded") is not True
+            ):
+                if not self.audit_system(
+                    EventType.CONTRACT_ACTION, "CONTRACT_ACTION", **common,
+                    contract=str(context["contract"]),
+                    selector=str(context["selector"]),
+                    calldata_hash=str(context["calldata_hash"]),
+                ):
+                    return False
+                context["contract_action_recorded"] = True
+            broadcast = dict(common)
+            if update.get("transaction_hash") is not None:
+                broadcast["transaction_hash"] = str(update["transaction_hash"])
+            return self.audit_system(
+                EventType.BROADCAST_RESULT, str(update["code"]), **broadcast,
+            )
+        if event in {"RECEIPT_CONFIRMED", "RECEIPT_FAILED"}:
+            broadcast = dict(common)
+            if update.get("transaction_hash") is not None:
+                broadcast["transaction_hash"] = str(update["transaction_hash"])
+            return self.audit_system(
+                EventType.BROADCAST_RESULT, str(update["code"]), **broadcast,
+            )
+        if event == "FAILED":
+            return self.audit_system(
+                EventType.TECHNICAL_ERROR, str(update["code"]), **common,
+            )
+        return False
+
     def _recover(self, request: ContractEnvelope):
         result = self.lifecycle.recover_flow(request.action_id or "")
         if not result.ok:

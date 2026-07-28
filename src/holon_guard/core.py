@@ -46,6 +46,7 @@ class GuardCore:
         self.clock = clock
         self.wallet_handle: WalletHandle | None = None
         self.prepared_digest: str | None = None
+        self.prepared_audit_context: dict[str, object] | None = None
         self.authority_expires_at: float | None = None
         self._lock = threading.RLock()
 
@@ -99,6 +100,77 @@ class GuardCore:
     def _result(self, ok: bool, code: str, message: str) -> GuardResult:
         return GuardResult(ok, code, self.snapshot.state, message, self.snapshot.flow_id)
 
+    def _set_prepared_audit_context(
+        self, payload: dict[str, object], action_type: str,
+    ) -> None:
+        selector = payload.get("selector")
+        self.prepared_audit_context = {
+            "action_type": action_type,
+            "network": str(payload["network"]),
+            "wallet_address": str(payload["sender"]),
+            "recipient": str(payload.get("recipient") or payload["target"]),
+            "asset": str(payload["asset"]),
+            "amount_atomic": str(payload["amount_atomic"]),
+            "contract": str(payload["target"]) if selector is not None else None,
+            "selector": selector,
+            "calldata_hash": str(payload["calldata_hash"]),
+            "local_approved_recorded": False,
+            "contract_action_recorded": False,
+        }
+
+    def _force_prepared_recovery(
+        self, previous: GuardSnapshot, code: str,
+    ) -> GuardResult:
+        try:
+            self.ledger.terminalize(ActionState.RECOVERY_REQUIRED, code)
+        except ActionLedgerFailure:
+            code = SecurityCode.ACTION_STATE_INVALID.value
+        recovery = GuardSnapshot(
+            GuardState.RECOVERY_REQUIRED,
+            previous.flow_id,
+            None,
+            None,
+            code,
+            self.clock(),
+            previous.action_id,
+            previous.action_fingerprint,
+        )
+        self.wallet_handle = None
+        self.prepared_digest = None
+        self.prepared_audit_context = None
+        self.authority_expires_at = None
+        self.snapshot = recovery
+        best_effort_save(self.store, recovery)
+        return self._result(False, code, "Prepared Wallet action requires recovery.")
+
+    def _contain_prepared_failure(
+        self, previous: GuardSnapshot, digest: str, handle: WalletHandle,
+        code: str, *, lending: bool,
+    ) -> GuardResult:
+        cancelled = False
+        try:
+            cancelled = self.wallet.cancel_transfer({
+                "authority_version": AUTHORITY_VERSION,
+                "kind": "cancel_action" if lending else "cancel_transfer",
+                "flow_id": previous.flow_id,
+                "action_id": previous.action_id,
+                "prepared_digest": digest,
+            })
+        except Exception:
+            cancelled = False
+        if cancelled:
+            try:
+                self.ledger.terminalize(ActionState.FAILED, code)
+            except ActionLedgerFailure:
+                code = SecurityCode.ACTION_STATE_INVALID.value
+            self.disable_signing(code)
+            return self._result(False, code, "Prepared Wallet action was cancelled.")
+        try:
+            self.wallet.request_close(handle)
+        except Exception:
+            pass
+        return self._force_prepared_recovery(previous, code)
+
     def _persist(self, snapshot: GuardSnapshot) -> bool:
         try:
             self.store.save(snapshot)
@@ -128,6 +200,7 @@ class GuardCore:
         )
         self.wallet_handle = None
         self.prepared_digest = None
+        self.prepared_audit_context = None
         self.authority_expires_at = None
         operation = self.lending_operation_snapshot.current
         if operation is not None:
@@ -227,6 +300,7 @@ class GuardCore:
         with self._lock:
             self.wallet_handle = None
             self.prepared_digest = None
+            self.prepared_audit_context = None
             self.authority_expires_at = None
             self._persist(
                 idle_snapshot(GuardState.SIGNING_DISABLED, reason, self.clock())

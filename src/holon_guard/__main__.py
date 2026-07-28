@@ -7,8 +7,8 @@ import os
 from pathlib import Path
 
 from holon_guard_ipc import PIPE_NAME
-from holon_guard_ipc.wallet_status import WalletStatusServer
-from holon_guard_ipc.policy_control import PolicyControlServer
+from holon_guard_ipc.wallet_status import STATUS_PIPE_NAME, WalletStatusServer
+from holon_guard_ipc.policy_control import POLICY_CONTROL_PIPE_NAME, PolicyControlServer
 from holon_contracts import RefusalCode, SecurityCode
 from holon_policy import (
     Policy, PolicyEngine, PolicyLoadError, PolicyRevisionStore,
@@ -63,6 +63,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="holon-guard")
     parser.add_argument("--data-dir", type=Path, default=None)
     parser.add_argument("--pipe-name", default=PIPE_NAME)
+    parser.add_argument("--wallet-status-pipe-name", default=STATUS_PIPE_NAME)
+    parser.add_argument("--policy-control-pipe-name", default=POLICY_CONTROL_PIPE_NAME)
     parser.add_argument("--require-install-integrity", action="store_true")
     parser.add_argument("--manifest-path", type=Path, default=None)
     parser.add_argument("--app-root", type=Path, default=None)
@@ -205,8 +207,9 @@ def main(argv: list[str] | None = None) -> int:
                 )
             wallet_path = getattr(wallet, "wallet_path", None)
             status_server = WalletStatusServer(
-                lifecycle.accept_wallet_status,
+                authority.accept_wallet_status,
                 lambda: (lifecycle.snapshot.wallet_pid, wallet_path),
+                pipe_name=args.wallet_status_pipe_name,
                 invalid_handler=lifecycle.wallet_status_mismatch,
             )
             policy_handler = GuardPolicyControl(
@@ -224,7 +227,10 @@ def main(argv: list[str] | None = None) -> int:
                 ),
             )
             policy_server = (
-                PolicyControlServer(policy_handler.handle, wallet_path)
+                PolicyControlServer(
+                    policy_handler.handle, wallet_path,
+                    pipe_name=args.policy_control_pipe_name,
+                )
                 if wallet_path is not None else None
             )
             GuardServer(

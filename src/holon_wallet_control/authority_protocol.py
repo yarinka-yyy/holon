@@ -43,7 +43,7 @@ PREPARED_FIELDS = frozenset({
     "authority_version", "kind", "flow_id", "action_id", "wallet_pid",
     "profile_id", "sender", "recipient", "network", "asset", "amount_atomic",
     "max_total_fee_wei", "prepared_digest", "created_at", "expires_at", "code",
-    "policy_revision", "policy_digest",
+    "policy_revision", "policy_digest", "target", "selector", "calldata_hash",
 })
 LENDING_PREPARED_FIELDS = frozenset({
     "authority_version", "kind", "flow_id", "action_id", "wallet_pid",
@@ -53,6 +53,7 @@ LENDING_PREPARED_FIELDS = frozenset({
     "created_at", "expires_at", "code", "policy_revision", "policy_digest",
     "action_profile_digest", "amount_mode",
     "operation_id", "phase_action_id", "phase",
+    "selector", "calldata_hash",
 })
 REFUSED_FIELDS = frozenset({
     "authority_version", "kind", "flow_id", "action_id", "wallet_pid", "code",
@@ -229,6 +230,11 @@ def validate_response(
             )
             or not isinstance(value.get("target"), str)
             or ADDRESS_RE.fullmatch(value["target"]) is None
+            or not isinstance(value.get("selector"), str)
+            or not value["selector"].startswith("0x") or len(value["selector"]) != 10
+            or any(character not in "0123456789abcdef" for character in value["selector"][2:])
+            or not isinstance(value.get("calldata_hash"), str)
+            or HEX_RE.fullmatch(value["calldata_hash"]) is None
         ):
             raise ControlProtocolError("Invalid lending authority response")
         for field in (
@@ -261,6 +267,15 @@ def validate_response(
         or DECIMAL_RE.fullmatch(value["max_total_fee_wei"]) is None
         or not isinstance(value.get("prepared_digest"), str)
         or HEX_RE.fullmatch(value["prepared_digest"]) is None
+        or not isinstance(value.get("target"), str)
+        or ADDRESS_RE.fullmatch(value["target"]) is None
+        or value.get("selector") is not None and (
+            not isinstance(value["selector"], str)
+            or not value["selector"].startswith("0x") or len(value["selector"]) != 10
+            or any(character not in "0123456789abcdef" for character in value["selector"][2:])
+        )
+        or not isinstance(value.get("calldata_hash"), str)
+        or HEX_RE.fullmatch(value["calldata_hash"]) is None
     ):
         raise ControlProtocolError("Invalid authority response")
     return dict(value)

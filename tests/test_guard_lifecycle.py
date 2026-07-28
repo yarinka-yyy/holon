@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from holon_guard import GuardLifecycle, SnapshotStore
 from holon_guard.model import GuardSnapshot
@@ -74,6 +75,21 @@ class GuardLifecycleTests(unittest.TestCase):
         self.assertEqual(closing.state, GuardState.EXITING)
         self.assertEqual(self.guard.monitor_once().code, "ACTION_CANCELLED")
         self.assertIs(self.guard.snapshot.state, GuardState.NORMAL)
+
+    def test_cancel_state_write_failure_closes_wallet_and_requires_recovery(self) -> None:
+        self.guard.start_flow(101, ACTION_ID, FINGERPRINT)
+        original = self.store.save
+
+        def fail_exiting(snapshot):
+            if snapshot.state is GuardState.EXITING:
+                raise OSError("canary")
+            return original(snapshot)
+
+        with patch.object(self.store, "save", side_effect=fail_exiting):
+            result = self.guard.cancel_flow(ACTION_ID)
+        self.assertEqual(result.state, GuardState.RECOVERY_REQUIRED)
+        self.assertEqual(self.wallet.handle.exit_code, 0)
+        self.assertEqual(self.store.load().state, GuardState.RECOVERY_REQUIRED)
 
     def test_wallet_or_owner_loss_requires_matching_recovery_and_new_id(self) -> None:
         self.guard.start_flow(101, ACTION_ID, FINGERPRINT)

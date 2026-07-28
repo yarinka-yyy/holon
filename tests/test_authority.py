@@ -18,6 +18,7 @@ from holon_guard.wallet import (
 )
 from holon_journal import EventType
 from holon_policy import LendingRule, Policy, PolicyEngine, PolicySnapshot, policy_digest
+from holon_wallet_control.lending_operation import LendingOperationStore
 from guard_support import (
     ACTION_ID, ACTION_ID_2, enabled_policy, make_audit, make_ledger, transfer_request,
 )
@@ -42,6 +43,8 @@ class Wallet:
         self.preview_payload = None
         self.lending_prepare_calls = 0
         self.lending_cancel_calls = 0
+        self.close_calls = 0
+        self.cancel_ok = True
         self.handle = Handle()
 
     def open_or_activate(self, flow_id: str) -> Handle:
@@ -50,6 +53,7 @@ class Wallet:
         return self.handle
 
     def request_close(self, handle: Handle) -> None:
+        self.close_calls += 1
         handle.exit_code = 0
 
     def open_public(self) -> WalletOpenResult:
@@ -99,19 +103,30 @@ class Wallet:
     def prepare_lending_action(self, request) -> WalletPreparedResult:
         self.lending_prepare_calls += 1
         next_action = "withdraw" if request["action"] == "withdraw" else "approve"
+        profile = ActionProfilesState.load().select(request["protocol_profile_id"])
+        assert profile is not None
+        selectors = {
+            "aave-v3-base-usdc": "0x69328dec",
+            "compound-v3-base-usdc": "0xf3fef3a3",
+            "morpho-v1-gauntlet-usdc-prime": "0xb460af94",
+        }
+        target = profile.asset if next_action == "approve" else profile.target
         return WalletPreparedResult(True, "LENDING_ACTION_PREPARED", {
             "amount_atomic": "1000000",
             "max_total_fee_wei": "90000000000000",
             "prepared_digest": "a" * 64,
             "next_action": next_action, "profile_id": "profile-one",
             "sender": "0x1111111111111111111111111111111111111111",
+            "network": "base", "asset": "usdc", "target": target,
+            "selector": selectors[profile.profile_id] if next_action == "withdraw" else "0x095ea7b3",
+            "calldata_hash": "c" * 64,
         }, self.handle)
 
     def cancel_transfer(self, request) -> bool:
         del request
         self.lending_cancel_calls += 1
         self.handle.exit_code = 0
-        return True
+        return self.cancel_ok
 
 
 class Owner:
@@ -338,6 +353,45 @@ class AuthorityTests(unittest.TestCase):
             service.handle(request, owner_pid=101).payload["code"], "ACTION_REPLAYED",
         )
 
+    def test_lending_operation_write_failure_cancels_prepared_wallet_action(self) -> None:
+        root = Path(self.temporary.name)
+        operation_store = LendingOperationStore(root / "lending-operation-state.json")
+        self.lifecycle.lending_operation_store = operation_store
+        self.lifecycle.lending_operation_snapshot = operation_store.load()
+        service = self.lending_service()
+        with patch.object(operation_store, "save", side_effect=OSError("canary")):
+            response = service.handle(lending_request(), owner_pid=101)
+        self.assertEqual(response.kind, MessageKind.SIGNING_DISABLED)
+        self.assertEqual(response.payload["code"], "LENDING_OPERATION_STATE_INVALID")
+        self.assertEqual(self.wallet.lending_cancel_calls, 1)
+        self.assertIsNone(self.lifecycle.wallet_handle)
+        self.assertIsNone(self.lifecycle.prepared_digest)
+
+    def test_ambiguous_lending_cancellation_preserves_recovery(self) -> None:
+        root = Path(self.temporary.name)
+        operation_store = LendingOperationStore(root / "lending-operation-state.json")
+        self.lifecycle.lending_operation_store = operation_store
+        self.lifecycle.lending_operation_snapshot = operation_store.load()
+        self.wallet.cancel_ok = False
+        service = self.lending_service()
+        with patch.object(operation_store, "save", side_effect=OSError("canary")):
+            response = service.handle(lending_request(), owner_pid=101)
+        self.assertEqual(response.kind, MessageKind.RECOVERY_REQUIRED)
+        self.assertEqual(self.lifecycle.snapshot.state.value, "RECOVERY_REQUIRED")
+        self.assertEqual(self.wallet.lending_cancel_calls, 1)
+        self.assertEqual(self.wallet.close_calls, 1)
+        self.assertFalse(self.lifecycle.accept_wallet_status({
+            "flow_id": self.lifecycle.snapshot.flow_id,
+            "action_id": ACTION_ID,
+            "prepared_digest": "a" * 64,
+            "wallet_pid": 202,
+        }))
+        restored = GuardLifecycle.restore(
+            self.lifecycle.store, self.wallet, Owner(), self.lifecycle.ledger,
+            operation_store, self.lifecycle.lending_operation_snapshot,
+        )
+        self.assertEqual(restored.snapshot.state.value, "RECOVERY_REQUIRED")
+
     def test_lending_third_equivalent_request_persists_global_block(self) -> None:
         now = [100.0]
         self.audit.requests.clock = lambda: now[0]
@@ -469,6 +523,146 @@ class AuthorityTests(unittest.TestCase):
                     amount_atomic="1000000", policy_version="3",
                 )
                 self.assertEqual(fields["recipient"], profile.target)
+
+    def test_lending_wallet_status_journal_covers_all_protocol_targets(self) -> None:
+        profiles = ActionProfilesState.load()
+        for index, profile in enumerate(profiles.profiles):
+            with self.subTest(profile=profile.profile_id):
+                root = Path(self.temporary.name) / f"journal-{index}"
+                root.mkdir()
+                store = SnapshotStore(root / "guard-state.json")
+                store.bootstrap_normal_for_test(1.0)
+                wallet = Wallet()
+                lifecycle = GuardLifecycle(
+                    store, store.load(), wallet, Owner(), make_ledger(root),
+                )
+                audit = make_audit(root)
+                policy = Policy("4", "3", False, ())
+                service = AuthorityService(
+                    lifecycle, PolicyEngine(policy), audit,
+                    policy_snapshot=PolicySnapshot(
+                        2, policy_digest(policy.to_dict()), policy, "d" * 64,
+                    ),
+                    lending_actions=profiles,
+                )
+                response = service.handle(
+                    lending_request(
+                        profile_id=profile.profile_id, action="withdraw",
+                        amount_mode="exact", amount="1",
+                    ),
+                    owner_pid=101,
+                )
+                self.assertEqual(response.kind, MessageKind.PROTECTED_FLOW_STARTED)
+                transaction_hash = "0x" + str(index + 1) * 64
+                update = {
+                    "flow_id": lifecycle.snapshot.flow_id,
+                    "action_id": lifecycle.snapshot.action_id,
+                    "prepared_digest": lifecycle.prepared_digest,
+                    "wallet_pid": 202, "event": "COMPLETED", "code": "PENDING",
+                    "transaction_hash": transaction_hash,
+                    "receipt_state": "pending", "outcome": "pending",
+                }
+                self.assertTrue(service.accept_wallet_status(update))
+                contract_events = [
+                    event for event in audit.journal.events()
+                    if event.event_type is EventType.CONTRACT_ACTION
+                ]
+                self.assertEqual(len(contract_events), 1)
+                self.assertEqual(
+                    contract_events[0].public_fields["wallet_address"],
+                    "0x1111111111111111111111111111111111111111",
+                )
+                self.assertEqual(contract_events[0].public_fields["asset"], "usdc")
+                self.assertEqual(
+                    contract_events[0].public_fields["amount_atomic"], "1000000",
+                )
+                self.assertEqual(contract_events[0].public_fields["contract"], profile.target)
+                expected_selector = {
+                    "aave-v3-base-usdc": "0x69328dec",
+                    "compound-v3-base-usdc": "0xf3fef3a3",
+                    "morpho-v1-gauntlet-usdc-prime": "0xb460af94",
+                }[profile.profile_id]
+                self.assertEqual(contract_events[0].public_fields["selector"], expected_selector)
+                broadcast_events = [
+                    event for event in audit.journal.events()
+                    if event.event_type is EventType.BROADCAST_RESULT
+                ]
+                self.assertEqual(len(broadcast_events), 1)
+                self.assertEqual(
+                    broadcast_events[-1].public_fields["transaction_hash"],
+                    transaction_hash,
+                )
+
+    def test_lending_journal_records_broadcast_and_both_receipt_outcomes(self) -> None:
+        for index, terminal_event in enumerate(("RECEIPT_CONFIRMED", "RECEIPT_FAILED")):
+            with self.subTest(event=terminal_event):
+                root = Path(self.temporary.name) / f"receipt-{index}"
+                root.mkdir()
+                store = SnapshotStore(root / "guard-state.json")
+                store.bootstrap_normal_for_test(1.0)
+                wallet = Wallet()
+                lifecycle = GuardLifecycle(
+                    store, store.load(), wallet, Owner(), make_ledger(root),
+                )
+                operation_store = LendingOperationStore(
+                    root / "lending-operation-state.json",
+                )
+                lifecycle.lending_operation_store = operation_store
+                lifecycle.lending_operation_snapshot = operation_store.load()
+                audit = make_audit(root)
+                policy = Policy("4", "3", False, ())
+                service = AuthorityService(
+                    lifecycle, PolicyEngine(policy), audit,
+                    policy_snapshot=PolicySnapshot(
+                        2, policy_digest(policy.to_dict()), policy, "d" * 64,
+                    ),
+                    lending_actions=ActionProfilesState.load(),
+                )
+                response = service.handle(
+                    lending_request(
+                        action="supply", amount_mode="exact", amount="1",
+                    ),
+                    owner_pid=101,
+                )
+                self.assertEqual(response.kind, MessageKind.PROTECTED_FLOW_STARTED)
+                operation = lifecycle.lending_operation_snapshot.current
+                self.assertIsNotNone(operation)
+                transaction_hash = "0x" + str(index + 7) * 64
+                common = {
+                    "flow_id": lifecycle.snapshot.flow_id,
+                    "action_id": lifecycle.snapshot.action_id,
+                    "prepared_digest": lifecycle.prepared_digest,
+                    "wallet_pid": 202,
+                    "operation_id": operation.operation_id,
+                    "phase_action_id": operation.phase_action_id,
+                    "phase": "approve",
+                    "transaction_hash": transaction_hash,
+                }
+                self.assertTrue(service.accept_wallet_status({
+                    **common, "event": "BROADCASTED",
+                    "code": "BROADCAST_SUBMITTED", "receipt_state": "pending",
+                    "outcome": "pending",
+                }))
+                self.assertTrue(service.accept_wallet_status({
+                    **common, "event": terminal_event, "code": terminal_event,
+                    "receipt_state": (
+                        "confirmed" if terminal_event == "RECEIPT_CONFIRMED" else "failed"
+                    ),
+                    "outcome": (
+                        "success" if terminal_event == "RECEIPT_CONFIRMED" else "failed"
+                    ),
+                }))
+                broadcasts = [
+                    event for event in audit.journal.events()
+                    if event.event_type is EventType.BROADCAST_RESULT
+                ]
+                self.assertEqual([event.code for event in broadcasts], [
+                    "BROADCAST_SUBMITTED", terminal_event,
+                ])
+                self.assertTrue(all(
+                    event.public_fields["transaction_hash"] == transaction_hash
+                    for event in broadcasts
+                ))
 
     def test_withdraw_all_resolves_position_before_starting_protected_flow(self) -> None:
         rule = LendingRule(
