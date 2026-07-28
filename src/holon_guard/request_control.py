@@ -54,9 +54,12 @@ class RequestController:
             raise RequestControlFailure() from exc
         self.snapshot = snapshot
 
-    def observe(self, payload: Mapping[str, Any]) -> RequestDecision:
+    def observe(
+        self, payload: Mapping[str, Any], *, contract: str | None = None,
+        method: str | None = None,
+    ) -> RequestDecision:
         now = self._now()
-        fingerprint = semantic_fingerprint(payload)
+        fingerprint = semantic_fingerprint(payload, contract=contract, method=method)
         expired = False
         if any(item.observed_at > now for item in self.snapshot.attempts):
             raise RequestControlFailure()

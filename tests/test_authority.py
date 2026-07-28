@@ -4,15 +4,19 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
-from holon_contracts import MessageKind, make_envelope
+from holon_contracts import ActionState, MessageKind, make_envelope
 from holon_lending import ACTION_PROFILES_DIGEST, ActionProfilesState
 from holon_guard import GuardLifecycle, SnapshotStore
 from holon_guard.authority import AuthorityService
+from holon_guard.authority_audit import AuthorityAudit
+from holon_guard.request_control import RequestController
 from holon_guard.wallet import (
     WalletBalancesResult, WalletLendingPreviewResult, WalletOpenResult,
     WalletPreparedResult,
 )
+from holon_journal import EventType
 from holon_policy import LendingRule, Policy, PolicyEngine, PolicySnapshot, policy_digest
 from guard_support import (
     ACTION_ID, ACTION_ID_2, enabled_policy, make_audit, make_ledger, transfer_request,
@@ -37,6 +41,7 @@ class Wallet:
         self.preview_calls = 0
         self.preview_payload = None
         self.lending_prepare_calls = 0
+        self.lending_cancel_calls = 0
         self.handle = Handle()
 
     def open_or_activate(self, flow_id: str) -> Handle:
@@ -102,6 +107,12 @@ class Wallet:
             "sender": "0x1111111111111111111111111111111111111111",
         }, self.handle)
 
+    def cancel_transfer(self, request) -> bool:
+        del request
+        self.lending_cancel_calls += 1
+        self.handle.exit_code = 0
+        return True
+
 
 class Owner:
     alive = True
@@ -109,6 +120,25 @@ class Owner:
     def is_alive(self, pid: int) -> bool:
         del pid
         return self.alive
+
+
+def lending_request(
+    action_id: str = ACTION_ID, *,
+    profile_id: str = "aave-v3-base-usdc",
+    action: str = "supply", amount_mode: str = "exact",
+    amount: str | None = "1",
+):
+    return make_envelope(
+        MessageKind.LENDING_AUTHORITY_INTENT,
+        {
+            "module_id": "lending", "module_version": "1",
+            "protocol_profile_id": profile_id,
+            "protocol_profile_version": "1", "network": "base", "asset": "usdc",
+            "beneficiary_mode": "active_wallet_account", "action": action,
+            "amount_mode": amount_mode, "amount": amount,
+        },
+        action_id=action_id,
+    )
 
 
 class AuthorityTests(unittest.TestCase):
@@ -124,6 +154,16 @@ class AuthorityTests(unittest.TestCase):
         )
         self.audit = make_audit(root)
         self.service = AuthorityService(self.lifecycle, enabled_policy(), self.audit)
+
+    def lending_service(self, policy: Policy | None = None) -> AuthorityService:
+        selected = policy or Policy("4", "3", False, ())
+        snapshot = PolicySnapshot(
+            2, policy_digest(selected.to_dict()), selected, "d" * 64,
+        )
+        return AuthorityService(
+            self.lifecycle, PolicyEngine(selected), self.audit,
+            policy_snapshot=snapshot, lending_actions=ActionProfilesState.load(),
+        )
 
     def test_policy_refusal_never_starts_wallet_or_action(self) -> None:
         refused = self.service.handle(transfer_request(network="ethereum"), owner_pid=101)
@@ -288,22 +328,8 @@ class AuthorityTests(unittest.TestCase):
         self.assertNotIn("action_id", response.to_dict())
 
     def test_lending_authority_starts_built_in_protected_action_under_v4(self) -> None:
-        policy = Policy("4", "3", False, ())
-        snapshot = PolicySnapshot(2, policy_digest(policy.to_dict()), policy, "d" * 64)
-        service = AuthorityService(
-            self.lifecycle, PolicyEngine(policy), self.audit,
-            policy_snapshot=snapshot, lending_actions=ActionProfilesState.load(),
-        )
-        request = make_envelope(
-            MessageKind.LENDING_AUTHORITY_INTENT,
-            {
-                "module_id": "lending", "module_version": "1",
-                "protocol_profile_id": "aave-v3-base-usdc",
-                "protocol_profile_version": "1", "network": "base", "asset": "usdc",
-                "beneficiary_mode": "active_wallet_account", "action": "supply",
-                "amount_mode": "exact", "amount": "1",
-            }, action_id=ACTION_ID,
-        )
+        service = self.lending_service()
+        request = lending_request()
         response = service.handle(request, owner_pid=101)
         self.assertEqual(response.kind, MessageKind.PROTECTED_FLOW_STARTED)
         self.assertEqual(self.wallet.lending_prepare_calls, 1)
@@ -311,6 +337,138 @@ class AuthorityTests(unittest.TestCase):
         self.assertEqual(
             service.handle(request, owner_pid=101).payload["code"], "ACTION_REPLAYED",
         )
+
+    def test_lending_third_equivalent_request_persists_global_block(self) -> None:
+        now = [100.0]
+        self.audit.requests.clock = lambda: now[0]
+        service = self.lending_service()
+        first = service.handle(lending_request(), owner_pid=101)
+        second = service.handle(
+            lending_request("act-44444444-4444-4444-8444-444444444444"),
+            owner_pid=101,
+        )
+        third = service.handle(
+            lending_request("act-55555555-5555-4555-8555-555555555555"),
+            owner_pid=101,
+        )
+        self.assertEqual(first.kind, MessageKind.PROTECTED_FLOW_STARTED)
+        self.assertEqual(second.payload["code"], "ACTION_ALREADY_ACTIVE")
+        self.assertEqual(third.payload["code"], "REQUEST_TEMPORARILY_BLOCKED")
+        self.assertEqual(self.wallet.lending_prepare_calls, 1)
+        self.assertEqual(self.wallet.lending_cancel_calls, 1)
+        self.assertEqual(self.lifecycle.snapshot.state.value, "RECOVERY_REQUIRED")
+        states = {
+            record.action_id: record.state
+            for record in self.lifecycle.ledger.snapshot.terminal
+        }
+        self.assertEqual(states[third.action_id], ActionState.REFUSED)
+        self.assertEqual(states[first.action_id], ActionState.RECOVERY_REQUIRED)
+        block_events = [
+            event for event in self.audit.journal.events()
+            if event.event_type is EventType.REQUEST_BLOCK_STARTED
+        ]
+        self.assertEqual(len(block_events), 1)
+        self.assertEqual(
+            block_events[0].public_fields["recipient"],
+            ActionProfilesState.load().select("aave-v3-base-usdc").target,
+        )
+
+        self.audit.requests = RequestController(
+            self.audit.requests.store, self.audit.requests.store.load(),
+            clock=lambda: now[0],
+        )
+        different = service.handle(
+            lending_request(
+                "act-66666666-6666-4666-8666-666666666666", amount="2",
+            ),
+            owner_pid=101,
+        )
+        self.assertEqual(different.payload["code"], "REQUEST_TEMPORARILY_BLOCKED")
+
+        recovery = make_envelope(
+            MessageKind.RECOVER_ACTION, {}, action_id=first.action_id,
+        )
+        self.assertEqual(service.handle(recovery, None).payload["guard_state"], "NORMAL")
+        now[0] = 401.0
+        resumed = service.handle(
+            lending_request(
+                "act-77777777-7777-4777-8777-777777777777", amount="2",
+            ),
+            owner_pid=101,
+        )
+        self.assertEqual(resumed.kind, MessageKind.PROTECTED_FLOW_STARTED)
+        self.assertIn(
+            EventType.REQUEST_BLOCK_EXPIRED,
+            {event.event_type for event in self.audit.journal.events()},
+        )
+
+    def test_lending_request_control_write_failure_fails_closed_before_wallet(self) -> None:
+        service = self.lending_service()
+        with patch.object(
+            self.audit.requests.store, "save", side_effect=OSError("canary"),
+        ):
+            response = service.handle(lending_request(), owner_pid=101)
+        self.assertEqual(response.payload["code"], "REQUEST_CONTROL_STATE_INVALID")
+        self.assertEqual(self.lifecycle.snapshot.state.value, "SIGNING_DISABLED")
+        self.assertEqual(self.wallet.lending_prepare_calls, 0)
+
+    def test_lending_refusal_ledger_failures_disable_signing(self) -> None:
+        disabled_v3 = Policy("3", "2", False, (), False, ())
+        service = self.lending_service(disabled_v3)
+        with patch.object(
+            self.lifecycle.ledger.store, "save", side_effect=OSError("canary"),
+        ):
+            preliminary = service.handle(lending_request(), owner_pid=101)
+        self.assertEqual(preliminary.payload["code"], "ACTION_STATE_INVALID")
+        self.assertEqual(self.wallet.lending_prepare_calls, 0)
+        self.assertEqual(
+            service.handle(lending_request(), owner_pid=101).payload["code"],
+            "ACTION_STATE_INVALID",
+        )
+
+    def test_lending_all_preview_refusal_ledger_failure_disables_signing(self) -> None:
+        service = self.lending_service()
+        with patch.object(
+            self.lifecycle.ledger.store, "save", side_effect=OSError("canary"),
+        ):
+            response = service.handle(
+                lending_request(action="withdraw", amount_mode="all", amount=None),
+                owner_pid=101,
+            )
+        self.assertEqual(response.payload["code"], "ACTION_STATE_INVALID")
+        self.assertEqual(self.wallet.lending_prepare_calls, 0)
+
+    def test_lending_final_policy_refusal_ledger_failure_disables_signing(self) -> None:
+        rule = LendingRule(
+            "lending", "1", "aave-v3-base-usdc", "1", "base", "usdc", 8453,
+            ("withdraw",), "500000", "100000000000000",
+            ACTION_PROFILES_DIGEST,
+        )
+        policy = Policy("3", "2", False, (), True, (rule,))
+        service = self.lending_service(policy)
+        self.wallet.preview_payload = {
+            "status": "PREVIEW_READY", "requested_action": "withdraw",
+            "amount_mode": "all", "amount_atomic": "999999",
+        }
+        with patch.object(
+            self.lifecycle.ledger.store, "save", side_effect=OSError("canary"),
+        ):
+            response = service.handle(
+                lending_request(action="withdraw", amount_mode="all", amount=None),
+                owner_pid=101,
+            )
+        self.assertEqual(response.payload["code"], "ACTION_STATE_INVALID")
+        self.assertEqual(self.wallet.lending_prepare_calls, 0)
+
+    def test_lending_journal_target_matches_selected_profile(self) -> None:
+        profiles = ActionProfilesState.load()
+        for profile in profiles.profiles:
+            with self.subTest(profile=profile.profile_id):
+                fields = AuthorityAudit.transfer_fields(
+                    lending_request(profile_id=profile.profile_id),
+                    amount_atomic="1000000", policy_version="3",
+                )
+                self.assertEqual(fields["recipient"], profile.target)
 
     def test_withdraw_all_resolves_position_before_starting_protected_flow(self) -> None:
         rule = LendingRule(

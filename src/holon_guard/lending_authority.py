@@ -5,11 +5,26 @@ from __future__ import annotations
 import hashlib
 import json
 
-from holon_contracts import MessageKind, RefusalCode
+from holon_contracts import MessageKind, RefusalCode, SecurityCode
 from holon_guard_ipc import GuardState
 from holon_journal import EventType
 from holon_lending.preflight import parse_lending_intent
 from .actions import ActionLedgerFailure
+from .request_control import RequestControlFailure
+
+
+def _ledger_failure(service, request, error: ActionLedgerFailure):
+    if error.code == SecurityCode.ACTION_STATE_INVALID.value:
+        return service.fail_closed_response(request, error.code)
+    return service.refusal(request, error.code, "Action cannot be prepared.")
+
+
+def _refuse_terminal(service, request, fingerprint: str, code: str):
+    try:
+        service.lifecycle.ledger.refuse(request.action_id or "", fingerprint, code)
+    except ActionLedgerFailure as error:
+        return _ledger_failure(service, request, error)
+    return None
 
 
 def prepare_lending_authority(service, request, owner_pid: int):
@@ -50,13 +65,12 @@ def prepare_lending_authority(service, request, owner_pid: int):
     )
     builtin = service.policy.policy.schema_version == "4"
     if not preliminary.allowed or (rule is None and not builtin):
-        try:
-            service.lifecycle.ledger.refuse(
-                request.action_id or "", request_fingerprint, preliminary.code,
-            )
-        except ActionLedgerFailure:
-            pass
-        return service.refusal(request, preliminary.code, preliminary.message)
+        failed = _refuse_terminal(
+            service, request, request_fingerprint, preliminary.code,
+        )
+        return failed or service.refusal(
+            request, preliminary.code, preliminary.message,
+        )
     if intent.amount_atomic is not None:
         resolved_amount = intent.amount_atomic
     else:
@@ -74,14 +88,12 @@ def prepare_lending_authority(service, request, owner_pid: int):
             ):
                 raise ValueError
         except Exception:
-            try:
-                service.lifecycle.ledger.refuse(
-                    request.action_id or "", request_fingerprint, "LENDING_PREFLIGHT_FAILED",
-                )
-            except ActionLedgerFailure:
-                pass
-            return service.refusal(
-                request, "LENDING_PREFLIGHT_FAILED", "Lending preflight is unavailable.",
+            code = "LENDING_PREFLIGHT_FAILED"
+            failed = _refuse_terminal(
+                service, request, request_fingerprint, code,
+            )
+            return failed or service.refusal(
+                request, code, "Lending preflight is unavailable.",
             )
     material["amount_atomic"] = str(resolved_amount)
     fingerprint = hashlib.sha256(
@@ -95,17 +107,55 @@ def prepare_lending_authority(service, request, owner_pid: int):
     payload["amount_atomic"] = resolved_amount
     decision, rule = service.policy.evaluate_lending_intent(payload, profile.digest)
     if not decision.allowed or (rule is None and not builtin):
-        try:
-            service.lifecycle.ledger.refuse(request.action_id or "", fingerprint, decision.code)
-        except ActionLedgerFailure:
-            pass
-        return service.refusal(request, decision.code, decision.message)
+        failed = _refuse_terminal(service, request, fingerprint, decision.code)
+        return failed or service.refusal(request, decision.code, decision.message)
     if not service.audit_transfer(
         EventType.POLICY_DECISION, decision.code, request, policy_result="ALLOWED",
         canonical_amount_atomic=str(resolved_amount),
         canonical_policy_version=service.policy.policy.policy_version,
     ):
         return service.security_response(request)
+    semantic_request = {
+        "action_type": "lending", "network": "base",
+        "recipient": "active_wallet_account", "asset": "usdc",
+        "amount_atomic": str(resolved_amount),
+    }
+    try:
+        control = service.audit.requests.observe(
+            semantic_request, contract=profile.target,
+            method=f"{intent.action}:{intent.amount_mode}",
+        )
+    except RequestControlFailure as error:
+        return service.fail_closed_response(request, error.code)
+    if control.expired and not service.audit_transfer(
+        EventType.REQUEST_BLOCK_EXPIRED, "REQUEST_BLOCK_EXPIRED", request,
+        canonical_amount_atomic=str(resolved_amount),
+        canonical_policy_version=service.policy.policy.policy_version,
+    ):
+        return service.security_response(request)
+    if control.blocked:
+        code = RefusalCode.REQUEST_TEMPORARILY_BLOCKED.value
+        failed = _refuse_terminal(service, request, fingerprint, code)
+        if failed is not None:
+            return failed
+        if control.triggered:
+            service.lifecycle.interrupt_for_security_block(code)
+            audit_fields = {
+                "guard_state": service.lifecycle.snapshot.state.value,
+                "canonical_amount_atomic": str(resolved_amount),
+                "canonical_policy_version": service.policy.policy.policy_version,
+            }
+            if not service.audit_transfer(
+                EventType.REQUEST_BLOCK_STARTED, code, request, **audit_fields,
+            ):
+                return service.security_response(request)
+            if not service.audit_transfer(
+                EventType.RECOVERY_REQUIRED, code, request, **audit_fields,
+            ):
+                return service.security_response(request)
+        return service.refusal(
+            request, code, "Authority requests are temporarily blocked.",
+        )
     result, prepared = service.lifecycle.start_lending_intent(
         owner_pid, request.action_id or "", fingerprint,
         {

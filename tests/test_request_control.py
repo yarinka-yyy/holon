@@ -22,6 +22,12 @@ TRANSFER = {
     "recipient": "0x1111111111111111111111111111111111111111",
     "max_total_fee_wei": "500",
 }
+LENDING = {
+    "action_type": "lending", "network": "base",
+    "asset": "usdc", "amount_atomic": "1000000",
+    "recipient": "active_wallet_account",
+}
+LENDING_TARGET = "0xA238Dd80C259a72e81d7e4664a9801593F98d1c5"
 
 
 class RequestControlTests(unittest.TestCase):
@@ -47,6 +53,42 @@ class RequestControlTests(unittest.TestCase):
         second = semantic_fingerprint(TRANSFER, contract=contract, selector="0xa9059cbb")
         self.assertEqual(first, second)
         self.assertNotEqual(first, semantic_fingerprint(TRANSFER))
+
+    def test_lending_semantics_bind_target_action_mode_and_amount(self) -> None:
+        first = self.controller.observe(
+            LENDING, contract=LENDING_TARGET, method="supply:exact",
+        )
+        equivalent = self.controller.observe(
+            dict(LENDING), contract=LENDING_TARGET.lower(), method="SUPPLY:EXACT",
+        )
+        self.assertEqual(first.fingerprint, equivalent.fingerprint)
+        self.assertNotEqual(
+            first.fingerprint,
+            semantic_fingerprint(
+                dict(LENDING, amount_atomic="999999"),
+                contract=LENDING_TARGET, method="supply:exact",
+            ),
+        )
+        self.assertNotEqual(
+            first.fingerprint,
+            semantic_fingerprint(
+                LENDING, contract=LENDING_TARGET, method="withdraw:exact",
+            ),
+        )
+        self.assertNotEqual(
+            first.fingerprint,
+            semantic_fingerprint(
+                LENDING, contract=LENDING_TARGET, method="supply:all",
+            ),
+        )
+        self.assertNotEqual(
+            first.fingerprint,
+            semantic_fingerprint(
+                LENDING,
+                contract="0xb125E6687d4313864e53df431d5425969c15Eb2F",
+                method="supply:exact",
+            ),
+        )
 
     def test_third_equivalent_request_starts_global_persistent_block(self) -> None:
         self.assertFalse(self.controller.observe(TRANSFER).blocked)
