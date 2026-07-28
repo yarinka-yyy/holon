@@ -3717,6 +3717,17 @@ class WalletController(QObject):
         if not keep:
             self._external_transfer = None
             self._external_completion = None
+        release_approve = bool(
+            event == "RECEIPT_CONFIRMED"
+            and context.get("executed_phase") == "approve"
+        )
+        if release_approve:
+            # Guard may prepare supply as soon as it receives this callback.
+            # Release the confirmed approve before queuing that callback so the
+            # next authority request cannot observe Wallet as busy.
+            self._clear_mainnet_result()
+            self._cancel_transfer_request(clear_recipient=True)
+            self._set_screen("main")
         try:
             sender(update)
         except Exception:

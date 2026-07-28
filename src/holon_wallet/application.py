@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sys
-from concurrent.futures import Executor
+from concurrent.futures import Executor, ThreadPoolExecutor
 from importlib.resources import as_file, files
 from pathlib import Path
 from threading import Event
@@ -43,6 +43,22 @@ from .vault import VaultRepository
 WINDOW_TITLE = "Holon Wallet"
 MUTEX_NAME = r"Local\HolonWallet.M3.01"
 _RECOVERY_TYPE_REGISTERED = False
+
+
+class _SerialStatusSender:
+    """Keep Guard callbacks ordered without blocking the Qt event loop."""
+
+    def __init__(self, client: WalletStatusClient) -> None:
+        self._client = client
+        self._executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="holon-wallet-status",
+        )
+
+    def send(self, update: dict[str, object]) -> None:
+        self._executor.submit(self._client.send, dict(update))
+
+    def close(self) -> None:
+        self._executor.shutdown(wait=True, cancel_futures=False)
 
 
 def _wallet_policy_path() -> Path | None:
@@ -256,6 +272,7 @@ class WalletApplication:
         self._control_server: WalletControlServer | None = None
         self._authority_bridge: _AuthorityBridge | None = None
         self._authority_server: WalletAuthorityServer | None = None
+        self._status_sender: _SerialStatusSender | None = None
         if control_pipe_name is not None:
             self._control_bridge = _ControlBridge(self)
             self._control_server = control_server_factory(
@@ -271,7 +288,8 @@ class WalletApplication:
             )
             self._authority_server.start()
             status = status_client or WalletStatusClient()
-            self.controller.attach_guard_status_sender(status.send)
+            self._status_sender = _SerialStatusSender(status)
+            self.controller.attach_guard_status_sender(self._status_sender.send)
 
     def _record_warnings(self, warnings: list[object]) -> None:
         self.qml_warnings.extend(str(warning.toString()) for warning in warnings)
@@ -286,6 +304,9 @@ class WalletApplication:
         if self._control_server is not None:
             self._control_server.stop()
             self._control_server = None
+        if self._status_sender is not None:
+            self._status_sender.close()
+            self._status_sender = None
         self.controller.shutdown()
         self.window.close()
         self.window.deleteLater()

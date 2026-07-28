@@ -6,6 +6,7 @@ import secrets
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Event
 
 os.environ.setdefault("QT_PREFERRED_PHYSICAL_DEVICE", "cpu")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -18,6 +19,7 @@ from PySide6.QtTest import QTest
 
 from holon_wallet.application import (
     WalletApplication,
+    _SerialStatusSender,
     _load_wallet_transfer_policy,
     _wallet_policy_path,
 )
@@ -39,6 +41,29 @@ from wallet_public_support import (
     StubTransferPreflightService,
     mainnet_services,
 )
+
+
+def test_guard_status_callbacks_are_non_blocking_and_ordered() -> None:
+    entered, release = Event(), Event()
+    calls: list[str] = []
+
+    class BlockingStatusClient:
+        def send(self, update: dict[str, object]) -> None:
+            calls.append(str(update["event"]))
+            if len(calls) == 1:
+                entered.set()
+                assert release.wait(2.0)
+
+    sender = _SerialStatusSender(BlockingStatusClient())
+    try:
+        sender.send({"event": "BROADCASTED"})
+        assert entered.wait(1.0)
+        sender.send({"event": "RECEIPT_CONFIRMED"})
+        assert calls == ["BROADCASTED"]
+        release.set()
+    finally:
+        sender.close()
+    assert calls == ["BROADCASTED", "RECEIPT_CONFIRMED"]
 
 
 def test_wallet_runtime_policy_uses_packaged_file_and_source_baseline(

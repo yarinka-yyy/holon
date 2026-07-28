@@ -667,6 +667,34 @@ def test_guard_handoff_lands_on_exact_review_and_edit_rejects(tmp_path) -> None:
     assert statuses[0]["code"] == "TRANSFER_EDITED"
 
 
+def test_confirmed_lending_approve_releases_wallet_before_guard_callback(tmp_path) -> None:
+    item = controller(tmp_path)
+    observed: list[tuple[str, bool, bool]] = []
+    item._external_transfer = {
+        "flow_id": "11111111-1111-4111-8111-111111111111",
+        "action_id": "act-22222222-2222-4222-8222-222222222222",
+        "operation_id": "act-33333333-3333-4333-8333-333333333333",
+        "phase_action_id": "act-22222222-2222-4222-8222-222222222222",
+        "prepared_digest": "a" * 64,
+        "executed_phase": "approve",
+    }
+    item._external_completion = lambda _response: None
+    item._transfer_preparing = True
+    item._transfer_recipient = "Aave V3"
+    item.attach_guard_status_sender(lambda update: observed.append((
+        str(update["event"]), item._transfer_preparing,
+        item._transfer_flow.current is not None,
+    )))
+
+    item._notify_external_transfer("RECEIPT_CONFIRMED", "CONFIRMED")
+
+    assert observed == [("RECEIPT_CONFIRMED", False, False)]
+    assert item._external_transfer is None
+    assert item._external_completion is None
+    assert item.transferRecipient == ""
+    assert item.currentScreen == "main"
+
+
 def test_guard_handoff_refuses_busy_and_reserved_sender(tmp_path) -> None:
     item = controller(tmp_path)
     secret = password()
