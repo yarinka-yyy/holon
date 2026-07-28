@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_HALF_UP
 from typing import Any, Mapping
 
 from .prices import PriceSnapshot, format_usd
@@ -23,9 +23,9 @@ def lending_portfolio_to_map(
     return {
         "status": str(payload.get("status", "DEGRADED")),
         "code": str(payload.get("code", "LENDING_PORTFOLIO_UNAVAILABLE")),
-        "totalPosition": summary.get("display_total_position") or "Data unavailable",
+        "totalPosition": _usdc(summary.get("total_position_atomic")),
         "totalUsd": _usd(summary.get("total_position_atomic"), prices),
-        "trackedEarnings": summary.get("display_tracked_earnings") or "Not enough history",
+        "trackedEarnings": _earnings(summary),
         "earningsAvailable": summary.get("earnings_status") == "AVAILABLE",
         "weightedYield": _percent(summary.get("weighted_confirmed_annual_percent")),
         "yieldCompleteness": str(summary.get("yield_completeness", "PARTIAL")),
@@ -61,22 +61,17 @@ def _protocol_to_map(value: object, prices: PriceSnapshot) -> dict[str, object]:
             "compound-v3": "assets/compound-logo-white.svg",
             "morpho-v1": "assets/morpho-logo-white.svg",
         }.get(protocol, "assets/usdc.png"),
-        "position": item.get("display_position") or "Data unavailable",
+        "position": _usdc(position_atomic),
         "positionUsd": _usd(position_atomic, prices),
         "positionKnown": position_known,
         "hasPosition": has_position,
         "confirmedEmpty": position_known and int(position_atomic) == 0 and data_state == "LIVE",
-        "baseYield": (
-            f"{base.get('value_percent')}% {base.get('metric')}"
-            if base.get("value_percent") is not None else "Unavailable"
-        ),
+        "baseYield": _yield_with_metric(base),
         "comparisonYield": _percent(base.get("comparison_apy_percent")),
-        "incentives": (
-            f"{incentive_value}% APR" if incentive_value is not None else "Unknown"
-        ),
+        "incentives": _incentives(incentive_value),
         "confirmedTotal": _percent(item.get("confirmed_total_annual_percent")),
         "completeTotal": item.get("total_completeness") == "BASE_AND_INCENTIVES",
-        "earnings": item.get("display_tracked_earnings") or "Not enough history",
+        "earnings": _earnings(item),
         "earningsAvailable": item.get("earnings_status") == "AVAILABLE",
         "trackedSince": item.get("tracked_since") or "",
         "dataState": data_state,
@@ -142,7 +137,49 @@ def _usd(atomic: object, prices: PriceSnapshot) -> str:
 
 
 def _percent(value: object) -> str:
-    return f"{value}%" if isinstance(value, str) else "Unavailable"
+    rendered = _decimal(value, ROUND_HALF_UP)
+    return f"{rendered}%" if rendered is not None else "Unavailable"
+
+
+def _yield_with_metric(value: Mapping[str, Any]) -> str:
+    percent = _percent(value.get("value_percent"))
+    metric = value.get("metric")
+    return f"{percent} {metric}" if percent != "Unavailable" and metric else "Unavailable"
+
+
+def _incentives(value: object) -> str:
+    percent = _percent(value)
+    return f"{percent} APR" if percent != "Unavailable" else "Unknown"
+
+
+def _earnings(value: Mapping[str, Any]) -> str:
+    if value.get("earnings_status") != "AVAILABLE":
+        return "Not enough history"
+    return _usdc(value.get("tracked_earnings_atomic"))
+
+
+def _usdc(value: object) -> str:
+    if not isinstance(value, str) or not value.lstrip("-").isdecimal():
+        return "Data unavailable"
+    amount = Decimal(value).scaleb(-6)
+    rendered = _decimal(amount, ROUND_DOWN)
+    return f"{rendered} USDC" if rendered is not None else "Data unavailable"
+
+
+def _decimal(value: object, rounding: str) -> str | None:
+    if not isinstance(value, (str, Decimal)):
+        return None
+    try:
+        number = Decimal(value)
+        if not number.is_finite():
+            return None
+        rounded = number.quantize(Decimal("0.01"), rounding=rounding)
+    except (InvalidOperation, ValueError):
+        return None
+    if rounded == 0:
+        rounded = abs(rounded)
+    sign = "−" if rounded < 0 else ""
+    return f"{sign}{abs(rounded):.2f}"
 
 
 def _number(value: object, scale: int = 0) -> float | None:

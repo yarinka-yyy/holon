@@ -27,13 +27,13 @@ Item {
         anchors.right: parent.right; anchors.rightMargin: 34; y: 14; spacing: 3
         Text {
             anchors.right: parent.right
-            text: root.amountsVisible ? (root.asset.amount || "Data unavailable") : "••••••"
+            text: root.amountsVisible ? (root.asset.usd || "Data unavailable") : "••••••"
             color: Design.text; font.family: Design.fontFamily; font.pixelSize: 15
             font.weight: Font.Medium
         }
         Text {
             anchors.right: parent.right
-            text: root.amountsVisible ? (root.asset.usd || "Data unavailable") : "••••••"
+            text: root.amountsVisible ? (root.asset.amount || "Data unavailable") : "••••••"
             color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 13
         }
     }

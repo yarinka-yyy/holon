@@ -525,7 +525,12 @@ def _lending_asset_model(
 
 def _format_token(value: int, decimals: int, symbol: str) -> str:
     decimal_value = Decimal(value).scaleb(-decimals)
-    maximum_decimals = 6 if symbol == "ETH" else decimals
+    if symbol == "USDC":
+        rounded = decimal_value.quantize(Decimal("0.01"), rounding=ROUND_DOWN)
+        if rounded == 0:
+            rounded = abs(rounded)
+        return f"{rounded:.2f} {symbol}"
+    maximum_decimals = 6
     quantum = Decimal(1).scaleb(-maximum_decimals)
     if decimal_value:
         decimal_value = decimal_value.quantize(quantum, rounding=ROUND_DOWN)

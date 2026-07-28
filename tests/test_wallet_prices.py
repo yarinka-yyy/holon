@@ -128,7 +128,7 @@ def test_portfolio_totals_and_breakdown_are_exact_and_fail_closed() -> None:
     assert model["totalAvailable"] is True
     assert model["totalUsd"] == "$7,505.00"
     assert model["assets"][0]["amount"] == "3 ETH"
-    assert model["assets"][1]["amount"] == "5 USDC"
+    assert model["assets"][1]["amount"] == "5.00 USDC"
     assert len(model["assets"][0]["breakdown"]) == 2
 
     snapshots["base"] = public_snapshot("base", PublicDataStatus.UNAVAILABLE)
@@ -186,6 +186,7 @@ def test_lending_positions_extend_all_and_base_without_double_counting() -> None
         "eth", "usdc", "aave-v3", "compound-v3",
     ]
     assert combined["networks"][1]["totalUsd"] == "$5,033.00"
+    assert combined["assets"][2]["amount"] == "10.00 USDC"
 
     ethereum = portfolio_to_map(snapshots, prices, "ethereum", lending)
     assert ethereum["totalUsd"] == "$2,502.00"
@@ -227,3 +228,46 @@ def test_lending_cards_hide_only_live_confirmed_zero_positions() -> None:
     assert [item["protocol"] for item in cached["visibleProtocols"]] == [
         "aave-v3", "compound-v3", "morpho-v1",
     ]
+
+
+def test_wallet_lending_display_uses_two_decimal_usdc_and_rates() -> None:
+    prices = PriceSnapshot(
+        8453, PriceStatus.LIVE,
+        (AssetPrice("usdc", "USDC", PriceStatus.LIVE, 100_000_000, 8, NOW),),
+        NOW,
+    )
+    payload = LendingPortfolioService.unavailable({
+        "label": "Main Account",
+        "address": "0x1111111111111111111111111111111111111111",
+    })
+    payload["summary"].update({
+        "total_position_atomic": "999999",
+        "tracked_earnings_atomic": "-1",
+        "earnings_status": "AVAILABLE",
+        "weighted_confirmed_annual_percent": "3.460607",
+    })
+    payload["protocols"][0].update({
+        "position_atomic": "999999",
+        "tracked_earnings_atomic": "123456",
+        "earnings_status": "AVAILABLE",
+        "base_yield": {
+            "value_percent": "3.460607",
+            "comparison_apy_percent": "3.521234",
+            "metric": "APR",
+        },
+        "incentives": {"total_apr_percent": "0.006789"},
+        "confirmed_total_annual_percent": "3.467396",
+    })
+
+    result = lending_portfolio_to_map(payload, prices)
+
+    assert result["totalPosition"] == "0.99 USDC"
+    assert result["trackedEarnings"] == "0.00 USDC"
+    assert result["weightedYield"] == "3.46%"
+    aave = result["protocols"][0]
+    assert aave["position"] == "0.99 USDC"
+    assert aave["earnings"] == "0.12 USDC"
+    assert aave["baseYield"] == "3.46% APR"
+    assert aave["comparisonYield"] == "3.52%"
+    assert aave["incentives"] == "0.01% APR"
+    assert aave["confirmedTotal"] == "3.47%"

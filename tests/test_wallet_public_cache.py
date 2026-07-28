@@ -95,7 +95,7 @@ def test_controller_displays_cache_immediately_while_refresh_is_pending(tmp_path
         assert controller.publicDataUpdatedText == "Cached · updating…"
         assert "CACHED DATA" in controller.publicDataBanner
         assert controller.portfolioData["totalAvailable"] is True
-        assert controller.portfolioData["assets"][1]["amount"] == "9.5 USDC"
+        assert controller.portfolioData["assets"][1]["amount"] == "9.50 USDC"
         assert controller.maximumTransferAmount(
             "base", "usdc", "0x" + "44" * 20,
         ) == ""
