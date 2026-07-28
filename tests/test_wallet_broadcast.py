@@ -459,6 +459,63 @@ def test_history_hash_gate_blocks_broadcast_on_atomic_failure(
     assert "canary" not in repr(result).lower()
 
 
+def test_final_expiry_gate_blocks_send_after_history_persistence(
+    tmp_path, monkeypatch,
+) -> None:
+    repository, history, action, password, _secret, rpc = prepared_fixture(tmp_path)
+    expired = False
+    original_update = history.update_status
+
+    def update_then_expire(*args, **kwargs):
+        nonlocal expired
+        result = original_update(*args, **kwargs)
+        expired = True
+        return result
+
+    monkeypatch.setattr(history, "update_status", update_then_expire)
+    result = executor(
+        repository,
+        history,
+        rpc,
+        clock=lambda: action.expires_at if expired else NOW,
+    ).execute(action, action.digest, password, SigningPermit())
+
+    assert result.code is MainnetTransferCode.ACTION_EXPIRED
+    assert not result.broadcast_attempted
+    assert rpc.send_calls == 0
+
+
+def test_final_cancel_gate_blocks_send_after_policy_evaluation(
+    tmp_path, monkeypatch,
+) -> None:
+    repository, history, action, password, _secret, rpc = prepared_fixture(tmp_path)
+    permit = SigningPermit()
+    from holon_wallet import broadcast as broadcast_module
+
+    original_evaluate = broadcast_module._evaluate_policy
+    evaluations = 0
+
+    def cancel_on_final_evaluation(policy, revoke_policy, candidate):
+        nonlocal evaluations
+        evaluations += 1
+        result = original_evaluate(policy, revoke_policy, candidate)
+        if evaluations == 3:
+            permit.cancel()
+        return result
+
+    monkeypatch.setattr(
+        broadcast_module, "_evaluate_policy", cancel_on_final_evaluation,
+    )
+    result = executor(repository, history, rpc).execute(
+        action, action.digest, password, permit,
+    )
+
+    assert evaluations == 3
+    assert result.code is MainnetTransferCode.CANCELLED
+    assert not result.broadcast_attempted
+    assert rpc.send_calls == 0
+
+
 @pytest.mark.parametrize("mode", ["transport", "hash_mismatch"])
 def test_ambiguous_submission_is_unknown_and_never_retried(tmp_path, mode) -> None:
     repository, history, action, password, _secret, rpc = prepared_fixture(tmp_path)

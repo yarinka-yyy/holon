@@ -363,6 +363,97 @@ class PluginTests(unittest.TestCase):
         connector.health = GuardHealth.uncertain()
         self.assertEqual(runtime.pre_tool_call("terminal")["action"], "block")
 
+    def test_ambiguous_authority_dispatch_latches_transfer_and_lending(self) -> None:
+        cases = (
+            (
+                "prepare_transfer",
+                {
+                    "network": "base", "asset": "eth", "amount": "0.01",
+                    "recipient": "0x1111111111111111111111111111111111111111",
+                },
+                "handle_prepare_transfer",
+            ),
+            (
+                "lending_action_execute",
+                {"action": "supply", "amount_mode": "exact", "amount": "1"},
+                "handle_lending_execute",
+            ),
+        )
+        for connector_method, params, handler_name in cases:
+            with self.subTest(handler=handler_name):
+                connector = StaticConnector(GuardHealth.available(GuardState.NORMAL))
+                runtime = plugin.PluginRuntime(connector)
+                observed: list[str] = []
+
+                def timed_out(_payload, action_id):
+                    observed.append(action_id)
+                    raise TimeoutError("response lost")
+
+                with patch.object(connector, connector_method, side_effect=timed_out):
+                    result = json.loads(getattr(runtime, handler_name)(params))
+                self.assertEqual(result["status"], "DEGRADED")
+                self.assertEqual(observed, [result["action_id"]])
+                connector.health = GuardHealth.uncertain()
+                self.assertEqual(runtime.pre_tool_call("terminal")["action"], "block")
+                for tool_name in (
+                    "holon_action_status", "holon_cancel_action", "holon_recover_action",
+                ):
+                    self.assertIsNone(runtime.pre_tool_call(tool_name))
+                connector.health = GuardHealth.available(GuardState.NORMAL)
+                self.assertIsNone(runtime.pre_tool_call("terminal"))
+
+    def test_correlated_refusal_clears_only_exact_dispatch_latch(self) -> None:
+        connector = StaticConnector(GuardHealth.uncertain())
+        runtime = plugin.PluginRuntime(connector)
+
+        def refusal(_payload, action_id):
+            return make_envelope(
+                MessageKind.REFUSAL,
+                {"code": "ACTION_REPLAYED", "message": "Refused.", "retryable": False},
+                action_id=action_id,
+            )
+
+        with patch.object(connector, "prepare_transfer", side_effect=refusal):
+            result = json.loads(runtime.handle_prepare_transfer({
+                "network": "base", "asset": "eth", "amount": "0.01",
+                "recipient": "0x1111111111111111111111111111111111111111",
+            }))
+        self.assertEqual(result["status"], "REFUSED")
+        self.assertIsNone(runtime.pre_tool_call("terminal"))
+
+        action_id = "act-22222222-2222-4222-8222-222222222222"
+        self.assertTrue(runtime._begin_protected_dispatch(action_id))
+        runtime._finish_protected_dispatch(make_envelope(
+            MessageKind.REFUSAL,
+            {"code": "ACTION_REPLAYED", "message": "Refused.", "retryable": False},
+            action_id="act-33333333-3333-4333-8333-333333333333",
+        ), action_id)
+        self.assertEqual(runtime.pre_tool_call("terminal")["action"], "block")
+
+        disabled = plugin.PluginRuntime(
+            StaticConnector(GuardHealth.uncertain()),
+        )
+        self.assertTrue(disabled._begin_protected_dispatch(action_id))
+        disabled._finish_protected_dispatch(make_envelope(
+            MessageKind.SIGNING_DISABLED,
+            {
+                "guard_state": "SIGNING_DISABLED",
+                "authority_available": False,
+                "code": "SIGNING_DISABLED",
+                "message": "Authority is disabled.",
+            },
+            action_id=action_id,
+        ), action_id)
+        self.assertIsNone(disabled.pre_tool_call("terminal"))
+
+    def test_invalid_authority_arguments_do_not_create_latch(self) -> None:
+        connector = StaticConnector(GuardHealth.uncertain())
+        runtime = plugin.PluginRuntime(connector)
+        runtime.handle_prepare_transfer({"network": "base", "password": "hidden"})
+        self.assertIsNone(runtime.pre_tool_call("terminal"))
+        runtime.handle_lending_execute({"action": "supply", "amount_mode": "all"})
+        self.assertIsNone(runtime.pre_tool_call("terminal"))
+
     def test_callback_exception_uses_existing_latch(self) -> None:
         connector = StaticConnector(GuardHealth.available(GuardState.ACTIVE))
         runtime = plugin.PluginRuntime(connector)

@@ -303,6 +303,7 @@ class WalletController(QObject):
         self._transfer_amount_input = ""
         self._external_transfer: dict[str, object] | None = None
         self._external_completion: Callable[[dict[str, object]], None] | None = None
+        self._external_begin_delivery: Callable[[], bool] | None = None
         self._guard_status_sender: Callable[[dict[str, object]], None] | None = None
         self._mainnet_in_progress = False
         self._mainnet_result: MainnetTransferResult | None = None
@@ -1168,6 +1169,7 @@ class WalletController(QObject):
         self,
         request: dict[str, object],
         completion: Callable[[dict[str, object]], None],
+        begin_delivery: Callable[[], bool] | None = None,
     ) -> None:
         active = self._state.active_profile
         busy = (
@@ -1226,6 +1228,7 @@ class WalletController(QObject):
         self._transfer_amount_input = format_atomic_amount(amount_atomic, route.decimals)
         self._external_transfer = dict(request)
         self._external_completion = completion
+        self._external_begin_delivery = begin_delivery
         self._set_transfer_error("")
         self._transfer_preparing = True
         self._transfer_generation += 1
@@ -1242,6 +1245,7 @@ class WalletController(QObject):
         self,
         request: dict[str, object],
         completion: Callable[[dict[str, object]], None],
+        begin_delivery: Callable[[], bool] | None = None,
     ) -> None:
         active = self._state.active_profile
         if (
@@ -1291,6 +1295,7 @@ class WalletController(QObject):
             return
         self._external_transfer = dict(request)
         self._external_completion = completion
+        self._external_begin_delivery = begin_delivery
         self._transfer_network = "base"
         self._transfer_asset = "usdc"
         self._transfer_recipient = {
@@ -1324,6 +1329,7 @@ class WalletController(QObject):
             return self._external_refusal(request, "ACTION_MISMATCH")
         self._external_transfer = None
         self._external_completion = None
+        self._external_begin_delivery = None
         self._cancel_transfer_request(clear_recipient=True)
         self._guard_open_notice = "Transfer cancelled by Hermes"
         self.guardNoticeChanged.emit()
@@ -1335,6 +1341,20 @@ class WalletController(QObject):
             "flow_id": request["flow_id"], "action_id": request["action_id"],
             "code": "ACTION_CANCELLED",
         }
+
+    def expireExternalRequest(self, request: dict[str, object]) -> bool:
+        context = self._external_transfer
+        if (
+            context is None
+            or request.get("flow_id") != context.get("flow_id")
+            or request.get("action_id") != context.get("action_id")
+        ):
+            return False
+        self._external_transfer = None
+        self._external_completion = None
+        self._external_begin_delivery = None
+        self._cancel_transfer_request(clear_recipient=True)
+        return True
 
     @staticmethod
     def _external_refusal(
@@ -3425,6 +3445,13 @@ class WalletController(QObject):
     def _accept_transfer_preflight(self, generation: int, result: object) -> None:
         if generation != self._transfer_generation or self._closed:
             return
+        context = self._external_transfer
+        begin_delivery = self._external_begin_delivery
+        if context is not None and begin_delivery is not None:
+            if not begin_delivery():
+                self.expireExternalRequest(context)
+                return
+            self._external_begin_delivery = None
         self._transfer_preparing = False
         active = self._state.active_profile
         if isinstance(result, (TransferPreflightError, LendingPreflightError)):
@@ -3506,6 +3533,7 @@ class WalletController(QObject):
         if completion is None or context is None:
             return
         self._external_completion = None
+        self._external_begin_delivery = None
         if action is None:
             self._external_transfer = None
             completion(self._external_refusal(context, code))
@@ -3725,6 +3753,7 @@ class WalletController(QObject):
         if not keep:
             self._external_transfer = None
             self._external_completion = None
+            self._external_begin_delivery = None
         release_approve = bool(
             event == "RECEIPT_CONFIRMED"
             and context.get("executed_phase") == "approve"

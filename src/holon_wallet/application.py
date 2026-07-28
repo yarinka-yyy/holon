@@ -6,7 +6,7 @@ import sys
 from concurrent.futures import Executor, ThreadPoolExecutor
 from importlib.resources import as_file, files
 from pathlib import Path
-from threading import Event
+from threading import Event, Lock
 
 from PySide6.QtCore import QObject, QSize, Qt, QUrl, Signal, Slot
 from PySide6.QtGui import QColor, QCloseEvent, QFont, QFontDatabase, QGuiApplication, QIcon
@@ -59,6 +59,49 @@ class _SerialStatusSender:
 
     def close(self) -> None:
         self._executor.shutdown(wait=True, cancel_futures=False)
+
+
+class _AuthorityRequestGate:
+    """Choose exactly one timeout or Wallet delivery outcome."""
+
+    def __init__(self) -> None:
+        self.event = Event()
+        self._lock = Lock()
+        self._state = "PENDING"
+        self._response: dict[str, object] | None = None
+
+    def begin_delivery(self) -> bool:
+        with self._lock:
+            if self._state != "PENDING":
+                return False
+            self._state = "DELIVERING"
+            return True
+
+    def complete(self, response: dict[str, object]) -> bool:
+        with self._lock:
+            if self._state not in {"PENDING", "DELIVERING"}:
+                return False
+            self._response = dict(response)
+            self._state = "COMPLETED"
+            self.event.set()
+            return True
+
+    def timeout(self) -> bool:
+        with self._lock:
+            if self._state != "PENDING":
+                return False
+            self._state = "TIMED_OUT"
+            return True
+
+    @property
+    def timed_out(self) -> bool:
+        with self._lock:
+            return self._state == "TIMED_OUT"
+
+    @property
+    def response(self) -> dict[str, object] | None:
+        with self._lock:
+            return None if self._response is None else dict(self._response)
 
 
 def _wallet_policy_path() -> Path | None:
@@ -120,37 +163,69 @@ class _ControlBridge(QObject):
 
 class _AuthorityBridge(QObject):
     requested = Signal(object)
+    timedOut = Signal(object)
 
-    def __init__(self, application: "WalletApplication") -> None:
+    def __init__(
+        self, application: "WalletApplication", response_timeout: float = 24.0,
+    ) -> None:
         super().__init__()
         self._application = application
+        self._response_timeout = response_timeout
         self.requested.connect(self._handle)
+        self.timedOut.connect(self._handle_timeout)
 
     def request(self, request: dict[str, object]) -> dict[str, object]:
-        pending = {"request": request, "event": Event(), "response": None}
+        gate = _AuthorityRequestGate()
+        pending = {"request": request, "gate": gate}
         self.requested.emit(pending)
-        if not pending["event"].wait(24.0) or not isinstance(pending["response"], dict):
+        if not gate.event.wait(self._response_timeout):
+            if gate.timeout():
+                self.timedOut.emit(pending)
+                return WalletController._external_refusal(request, "WALLET_TIMEOUT")
+            gate.event.wait()
+        response = gate.response
+        if response is None:
             return WalletController._external_refusal(request, "WALLET_TIMEOUT")
-        return pending["response"]
+        return response
 
     @Slot(object)
     def _handle(self, pending: dict[str, object]) -> None:
         request = pending["request"]
+        gate = pending["gate"]
+        if not isinstance(request, dict) or not isinstance(gate, _AuthorityRequestGate):
+            return
+        if gate.timed_out:
+            return
         application = self._application
         application.window.showNormal()
         application.window.raise_()
         application.window.requestActivate()
 
         def complete(response: dict[str, object]) -> None:
-            pending["response"] = response
-            pending["event"].set()
+            gate.complete(response)
 
         if request.get("kind") in {"cancel_transfer", "cancel_action"}:
             complete(application.controller.cancelExternalTransfer(request))
         elif request.get("kind") == "prepare_lending_action":
-            application.controller.prepareExternalLending(request, complete)
+            application.controller.prepareExternalLending(
+                request, complete, gate.begin_delivery,
+            )
         else:
-            application.controller.prepareExternalTransfer(request, complete)
+            application.controller.prepareExternalTransfer(
+                request, complete, gate.begin_delivery,
+            )
+
+    @Slot(object)
+    def _handle_timeout(self, pending: dict[str, object]) -> None:
+        request = pending.get("request")
+        gate = pending.get("gate")
+        if (
+            isinstance(request, dict)
+            and isinstance(gate, _AuthorityRequestGate)
+            and gate.timed_out
+            and request.get("kind") in {"prepare_transfer", "prepare_lending_action"}
+        ):
+            self._application.controller.expireExternalRequest(request)
 
 
 class WalletApplication:

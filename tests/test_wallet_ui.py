@@ -4,9 +4,11 @@ import hashlib
 import os
 import secrets
 import sys
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from threading import Event
+from threading import Event, Thread
+from types import SimpleNamespace
 
 os.environ.setdefault("QT_PREFERRED_PHYSICAL_DEVICE", "cpu")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -19,6 +21,8 @@ from PySide6.QtTest import QTest
 
 from holon_wallet.application import (
     WalletApplication,
+    _AuthorityBridge,
+    _AuthorityRequestGate,
     _SerialStatusSender,
     _load_wallet_transfer_policy,
     _wallet_policy_path,
@@ -64,6 +68,86 @@ def test_guard_status_callbacks_are_non_blocking_and_ordered() -> None:
     finally:
         sender.close()
     assert calls == ["BROADCASTED", "RECEIPT_CONFIRMED"]
+
+
+def test_authority_request_gate_selects_exactly_one_terminal_outcome() -> None:
+    timed_out = _AuthorityRequestGate()
+    assert timed_out.timeout()
+    assert not timed_out.begin_delivery()
+    assert not timed_out.complete({"code": "LATE"})
+    assert timed_out.response is None
+
+    delivered = _AuthorityRequestGate()
+    assert delivered.begin_delivery()
+    assert not delivered.timeout()
+    assert delivered.complete({"code": "READY"})
+    assert delivered.response == {"code": "READY"}
+
+
+@pytest.mark.parametrize("kind", ["prepare_transfer", "prepare_lending_action"])
+def test_authority_bridge_timeout_rejects_late_delivery(
+    qt_app: QGuiApplication, kind: str,
+) -> None:
+    class Window:
+        def showNormal(self): return None
+        def raise_(self): return None
+        def requestActivate(self): return None
+
+    class Controller:
+        def __init__(self) -> None:
+            self.started = Event()
+            self.expired: list[dict[str, object]] = []
+            self.complete = None
+            self.begin_delivery = None
+
+        def _prepare(self, request, complete, begin_delivery) -> None:
+            del request
+            self.complete = complete
+            self.begin_delivery = begin_delivery
+            self.started.set()
+
+        prepareExternalTransfer = _prepare
+        prepareExternalLending = _prepare
+
+        def expireExternalRequest(self, request) -> bool:
+            self.expired.append(dict(request))
+            return True
+
+    controller = Controller()
+    bridge = _AuthorityBridge(
+        SimpleNamespace(window=Window(), controller=controller),
+        response_timeout=0.2,
+    )
+    request = {
+        "kind": kind,
+        "flow_id": "11111111-1111-4111-8111-111111111111",
+        "action_id": "act-22222222-2222-4222-8222-222222222222",
+    }
+    responses: list[dict[str, object]] = []
+    worker = Thread(target=lambda: responses.append(bridge.request(request)))
+    worker.start()
+    deadline = time.monotonic() + 1.0
+    while not controller.started.is_set() and time.monotonic() < deadline:
+        qt_app.processEvents()
+        QTest.qWait(1)
+    assert controller.started.is_set()
+    worker.join(timeout=1.0)
+    assert not worker.is_alive()
+    qt_app.processEvents()
+
+    assert responses[0]["code"] == "WALLET_TIMEOUT"
+    assert controller.expired == [request]
+    assert controller.begin_delivery is not None
+    assert not controller.begin_delivery()
+    assert controller.complete is not None
+    controller.complete({"code": "LATE_PREPARED"})
+    assert responses == [{
+        "authority_version": "2",
+        "kind": "transfer_refused",
+        "flow_id": request["flow_id"],
+        "action_id": request["action_id"],
+        "code": "WALLET_TIMEOUT",
+    }]
 
 
 def test_wallet_runtime_policy_uses_packaged_file_and_source_baseline(

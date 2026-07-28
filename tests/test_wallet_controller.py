@@ -10,6 +10,7 @@ from holon_policy import (
 )
 from holon_policy.baseline import BASELINE_POLICY_DIGEST
 from holon_policy.baseline import load_baseline_policy
+from holon_lending import ACTION_PROFILES_DIGEST
 
 from holon_wallet.broadcast import (
     TRANSFER_EVENT_TOPIC,
@@ -665,6 +666,84 @@ def test_guard_handoff_lands_on_exact_review_and_edit_rejects(tmp_path) -> None:
     assert item.transferAmountInput == "1"
     assert statuses[0]["event"] == "REJECTED"
     assert statuses[0]["code"] == "TRANSFER_EDITED"
+
+
+def test_timed_out_external_preflight_cannot_publish_transfer_or_lending(
+    tmp_path,
+) -> None:
+    for kind in ("prepare_transfer", "prepare_lending_action"):
+        item = controller(tmp_path / kind)
+        secret = password()
+        item.beginCreate()
+        assert item.submitPassword(secret, secret)
+        assert item.finishBackup()
+        deferred = DeferredExecutor()
+        item._transfer_executor = deferred
+        now = datetime.now(UTC).replace(microsecond=0)
+        common = {
+            "authority_version": "2",
+            "kind": kind,
+            "flow_id": "11111111-1111-4111-8111-111111111111",
+            "action_id": "act-22222222-2222-4222-8222-222222222222",
+            "created_at": now.isoformat().replace("+00:00", "Z"),
+            "expires_at": (now + timedelta(minutes=5)).isoformat().replace(
+                "+00:00", "Z",
+            ),
+        }
+        responses: list[dict[str, object]] = []
+        if kind == "prepare_transfer":
+            recipient = "0x" + "44" * 20
+            item._mainnet_executor.policy = recipient_policy(recipient)
+            request = {
+                **common,
+                "policy_version": "1",
+                "policy_revision": item._mainnet_executor.policy.policy_revision,
+                "policy_digest": item._mainnet_executor.policy.policy_digest_value,
+                "network": "base",
+                "asset": "usdc",
+                "amount_atomic": "500000",
+                "recipient": recipient,
+            }
+            item.prepareExternalTransfer(request, responses.append, lambda: False)
+        else:
+            item._mainnet_executor.policy = MainnetBroadcastPolicy.from_policy(
+                load_baseline_policy(),
+            )
+            assert item._mainnet_executor.policy.shared_engine is not None
+            request = {
+                **common,
+                "policy_version": (
+                    item._mainnet_executor.policy.shared_engine.policy.policy_version
+                ),
+                "policy_revision": item._mainnet_executor.policy.policy_revision,
+                "policy_digest": item._mainnet_executor.policy.policy_digest_value,
+                "action_profile_digest": ACTION_PROFILES_DIGEST,
+                "protocol_profile_id": "aave-v3-base-usdc",
+                "action": "supply",
+                "amount_mode": "exact",
+                "amount": "1",
+                "resolved_amount_atomic": "1000000",
+            }
+            item.prepareExternalLending(request, responses.append, lambda: False)
+
+        assert len(deferred.tasks) == 1
+        generation = item._transfer_generation
+        future, _fn, _args, _kwargs = deferred.tasks.pop()
+        future.set_result(object())
+
+        assert responses == []
+        assert item.currentScreen == "main"
+        assert item.transferAction == {}
+        assert item.historyRecords == []
+        assert item._transfer_flow.pending is None
+        assert item._transfer_flow.current is None
+        assert item._external_transfer is None
+        assert item._external_completion is None
+        assert item._external_begin_delivery is None
+
+        item._accept_transfer_preflight(generation, object())
+        assert item.currentScreen == "main"
+        assert item.historyRecords == []
 
 
 def test_confirmed_lending_approve_releases_wallet_before_guard_callback(tmp_path) -> None:

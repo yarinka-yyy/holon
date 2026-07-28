@@ -791,6 +791,16 @@ class MainnetTransferExecutor:
                     action, policy_code, transaction_hash, recovered,
                     history_status, False,
                 )
+            if permit.cancelled:
+                return self._result(
+                    action, MainnetTransferCode.CANCELLED, transaction_hash,
+                    recovered, history_status, False,
+                )
+            if self._clock().astimezone(UTC) >= action.expires_at:
+                return self._result(
+                    action, MainnetTransferCode.ACTION_EXPIRED, transaction_hash,
+                    recovered, history_status, False,
+                )
 
             broadcast_attempted = True
             try:

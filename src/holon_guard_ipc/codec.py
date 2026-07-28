@@ -12,6 +12,11 @@ IPC_VERSION = "1"
 MAX_MESSAGE_BYTES = 8 * 1024
 PIPE_NAME = r"\\.\pipe\Holon.Guard.v1"
 REQUEST_FIELDS = frozenset({"ipc_version", "message", "owner_pid"})
+OWNER_REQUIRED_KINDS = frozenset({
+    MessageKind.PREPARE_TRANSFER,
+    MessageKind.TRANSFER_INTENT,
+    MessageKind.LENDING_AUTHORITY_INTENT,
+})
 RESPONSE_FIELDS = frozenset({"ipc_version", "message"})
 
 
@@ -67,11 +72,7 @@ def validate_request(request: Mapping[str, Any]) -> tuple[ContractEnvelope, int 
     if envelope.kind not in REQUEST_KINDS:
         raise CodecError("Contract message is not a request")
     owner_pid = request.get("owner_pid")
-    requires_owner = envelope.kind in {
-        MessageKind.PREPARE_TRANSFER,
-        MessageKind.TRANSFER_INTENT,
-        MessageKind.LENDING_AUTHORITY_INTENT,
-    }
+    requires_owner = envelope.kind in OWNER_REQUIRED_KINDS
     if requires_owner and (type(owner_pid) is not int or owner_pid <= 0):
         raise CodecError("Invalid owner PID")
     if not requires_owner and owner_pid is not None:

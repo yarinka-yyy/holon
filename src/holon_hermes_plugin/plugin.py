@@ -6,7 +6,7 @@ import json
 from collections import OrderedDict
 from typing import Any, Optional
 
-from holon_contracts import MessageKind, make_envelope, new_action_id
+from holon_contracts import ContractEnvelope, MessageKind, make_envelope, new_action_id
 
 from .guard import (
     PROTECTED_STATES,
@@ -241,6 +241,25 @@ class PluginRuntime:
             self._protected_latch = False
             self._protected_action_id = None
 
+    def _begin_protected_dispatch(self, action_id: str) -> bool:
+        if self._protected_latch:
+            return False
+        self._protected_latch = True
+        self._protected_action_id = action_id
+        return True
+
+    def _finish_protected_dispatch(
+        self, response: ContractEnvelope, action_id: str,
+    ) -> None:
+        if response.action_id != action_id or self._protected_action_id != action_id:
+            return
+        if response.kind is MessageKind.REFUSAL or (
+            response.kind is MessageKind.SIGNING_DISABLED
+            and response.payload.get("guard_state") == GuardState.SIGNING_DISABLED.value
+        ):
+            self._protected_latch = False
+            self._protected_action_id = None
+
     def _health_response(self, health: GuardHealth) -> str:
         status = "READY" if health.availability is GuardAvailability.AVAILABLE else "DEGRADED"
         return json.dumps(
@@ -441,13 +460,14 @@ class PluginRuntime:
             "action": params["action"], "amount_mode": params["amount_mode"],
             "amount": params["amount"],
         }
+        if not self._begin_protected_dispatch(action_id):
+            return self._safe_transfer_failure(action_id)
         try:
             response = self._connector.lending_action_execute(intent, action_id)
         except Exception:
             return self._safe_transfer_failure(action_id)
+        self._finish_protected_dispatch(response, action_id)
         if response.kind is MessageKind.PROTECTED_FLOW_STARTED:
-            self._protected_latch = True
-            self._protected_action_id = action_id
             self._remember_lending_request(action_id, {
                 "protocol": protocol, "action": params["action"],
                 "amount_mode": params["amount_mode"], "amount": params["amount"],
@@ -491,13 +511,14 @@ class PluginRuntime:
         }:
             return self._safe_transfer_failure()
         action_id = new_action_id()
+        if not self._begin_protected_dispatch(action_id):
+            return self._safe_transfer_failure(action_id)
         try:
             response = self._connector.prepare_transfer(dict(params), action_id)
         except Exception:
             return self._safe_transfer_failure(action_id)
+        self._finish_protected_dispatch(response, action_id)
         if response.kind is MessageKind.PROTECTED_FLOW_STARTED:
-            self._protected_latch = True
-            self._protected_action_id = action_id
             return json.dumps(
                 {
                     "status": "AWAITING_LOCAL_CONFIRMATION",

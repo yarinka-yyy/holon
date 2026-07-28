@@ -83,7 +83,9 @@ class GuardServerTests(unittest.TestCase):
         lifecycle = GuardLifecycle(store, store.load(), self.wallet, LiveOwner(), ledger)
         authority = AuthorityService(lifecycle, enabled_policy(), make_audit(root))
         self.pipe = rf"\\.\pipe\Holon.Guard.test.{uuid.uuid4()}"
-        self.server = GuardServer(self.pipe, authority, 0.02)
+        self.server = GuardServer(
+            self.pipe, authority, 0.02, client_pid_probe=lambda _handle: 101,
+        )
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.client = PipeClient(self.pipe, connect_timeout=2.0, response_timeout=1.0)

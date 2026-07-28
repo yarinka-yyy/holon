@@ -364,6 +364,38 @@ def test_exact_signed_l1_fee_is_rechecked_before_single_broadcast(tmp_path) -> N
     assert excess.code is MainnetTransferCode.FEE_LIMIT_EXCEEDED
     assert excess_rpc.send_calls == 0
 
+    expiring = prepare_lending_action(
+        LendingPreflightService(state, lambda: Rpc(state.profile)), state,
+        record.summary, dict(raw_request, action_id="act-lending-expiring"),
+    )
+    history.append(WalletHistoryRecord(
+        expiring.action_id, expiring.profile_id, "lending_approve", "base", 8453,
+        expiring.sender, expiring.recipient, expiring.transaction.to, "USDC",
+        str(expiring.amount_atomic), 6, None, HistoryStatus.PREPARED, stamp, stamp,
+        False, str(expiring.max_total_fee_wei),
+    ))
+    expiring_rpc = ExecutionRpc(
+        state.profile, expiring, expiring.l1_fee_upper_bound_wei - 1,
+    )
+    expired = False
+    original_l1_fee = expiring_rpc.l1_fee
+
+    def l1_fee_then_expire(raw):
+        nonlocal expired
+        value = original_l1_fee(raw)
+        expired = True
+        return value
+
+    expiring_rpc.l1_fee = l1_fee_then_expire
+    expired_result = MainnetTransferExecutor(
+        repository, history, policy, lambda endpoint: expiring_rpc,
+        {"HOLON_BASE_RPC_URL": "fixture://base"},
+        lambda: expiring.expires_at if expired else now,
+    ).execute(expiring, expiring.digest, password, SigningPermit())
+    assert expired_result.code is MainnetTransferCode.ACTION_EXPIRED
+    assert not expired_result.broadcast_attempted
+    assert expiring_rpc.send_calls == 0
+
 
 def test_withdraw_all_revalidates_resolved_position_and_broadcasts_once(tmp_path) -> None:
     repository = VaultRepository(WalletPaths(tmp_path))

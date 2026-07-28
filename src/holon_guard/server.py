@@ -12,7 +12,8 @@ from multiprocessing.connection import Connection, Listener
 from holon_contracts import ContractViolation, MessageKind, SecurityCode
 from holon_journal import EventType
 from holon_guard_ipc.codec import (
-    MAX_MESSAGE_BYTES, decode_message, encode_message, make_response, validate_request,
+    MAX_MESSAGE_BYTES, OWNER_REQUIRED_KINDS, decode_message, encode_message,
+    make_response, validate_request,
 )
 
 from .authority import AuthorityService
@@ -59,7 +60,7 @@ class GuardServer:
             frame = decode_message(connection.recv_bytes(MAX_MESSAGE_BYTES + 1))
             request, owner_pid = validate_request(frame)
             if (
-                request.kind is MessageKind.TRANSFER_INTENT
+                request.kind in OWNER_REQUIRED_KINDS
                 and owner_pid != self._client_pid_probe(connection.fileno())
             ):
                 raise RuntimeError("Authority owner mismatch")
