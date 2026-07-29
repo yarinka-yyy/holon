@@ -23,8 +23,17 @@ def test_manifest_is_canonical_and_records_required_versions(tmp_path: Path) -> 
     raw = (package / "release-manifest.json").read_bytes()
     assert encode_manifest(decode_manifest(raw)) == raw
     assert manifest.package_version == "0.1.0a0"
-    assert set(manifest.component_versions) == {"plugin", "guard", "wallet", "contracts", "policy"}
+    assert manifest.manifest_version == "2"
+    assert set(manifest.component_versions) == {
+        "plugin", "guard", "wallet", "contracts", "policy", "skills",
+    }
     assert manifest.hermes_compatibility == ">=0.18.2,<0.19.0"
+    skill_files = [item for item in manifest.files if item.component == "skills"]
+    assert {item.path for item in skill_files} == {
+        "payload/skills/crypto/holon/SKILL.md",
+        "payload/skills/crypto/holon-lending/SKILL.md",
+    }
+    assert all(not item.critical for item in skill_files)
     assert verify_package(package).ok
 
 

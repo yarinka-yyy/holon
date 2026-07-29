@@ -5,19 +5,24 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-MANIFEST_VERSION = "1"
+MANIFEST_VERSION = "2"
 PACKAGE_VERSION = "0.1.0a0"
 HERMES_COMPATIBILITY = ">=0.18.2,<0.19.0"
-VERSION_FIELDS = frozenset({"plugin", "guard", "wallet", "contracts", "policy"})
+VERSION_FIELDS = frozenset(
+    {"plugin", "guard", "wallet", "contracts", "policy", "skills"}
+)
 COMPONENT_VERSIONS = {
     "plugin": PACKAGE_VERSION, "guard": PACKAGE_VERSION, "wallet": PACKAGE_VERSION,
-    "contracts": "1", "policy": "1",
+    "contracts": "1", "policy": "1", "skills": PACKAGE_VERSION,
 }
 MANIFEST_FIELDS = frozenset(
     {"manifest_version", "package_version", "component_versions", "hermes_compatibility", "files"}
 )
 FILE_FIELDS = frozenset({"component", "path", "sha256", "critical"})
-COMPONENTS = frozenset({"installer", "guard", "wallet", "plugin", "contracts", "policy", "initial-data"})
+COMPONENTS = frozenset({
+    "installer", "guard", "wallet", "plugin", "contracts", "policy",
+    "skills", "initial-data",
+})
 
 
 class ManifestError(ValueError):

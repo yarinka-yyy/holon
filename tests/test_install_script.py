@@ -4,16 +4,24 @@ import json
 from pathlib import Path
 
 from package_support import build_fixture
-from powershell_support import invoke, make_junction
+from powershell_support import fake_hermes, invoke, make_junction
 from holon_installation import verify_installed
 
 
-def _install(package: Path, local: Path, hermes: Path):
-    return invoke(
+def _install(
+    package: Path, local: Path, hermes: Path, command: Path | None = None,
+    *, enable: bool = False,
+):
+    arguments: list[object] = [
         package / "install.ps1", "-PackageRoot", package,
         "-LocalAppDataRoot", local, "-HermesHome", hermes,
         "-ConfirmHermesClosed",
-    )
+    ]
+    if command is not None:
+        arguments.extend(["-HermesCommand", command])
+    if enable:
+        arguments.append("-EnableHermesPlugin")
+    return invoke(*arguments)
 
 
 def test_confirmation_is_required_and_result_is_safe(tmp_path: Path) -> None:
@@ -34,8 +42,11 @@ def test_clean_install_bootstraps_data_and_reinstall_repairs_program(tmp_path: P
     app = local / "Holon" / "app"
     data = local / "Holon" / "data"
     plugin = hermes / "plugins" / "holon"
+    skills = hermes / "skills" / "crypto"
     assert (app / "HolonGuard.exe").read_bytes() == b"mock-guard-binary"
     assert (plugin / "plugin.yaml").is_file()
+    assert (skills / "holon" / "SKILL.md").is_file()
+    assert (skills / "holon-lending" / "SKILL.md").is_file()
     assert json.loads((data / "guard-state.json").read_text())["state"] == "NORMAL"
     canaries = {
         "vault.canary": b"vault-secret-canary", "settings.canary": b"settings-canary",
@@ -44,11 +55,15 @@ def test_clean_install_bootstraps_data_and_reinstall_repairs_program(tmp_path: P
     for name, value in canaries.items():
         (data / name).write_bytes(value)
     (app / "HolonGuard.exe").write_bytes(b"damaged")
+    (skills / "holon" / "SKILL.md").write_text("damaged", encoding="utf-8")
     assert _install(package, local, hermes)[0] == 0
     assert (app / "HolonGuard.exe").read_bytes() == b"mock-guard-binary"
     assert verify_installed(
         app / "release-manifest.json", app, plugin, "0.18.2",
     ).ok
+    assert (skills / "holon" / "SKILL.md").read_bytes() == (
+        package / "payload" / "skills" / "crypto" / "holon" / "SKILL.md"
+    ).read_bytes()
     for name, value in canaries.items():
         assert (data / name).read_bytes() == value
 
@@ -63,6 +78,25 @@ def test_tampered_payload_never_replaces_existing_program(tmp_path: Path) -> Non
     code, result = _install(package, local, hermes)
     assert code == 2 and result["code"] == "INSTALL_VALIDATION_FAILED"
     assert installed.read_bytes() == b"existing-install-canary"
+
+
+def test_enable_failure_restores_previous_app_plugin_and_skills(tmp_path: Path) -> None:
+    package, _ = build_fixture(tmp_path)
+    local, hermes = tmp_path / "local", tmp_path / "hermes"
+    assert _install(package, local, hermes)[0] == 0
+    canaries = {
+        local / "Holon" / "app" / "HolonGuard.exe": b"old-app",
+        hermes / "plugins" / "holon" / "plugin.yaml": b"old-plugin",
+        hermes / "skills" / "crypto" / "holon" / "SKILL.md": b"old-holon-skill",
+        hermes / "skills" / "crypto" / "holon-lending" / "SKILL.md": b"old-lending-skill",
+    }
+    for path, value in canaries.items():
+        path.write_bytes(value)
+    command = fake_hermes(tmp_path / "hermes-fail.ps1", fail_enable=True)
+    code, result = _install(package, local, hermes, command, enable=True)
+    assert code == 2 and result["code"] == "INSTALL_VALIDATION_FAILED"
+    for path, value in canaries.items():
+        assert path.read_bytes() == value
 
 
 def test_preexisting_empty_data_directory_is_not_populated(tmp_path: Path) -> None:

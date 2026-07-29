@@ -27,8 +27,12 @@ function Test-HolLayout($File) {
     elseif ($path.StartsWith("payload/plugin/holon_contracts/") -or
         $path.StartsWith("payload/plugin/holon_guard_ipc/")) { $component = "contracts" }
     elseif ($path.StartsWith("payload/plugin/")) { $component = "plugin" }
+    elseif ($path.StartsWith("payload/skills/crypto/holon/") -or
+        $path.StartsWith("payload/skills/crypto/holon-lending/")) { $component = "skills" }
     elseif ($path.StartsWith("payload/initial-data/")) { $component = "initial-data" }
-    elseif ($path -in @("install.ps1", "uninstall.ps1", "InstallSupport.psm1", "INSTALL.md")) {
+    elseif ($path -in @(
+        "install.ps1", "uninstall.ps1", "detect-hermes.ps1", "InstallSupport.psm1", "INSTALL.md"
+    )) {
         $component = "installer"
     } else { throw [System.ArgumentException]::new("Unexpected package path") }
     $critical = $path.StartsWith("payload/app/") -or $path.StartsWith("payload/plugin/")
@@ -48,17 +52,17 @@ function Read-HolManifest([string]$Root) {
     if (-not (Test-HolFields $manifest @(
         "manifest_version", "package_version", "component_versions", "hermes_compatibility", "files"
     ))) { throw [System.ArgumentException]::new("Invalid manifest fields") }
-    if ($manifest.manifest_version -cne "1" -or $manifest.package_version -cne "0.1.0a0" -or
+    if ($manifest.manifest_version -cne "2" -or $manifest.package_version -cne "0.1.0a0" -or
         $manifest.hermes_compatibility -cne ">=0.18.2,<0.19.0") {
         throw [System.ArgumentException]::new("Incompatible package") }
     if ($null -eq $manifest.component_versions -or -not (Test-HolFields `
-        $manifest.component_versions @("plugin", "guard", "wallet", "contracts", "policy"))) {
+        $manifest.component_versions @("plugin", "guard", "wallet", "contracts", "policy", "skills"))) {
         throw [System.ArgumentException]::new("Invalid component versions")
     }
     $versions = @($manifest.component_versions.plugin, $manifest.component_versions.guard,
         $manifest.component_versions.wallet, $manifest.component_versions.contracts,
-        $manifest.component_versions.policy)
-    if (($versions -join "|") -cne "0.1.0a0|0.1.0a0|0.1.0a0|1|1") {
+        $manifest.component_versions.policy, $manifest.component_versions.skills)
+    if (($versions -join "|") -cne "0.1.0a0|0.1.0a0|0.1.0a0|1|1|0.1.0a0") {
         throw [System.ArgumentException]::new("Incompatible component versions") }
     $files = @($manifest.files); if ($files.Count -eq 0 -or $files.Count -gt 4096) {
         throw [System.ArgumentException]::new("Invalid manifest files") }
@@ -68,7 +72,7 @@ function Read-HolManifest([string]$Root) {
         if (-not (Test-HolFields $file @("component", "path", "sha256", "critical")) -or
             $file.path -isnot [string] -or $file.component -isnot [string] -or
             $file.sha256 -cnotmatch "^[0-9a-f]{64}$" -or $file.critical -isnot [bool] -or
-            $file.component -notin @("installer", "guard", "wallet", "plugin", "contracts", "policy", "initial-data")) {
+            $file.component -notin @("installer", "guard", "wallet", "plugin", "contracts", "policy", "skills", "initial-data")) {
             throw [System.ArgumentException]::new("Invalid manifest entry")
         }
         $null = Resolve-HolFile $Root $file.path; Test-HolLayout $file

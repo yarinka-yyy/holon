@@ -9,7 +9,10 @@ import stat
 from .model import ManifestError
 
 MAX_PATH_LENGTH = 240
-ROOT_FILES = frozenset({"install.ps1", "uninstall.ps1", "InstallSupport.psm1", "INSTALL.md"})
+ROOT_FILES = frozenset({
+    "install.ps1", "uninstall.ps1", "detect-hermes.ps1",
+    "InstallSupport.psm1", "INSTALL.md",
+})
 
 
 def validate_relative_path(value: str) -> str:
@@ -36,6 +39,11 @@ def expected_component(value: str) -> str:
         return "contracts"
     if value.startswith("payload/plugin/"):
         return "plugin"
+    if value.startswith((
+        "payload/skills/crypto/holon/",
+        "payload/skills/crypto/holon-lending/",
+    )):
+        return "skills"
     if value.startswith("payload/initial-data/"):
         return "initial-data"
     if value in ROOT_FILES:

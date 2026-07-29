@@ -10,3 +10,17 @@ def test_wallet_build_bundles_both_lending_profile_files() -> None:
     assert '--add-data "$lendingReadProfile;holon_lending"' in script
     assert 'holon_lending\\action-profiles.json' in script
     assert '--add-data "$lendingActionProfile;holon_lending"' in script
+
+
+def test_installer_build_is_single_production_pipeline() -> None:
+    script = (
+        Path(__file__).parents[1] / "packaging" / "build-installer.ps1"
+    ).read_text(encoding="utf-8")
+
+    assert 'pythonVersion -ne "3.13.14"' in script
+    assert 'build-guard.ps1' in script
+    assert 'build-wallet.ps1' in script
+    assert 'build_package.py' in script
+    assert 'installer.iss' in script
+    assert 'Holon-0.1.0-alpha-Setup.exe' in script
+    assert 'winget' not in script.lower()

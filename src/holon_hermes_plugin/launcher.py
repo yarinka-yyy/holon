@@ -46,11 +46,10 @@ class InstalledGuardLauncher(SubprocessGuardLauncher):
     """Launch only the fixed per-user installed Guard with integrity required."""
 
     def __init__(
-        self, local_app_data: Path, hermes_version: str,
+        self, local_app_data: Path, plugin_root: Path, hermes_version: str,
         pipe_name: str = PIPE_NAME,
     ) -> None:
         app_root = local_app_data / "Holon" / "app"
-        plugin_root = local_app_data / "hermes" / "plugins" / "holon"
         command = (
             str(app_root / "HolonGuard.exe"), "--require-install-integrity",
             "--manifest-path", str(app_root / "release-manifest.json"),
@@ -68,4 +67,5 @@ def production_launcher() -> DisabledGuardLauncher | InstalledGuardLauncher:
         hermes_version = metadata.version("hermes-agent")
     except Exception:
         hermes_version = ""
-    return InstalledGuardLauncher(Path(local_app_data), hermes_version)
+    plugin_root = Path(__file__).resolve().parent
+    return InstalledGuardLauncher(Path(local_app_data), plugin_root, hermes_version)

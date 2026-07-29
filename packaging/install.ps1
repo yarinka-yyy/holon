@@ -40,13 +40,20 @@ $appRoot = Join-Path $appParent "app"
 $dataRoot = Join-Path $appParent "data"
 $pluginParent = Join-Path $HermesHome "plugins"
 $pluginRoot = Join-Path $pluginParent "holon"
+$skillsParent = Join-Path (Join-Path $HermesHome "skills") "crypto"
+$holonSkillRoot = Join-Path $skillsParent "holon"
+$lendingSkillRoot = Join-Path $skillsParent "holon-lending"
 $token = [Guid]::NewGuid().ToString("N")
 $stageApp = Join-Path $appParent (".app-stage-" + $token)
 $stagePlugin = Join-Path $pluginParent (".plugin-stage-" + $token)
+$stageSkills = Join-Path $skillsParent (".skills-stage-" + $token)
 $stageData = Join-Path $appParent (".data-stage-" + $token)
 $backupApp = Join-Path $appParent (".app-backup-" + $token)
 $backupPlugin = Join-Path $pluginParent (".plugin-backup-" + $token)
+$backupHolonSkill = Join-Path $skillsParent (".holon-skill-backup-" + $token)
+$backupLendingSkill = Join-Path $skillsParent (".lending-skill-backup-" + $token)
 $swappedApp = $false; $swappedPlugin = $false
+$swappedHolonSkill = $false; $swappedLendingSkill = $false
 $committed = $false
 function Restore-HolPrevious([string]$Current, [string]$Backup, [bool]$Swapped) {
     try {
@@ -70,23 +77,34 @@ try {
     }
     $null = New-Item -ItemType Directory -Path $appParent -Force
     $null = New-Item -ItemType Directory -Path $pluginParent -Force
+    $null = New-Item -ItemType Directory -Path $skillsParent -Force
     Copy-HolComponent $manifest $PackageRoot "payload/app/" $stageApp
     Copy-Item -LiteralPath (Join-Path $PackageRoot "release-manifest.json") `
         -Destination (Join-Path $stageApp "release-manifest.json") -Force
     Copy-HolComponent $manifest $PackageRoot "payload/plugin/" $stagePlugin
+    Copy-HolComponent $manifest $PackageRoot "payload/skills/crypto/" $stageSkills
     Copy-HolComponent $manifest $PackageRoot "payload/initial-data/" $stageData
     Test-HolComponent $manifest "payload/app/" $stageApp
     Test-HolComponent $manifest "payload/plugin/" $stagePlugin
+    Test-HolComponent $manifest "payload/skills/crypto/" $stageSkills
     Test-HolComponent $manifest "payload/initial-data/" $stageData
     if (-not (Test-Path -LiteralPath $dataRoot)) {
         Move-Item -LiteralPath $stageData -Destination $dataRoot
     }
     if (Test-Path -LiteralPath $appRoot) { Move-Item -LiteralPath $appRoot -Destination $backupApp }
     if (Test-Path -LiteralPath $pluginRoot) { Move-Item -LiteralPath $pluginRoot -Destination $backupPlugin }
+    if (Test-Path -LiteralPath $holonSkillRoot) {
+        Move-Item -LiteralPath $holonSkillRoot -Destination $backupHolonSkill }
+    if (Test-Path -LiteralPath $lendingSkillRoot) {
+        Move-Item -LiteralPath $lendingSkillRoot -Destination $backupLendingSkill }
     Move-Item -LiteralPath $stageApp -Destination $appRoot
     $swappedApp = $true
     Move-Item -LiteralPath $stagePlugin -Destination $pluginRoot
     $swappedPlugin = $true
+    Move-Item -LiteralPath (Join-Path $stageSkills "holon") -Destination $holonSkillRoot
+    $swappedHolonSkill = $true
+    Move-Item -LiteralPath (Join-Path $stageSkills "holon-lending") -Destination $lendingSkillRoot
+    $swappedLendingSkill = $true
     if ($EnableHermesPlugin) {
         $oldHome = $env:HERMES_HOME
         try {
@@ -96,23 +114,33 @@ try {
         } finally { $env:HERMES_HOME = $oldHome }
     }
     $committed = $true
-    if (Test-Path -LiteralPath $backupApp) { Remove-Item -LiteralPath $backupApp -Recurse -Force }
-    if (Test-Path -LiteralPath $backupPlugin) { Remove-Item -LiteralPath $backupPlugin -Recurse -Force }
+    foreach ($backup in @(
+        $backupApp, $backupPlugin, $backupHolonSkill, $backupLendingSkill
+    )) {
+        try {
+            if (Test-Path -LiteralPath $backup) {
+                Remove-Item -LiteralPath $backup -Recurse -Force }
+        } catch { continue }
+    }
     Stop-HolInstall 0 "INSTALL_OK" "Holon base package installed."
 } catch [System.ArgumentException] {
     if (-not $committed) {
         Restore-HolPrevious $appRoot $backupApp $swappedApp
         Restore-HolPrevious $pluginRoot $backupPlugin $swappedPlugin
+        Restore-HolPrevious $holonSkillRoot $backupHolonSkill $swappedHolonSkill
+        Restore-HolPrevious $lendingSkillRoot $backupLendingSkill $swappedLendingSkill
     }
     Stop-HolInstall 2 "INSTALL_VALIDATION_FAILED" "Package validation or approval failed."
 } catch {
     if (-not $committed) {
         Restore-HolPrevious $appRoot $backupApp $swappedApp
         Restore-HolPrevious $pluginRoot $backupPlugin $swappedPlugin
+        Restore-HolPrevious $holonSkillRoot $backupHolonSkill $swappedHolonSkill
+        Restore-HolPrevious $lendingSkillRoot $backupLendingSkill $swappedLendingSkill
     }
     Stop-HolInstall 3 "INSTALL_FILESYSTEM_FAILED" "Installation could not be completed."
 } finally {
-    foreach ($path in @($stageApp, $stagePlugin, $stageData)) {
+    foreach ($path in @($stageApp, $stagePlugin, $stageSkills, $stageData)) {
         try {
             if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force }
         } catch { continue }

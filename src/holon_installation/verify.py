@@ -15,7 +15,7 @@ SAFE_CODES = {
     "guard": "GUARD_INTEGRITY_FAILED", "wallet": "WALLET_INTEGRITY_FAILED",
     "plugin": "PLUGIN_INTEGRITY_FAILED", "contracts": "CONTRACT_INTEGRITY_FAILED",
     "policy": "POLICY_INTEGRITY_FAILED", "installer": "INSTALLER_INTEGRITY_FAILED",
-    "initial-data": "INITIAL_DATA_INTEGRITY_FAILED",
+    "skills": "SKILLS_INTEGRITY_FAILED", "initial-data": "INITIAL_DATA_INTEGRITY_FAILED",
 }
 VERSION_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
 

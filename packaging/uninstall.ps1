@@ -44,19 +44,29 @@ $holonRoot = Join-Path $LocalAppDataRoot "Holon"
 $appRoot = Join-Path $holonRoot "app"
 $dataRoot = Join-Path $holonRoot "data"
 $pluginRoot = Join-Path (Join-Path $HermesHome "plugins") "holon"
+$skillsRoot = Join-Path (Join-Path $HermesHome "skills") "crypto"
+$holonSkillRoot = Join-Path $skillsRoot "holon"
+$lendingSkillRoot = Join-Path $skillsRoot "holon-lending"
 
 try {
+    $configurationWarning = $false
     $oldHome = $env:HERMES_HOME
     try {
         $env:HERMES_HOME = $HermesHome
-        $output = & $HermesCommand plugins disable holon 2>&1
-        if ($LASTEXITCODE -ne 0) { throw [System.ArgumentException]::new("Hermes disable failed") }
+        try {
+            $output = & $HermesCommand plugins disable holon 2>&1
+            if ($LASTEXITCODE -ne 0) { $configurationWarning = $true }
+        } catch { $configurationWarning = $true }
     } finally { $env:HERMES_HOME = $oldHome }
-    foreach ($path in @($appRoot, $pluginRoot)) {
+    foreach ($path in @($appRoot, $pluginRoot, $holonSkillRoot, $lendingSkillRoot)) {
         if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force }
     }
     if ($RemoveData -and $ConfirmDataDeletion -and (Test-Path -LiteralPath $dataRoot)) {
         Remove-Item -LiteralPath $dataRoot -Recurse -Force
+    }
+    if ($configurationWarning) {
+        Stop-HolUninstall 0 "UNINSTALL_OK_WITH_WARNING" `
+            "Holon files were removed; Hermes plugin configuration could not be updated."
     }
     Stop-HolUninstall 0 "UNINSTALL_OK" "Holon program files were removed."
 } catch [System.ArgumentException] {

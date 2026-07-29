@@ -33,6 +33,8 @@ def test_ordinary_uninstall_preserves_data(tmp_path: Path) -> None:
     assert code == 0 and result["code"] == "UNINSTALL_OK"
     assert not (local / "Holon" / "app").exists()
     assert not (hermes / "plugins" / "holon").exists()
+    assert not (hermes / "skills" / "crypto" / "holon").exists()
+    assert not (hermes / "skills" / "crypto" / "holon-lending").exists()
     assert (data / "vault.canary").read_bytes() == b"preserve"
 
 
@@ -54,3 +56,13 @@ def test_damaged_uninstaller_support_does_not_remove_install(tmp_path: Path) -> 
     code, result = _uninstall(package, local, hermes, command)
     assert code == 2 and result["code"] == "UNINSTALL_VALIDATION_FAILED"
     assert (local / "Holon" / "app" / "HolonGuard.exe").is_file()
+
+
+def test_missing_hermes_cli_warns_but_does_not_block_file_removal(tmp_path: Path) -> None:
+    package, local, hermes, _command = _installed(tmp_path)
+    command = tmp_path / "missing-hermes.exe"
+    code, result = _uninstall(package, local, hermes, command)
+    assert code == 0 and result["code"] == "UNINSTALL_OK_WITH_WARNING"
+    assert not (local / "Holon" / "app").exists()
+    assert not (hermes / "plugins" / "holon").exists()
+    assert not (hermes / "skills" / "crypto" / "holon").exists()
