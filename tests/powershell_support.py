@@ -25,11 +25,14 @@ def invoke(script: Path, *arguments: object) -> tuple[int, dict]:
 
 def fake_hermes(
     path: Path, *, fail_enable: bool = False, fail_disable: bool = False,
+    enable_output: str = "",
 ) -> Path:
+    safe_enable_output = enable_output.replace("'", "''")
     path.write_text(
         "param([Parameter(ValueFromRemainingArguments=$true)]$Args)\n"
         "if ($Args -contains '--version') { Write-Output 'Hermes Agent v0.18.2'; exit 0 }\n"
-        f"if (($Args -contains 'enable') -and ${str(fail_enable).lower()}) {{ exit 9 }}\n"
+        f"if (($Args -contains 'enable') -and ${str(fail_enable).lower()}) {{ "
+        f"Write-Output '{safe_enable_output}'; exit 9 }}\n"
         f"if (($Args -contains 'disable') -and ${str(fail_disable).lower()}) {{ exit 9 }}\n"
         "exit 0\n",
         encoding="utf-8",

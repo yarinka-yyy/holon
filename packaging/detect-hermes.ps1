@@ -2,6 +2,7 @@ param(
     [string]$LocalAppDataRoot = $env:LOCALAPPDATA,
     [string]$HermesHomeOverride = "",
     [string]$HermesCommandOverride = "",
+    [string]$OutputPath = "",
     [switch]$RequireClosed
 )
 
@@ -13,11 +14,23 @@ function Write-HolDetection(
     [string]$Code, [string]$HermesRoot = "", [string]$Command = "",
     [string]$Desktop = "", [string]$Version = ""
 ) {
-    Write-Output ("code=" + $Code)
-    Write-Output ("hermes_home=" + $HermesRoot)
-    Write-Output ("hermes_command=" + $Command)
-    Write-Output ("hermes_desktop=" + $Desktop)
-    Write-Output ("version=" + $Version)
+    $lines = [string[]]@(
+        ("code=" + $Code),
+        ("hermes_home=" + $HermesRoot),
+        ("hermes_command=" + $Command),
+        ("hermes_desktop=" + $Desktop),
+        ("version=" + $Version)
+    )
+    if ([string]::IsNullOrWhiteSpace($OutputPath)) {
+        $lines | Write-Output
+        return
+    }
+    $target = [IO.Path]::GetFullPath($OutputPath)
+    $parent = [IO.Path]::GetDirectoryName($target)
+    if ([string]::IsNullOrWhiteSpace($parent) -or -not (Test-Path -LiteralPath $parent -PathType Container)) {
+        throw "Detection output path is unavailable"
+    }
+    [IO.File]::WriteAllLines($target, $lines, [Text.UTF8Encoding]::new($false))
 }
 
 function Resolve-HolCommand([string]$HermesRoot, [string]$ExplicitCommand) {

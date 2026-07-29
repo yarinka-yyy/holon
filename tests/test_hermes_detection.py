@@ -11,23 +11,29 @@ from powershell_support import POWERSHELL, fake_hermes
 SCRIPT = Path(__file__).parents[1] / "packaging" / "detect-hermes.ps1"
 
 
-def _detect(local: Path, home: Path, command: Path, *extra: str) -> tuple[int, dict[str, str]]:
+def _detect(
+    local: Path, home: Path, command: Path, *extra: str, output_path: Path | None = None,
+) -> tuple[int, dict[str, str]]:
     environment = os.environ.copy()
     environment["HERMES_HOME"] = ""
     environment["PATH"] = os.pathsep.join(
         item for item in environment.get("PATH", "").split(os.pathsep)
         if "hermes" not in item.casefold()
     )
-    completed = subprocess.run(
-        [
+    arguments = [
             POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(SCRIPT),
             "-LocalAppDataRoot", str(local), "-HermesHomeOverride", str(home),
             "-HermesCommandOverride", str(command), *extra,
-        ],
+    ]
+    if output_path is not None:
+        arguments.extend(["-OutputPath", str(output_path)])
+    completed = subprocess.run(
+        arguments,
         capture_output=True, text=True, encoding="utf-8", timeout=20, env=environment,
     )
     assert not completed.stdout.startswith("\ufeff")
-    fields = dict(line.split("=", 1) for line in completed.stdout.splitlines())
+    text = output_path.read_text(encoding="utf-8") if output_path is not None else completed.stdout
+    fields = dict(line.split("=", 1) for line in text.splitlines())
     assert set(fields) == {
         "code", "hermes_home", "hermes_command", "hermes_desktop", "version",
     }
@@ -43,6 +49,16 @@ def test_detects_compatible_custom_hermes_home(tmp_path: Path) -> None:
     assert result["hermes_home"] == str(home)
     assert result["hermes_command"] == str(command)
     assert result["version"] == "0.18.2"
+
+
+def test_detector_writes_public_result_file_without_stdout(tmp_path: Path) -> None:
+    home = tmp_path / "custom-hermes"
+    home.mkdir()
+    output = tmp_path / "detector-result.txt"
+    command = fake_hermes(tmp_path / "hermes-fixture.ps1")
+    code, result = _detect(tmp_path / "local", home, command, output_path=output)
+    assert code == 0 and result["code"] == "HERMES_READY"
+    assert output.read_bytes().startswith(b"code=HERMES_READY\r\n")
 
 
 def test_refuses_missing_or_incompatible_hermes(tmp_path: Path) -> None:

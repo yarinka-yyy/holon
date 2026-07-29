@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import subprocess
 
 from package_support import build_fixture
-from powershell_support import fake_hermes, invoke, make_junction
+from powershell_support import POWERSHELL, fake_hermes, invoke, make_junction
 from holon_installation import verify_installed
 
 
@@ -24,6 +25,14 @@ def _install(
     return invoke(*arguments)
 
 
+def _compatible_hermes_home(home: Path) -> None:
+    metadata = home / "hermes-agent" / "venv" / "Lib" / "site-packages" / (
+        "hermes_agent-0.18.2.dist-info"
+    )
+    metadata.mkdir(parents=True)
+    (metadata / "METADATA").write_text("Name: hermes-agent\nVersion: 0.18.2\n", encoding="utf-8")
+
+
 def test_confirmation_is_required_and_result_is_safe(tmp_path: Path) -> None:
     package, _ = build_fixture(tmp_path)
     code, result = invoke(
@@ -31,6 +40,19 @@ def test_confirmation_is_required_and_result_is_safe(tmp_path: Path) -> None:
         "-LocalAppDataRoot", tmp_path / "local", "-HermesHome", tmp_path / "hermes",
     )
     assert code == 2 and result["code"] == "HERMES_CLOSED_CONFIRMATION_REQUIRED"
+    assert str(tmp_path) not in json.dumps(result)
+
+
+def test_filesystem_failure_reports_safe_exact_install_step(tmp_path: Path) -> None:
+    package, _ = build_fixture(tmp_path)
+    local, hermes = tmp_path / "local", tmp_path / "hermes"
+    local.mkdir()
+    (local / "Holon").write_text("not-a-directory", encoding="utf-8")
+
+    code, result = _install(package, local, hermes)
+
+    assert code == 3 and result["code"] == "INSTALL_FILESYSTEM_FAILED"
+    assert result["message"] == "Installation could not be completed at stage_app."
     assert str(tmp_path) not in json.dumps(result)
 
 
@@ -68,6 +90,39 @@ def test_clean_install_bootstraps_data_and_reinstall_repairs_program(tmp_path: P
         assert (data / name).read_bytes() == value
 
 
+def test_enable_uses_installed_hermes_metadata_for_compatibility(tmp_path: Path) -> None:
+    package, _ = build_fixture(tmp_path)
+    local, hermes = tmp_path / "local", tmp_path / "hermes"
+    _compatible_hermes_home(hermes)
+
+    code, result = _install(package, local, hermes, fake_hermes(tmp_path / "hermes.ps1"), enable=True)
+
+    assert code == 0 and result["code"] == "INSTALL_OK"
+
+
+def test_result_file_is_utf8_json_and_stdout_stays_empty(tmp_path: Path) -> None:
+    package, _ = build_fixture(tmp_path)
+    local, hermes = tmp_path / "local", tmp_path / "hermes"
+    result_path = tmp_path / "install-result.json"
+    completed = subprocess.run(
+        [
+            POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+            str(package / "install.ps1"), "-PackageRoot", str(package),
+            "-LocalAppDataRoot", str(local), "-HermesHome", str(hermes),
+            "-OutputPath", str(result_path), "-ConfirmHermesClosed",
+        ],
+        capture_output=True, text=True, encoding="utf-8", timeout=20,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == ""
+    assert not result_path.read_bytes().startswith(b"\xef\xbb\xbf")
+    assert json.loads(result_path.read_text(encoding="utf-8")) == {
+        "ok": True, "code": "INSTALL_OK",
+        "message": "Holon base package installed.",
+    }
+
+
 def test_tampered_payload_never_replaces_existing_program(tmp_path: Path) -> None:
     package, _ = build_fixture(tmp_path)
     local, hermes = tmp_path / "local", tmp_path / "hermes"
@@ -80,10 +135,11 @@ def test_tampered_payload_never_replaces_existing_program(tmp_path: Path) -> Non
     assert installed.read_bytes() == b"existing-install-canary"
 
 
-def test_enable_failure_restores_previous_app_plugin_and_skills(tmp_path: Path) -> None:
+def test_enable_plugin_not_found_restores_previous_app_plugin_and_skills(tmp_path: Path) -> None:
     package, _ = build_fixture(tmp_path)
     local, hermes = tmp_path / "local", tmp_path / "hermes"
     assert _install(package, local, hermes)[0] == 0
+    _compatible_hermes_home(hermes)
     canaries = {
         local / "Holon" / "app" / "HolonGuard.exe": b"old-app",
         hermes / "plugins" / "holon" / "plugin.yaml": b"old-plugin",
@@ -92,11 +148,71 @@ def test_enable_failure_restores_previous_app_plugin_and_skills(tmp_path: Path) 
     }
     for path, value in canaries.items():
         path.write_bytes(value)
-    command = fake_hermes(tmp_path / "hermes-fail.ps1", fail_enable=True)
+    command = fake_hermes(
+        tmp_path / "hermes-fail.ps1", fail_enable=True,
+        enable_output="Plugin 'holon' is not installed or bundled.",
+    )
     code, result = _install(package, local, hermes, command, enable=True)
-    assert code == 2 and result["code"] == "INSTALL_VALIDATION_FAILED"
+    assert code == 3 and result == {
+        "ok": False,
+        "code": "HERMES_ENABLE_PLUGIN_NOT_FOUND",
+        "message": "Hermes could not find the staged Holon plugin. Previous files were restored.",
+    }
     for path, value in canaries.items():
         assert path.read_bytes() == value
+
+
+def test_enable_failure_never_discloses_hermes_output(tmp_path: Path) -> None:
+    package, _ = build_fixture(tmp_path)
+    local, hermes = tmp_path / "local", tmp_path / "hermes"
+    _compatible_hermes_home(hermes)
+    command = fake_hermes(
+        tmp_path / "hermes-fail.ps1", fail_enable=True,
+        enable_output="secret-value-must-not-appear",
+    )
+
+    code, result = _install(package, local, hermes, command, enable=True)
+
+    assert code == 3 and result["code"] == "HERMES_ENABLE_BEFORE_CONFIG_UPDATE"
+    assert "secret-value" not in json.dumps(result)
+
+
+def test_enable_internal_error_reports_only_the_safe_error_class(tmp_path: Path) -> None:
+    package, _ = build_fixture(tmp_path)
+    local, hermes = tmp_path / "local", tmp_path / "hermes"
+    _compatible_hermes_home(hermes)
+    command = fake_hermes(
+        tmp_path / "hermes-fail.ps1", fail_enable=True,
+        enable_output="RuntimeError: secret-value-must-not-appear",
+    )
+
+    code, result = _install(package, local, hermes, command, enable=True)
+
+    assert code == 3 and result == {
+        "ok": False,
+        "code": "HERMES_ENABLE_INTERNAL_ERROR",
+        "message": "Hermes stopped with an internal RuntimeError before enabling Holon. Previous files were restored.",
+    }
+    assert "secret-value" not in json.dumps(result)
+
+
+def test_enable_unicode_encode_error_reports_only_safe_error_class(tmp_path: Path) -> None:
+    package, _ = build_fixture(tmp_path)
+    local, hermes = tmp_path / "local", tmp_path / "hermes"
+    _compatible_hermes_home(hermes)
+    command = fake_hermes(
+        tmp_path / "hermes-fail.ps1", fail_enable=True,
+        enable_output="UnicodeEncodeError: secret console encoding detail",
+    )
+
+    code, result = _install(package, local, hermes, command, enable=True)
+
+    assert code == 3 and result == {
+        "ok": False,
+        "code": "HERMES_ENABLE_INTERNAL_ERROR",
+        "message": "Hermes stopped with an internal UnicodeEncodeError before enabling Holon. Previous files were restored.",
+    }
+    assert "secret" not in json.dumps(result)
 
 
 def test_preexisting_empty_data_directory_is_not_populated(tmp_path: Path) -> None:
