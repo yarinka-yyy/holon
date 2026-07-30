@@ -3,9 +3,11 @@ from __future__ import annotations
 import secrets
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 from web3 import Web3
+from web3.exceptions import Web3RPCError
 from holon_policy import Policy, RecipientRule, TransferRule
 
 from holon_wallet.broadcast import (
@@ -20,6 +22,8 @@ from holon_wallet.broadcast import (
     MainnetTransferExecutor,
     MainnetTransferResult,
     ReceiptTrackingCode,
+    SubmissionRejectedError,
+    Web3MainnetRpc,
     mainnet_result_to_map,
 )
 from holon_wallet.history import (
@@ -607,6 +611,37 @@ def test_ambiguous_submission_is_unknown_and_never_retried(tmp_path, mode) -> No
     assert result.broadcast_attempted and rpc.send_calls == 1
     assert history.load()[0].status is HistoryStatus.UNKNOWN
     assert history.load()[0].transaction_hash == result.transaction_hash
+
+
+def test_definite_submission_rejection_is_not_masked_as_unknown(tmp_path) -> None:
+    repository, history, action, password, _secret, rpc = prepared_fixture(tmp_path)
+    rpc.values["send_error"] = Web3RPCError("private RPC response detail")
+
+    result = executor(repository, history, rpc).execute(
+        action, action.digest, password, SigningPermit(),
+    )
+
+    assert result.code is MainnetTransferCode.SUBMISSION_REJECTED
+    assert result.broadcast_attempted and rpc.send_calls == 1
+    assert history.load()[0].status is HistoryStatus.FAILED
+    mapped = mainnet_result_to_map(result)
+    assert mapped["title"] == "Submission rejected"
+    assert mapped["canCheckStatus"] is False
+    assert "private RPC response" not in mapped["message"]
+
+
+def test_web3_submission_rejection_keeps_provider_detail_internal() -> None:
+    class RejectingEth:
+        def send_raw_transaction(self, _raw_transaction):
+            raise Web3RPCError("provider detail must not reach Wallet")
+
+    rpc = object.__new__(Web3MainnetRpc)
+    rpc._web3 = SimpleNamespace(eth=RejectingEth())
+
+    with pytest.raises(SubmissionRejectedError) as error:
+        rpc.send_raw_transaction(b"signed-transaction")
+
+    assert "provider detail" not in str(error.value)
 
 
 def receipt(action, transaction_hash: str, status: int = 1, amount: int = 1_000_000):

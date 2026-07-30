@@ -12,6 +12,16 @@ def test_wallet_build_bundles_both_lending_profile_files() -> None:
     assert '--add-data "$lendingActionProfile;holon_lending"' in script
 
 
+def test_wallet_build_embeds_the_holon_application_icon() -> None:
+    script = (
+        Path(__file__).parents[1] / "packaging" / "build-wallet.ps1"
+    ).read_text(encoding="utf-8")
+
+    assert '"assets\\holon.svg"' in script
+    assert "build_icon.py" in script
+    assert "--icon $iconPath" in script
+
+
 def test_installer_build_is_single_production_pipeline() -> None:
     script = (
         Path(__file__).parents[1] / "packaging" / "build-installer.ps1"

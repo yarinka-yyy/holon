@@ -22,6 +22,7 @@ from web3.exceptions import (
     ContractLogicError,
     TransactionNotFound,
     Web3Exception,
+    Web3RPCError,
 )
 from holon_contracts import RefusalCode
 from holon_policy import (
@@ -93,6 +94,7 @@ class MainnetTransferCode(str, Enum):
     CONFIRMED = "CONFIRMED"
     PENDING = "PENDING"
     UNKNOWN = "UNKNOWN"
+    SUBMISSION_REJECTED = "SUBMISSION_REJECTED"
     RECEIPT_RPC_UNAVAILABLE = "RECEIPT_RPC_UNAVAILABLE"
     RECEIPT_WRONG_CHAIN = "RECEIPT_WRONG_CHAIN"
     RECEIPT_VALIDATION_FAILED = "RECEIPT_VALIDATION_FAILED"
@@ -123,6 +125,14 @@ class ReceiptTrackingCode(str, Enum):
     RPC_UNAVAILABLE = "RECEIPT_RPC_UNAVAILABLE"
     WRONG_CHAIN = "RECEIPT_WRONG_CHAIN"
     VALIDATION_FAILED = "RECEIPT_VALIDATION_FAILED"
+
+
+class SubmissionRejectedError(RuntimeError):
+    """A provider returned a definite JSON-RPC rejection for one submission."""
+
+
+class SubmissionUnknownError(RuntimeError):
+    """A provider transport failure leaves a submission outcome ambiguous."""
 
 
 @dataclass(slots=True)
@@ -566,9 +576,16 @@ class Web3MainnetRpc:
         return int(self._call(lambda: self._web3.eth.estimate_gas(dict(transaction))))
 
     def send_raw_transaction(self, raw_transaction: bytes) -> str:
-        return Web3.to_hex(
-            self._call(lambda: self._web3.eth.send_raw_transaction(raw_transaction))
-        )
+        try:
+            return Web3.to_hex(self._web3.eth.send_raw_transaction(raw_transaction))
+        except Web3RPCError as error:
+            # The response is definitive, but may contain provider internals.
+            # Preserve only a safe category for Wallet and Hermes.
+            raise SubmissionRejectedError() from error
+        except (*_TRANSPORT_ERRORS, Web3Exception) as error:
+            # Transport and malformed-provider failures remain ambiguous.  The
+            # caller fails closed and must never issue a second broadcast.
+            raise SubmissionUnknownError() from error
 
     def l1_fee(self, raw_transaction: bytes) -> int:
         oracle = self._web3.eth.contract(
@@ -826,6 +843,27 @@ class MainnetTransferExecutor:
                     read_rpc if read_endpoint == endpoint else self._rpc_factory(endpoint)
                 )
                 remote_hash = primary_rpc.send_raw_transaction(signed.raw_transaction)
+            except (SubmissionRejectedError, Web3RPCError):
+                try:
+                    self.history_store.update_status(
+                        action.action_id,
+                        HistoryStatus.FAILED,
+                        _timestamp(self._clock()),
+                        transaction_hash,
+                    )
+                    history_status = HistoryStatus.FAILED
+                    history_available = True
+                except (HistoryUnavailableError, HistoryValidationError, StorageError):
+                    history_available = False
+                return self._result(
+                    action,
+                    MainnetTransferCode.SUBMISSION_REJECTED,
+                    transaction_hash,
+                    recovered,
+                    history_status,
+                    broadcast_attempted,
+                    history_available,
+                )
             except Exception:
                 return self._result(
                     action,
@@ -1915,6 +1953,10 @@ def _result_text(
         MainnetTransferCode.UNKNOWN: (
             "Submission status unknown",
             "The transaction will not be sent again. Check its public hash safely.",
+        ),
+        MainnetTransferCode.SUBMISSION_REJECTED: (
+            "Submission rejected",
+            "The configured Base provider rejected the transaction. Nothing was accepted or sent again.",
         ),
         MainnetTransferCode.RECEIPT_RPC_UNAVAILABLE: (
             "Receipt RPC unavailable",

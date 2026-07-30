@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime
 from decimal import Decimal
 
 from holon_wallet.prices import (
@@ -16,7 +17,7 @@ from holon_wallet.prices import (
     is_unusually_high_base_fee,
     portfolio_to_map,
 )
-from holon_wallet.lending_view import lending_portfolio_to_map
+from holon_wallet.lending_view import _updated_text, lending_portfolio_to_map
 from holon_wallet.public_data import PublicDataStatus
 from holon_lending import LendingPortfolioService
 
@@ -228,6 +229,14 @@ def test_lending_cards_hide_only_live_confirmed_zero_positions() -> None:
     assert [item["protocol"] for item in cached["visibleProtocols"]] == [
         "aave-v3", "compound-v3", "morpho-v1",
     ]
+
+
+def test_lending_update_time_uses_the_computer_local_timezone() -> None:
+    fetched_at = "2026-07-30T14:00:00Z"
+    expected = datetime.fromisoformat(fetched_at.replace("Z", "+00:00"))
+    expected_text = "Cached · " + expected.astimezone().strftime("%H:%M")
+
+    assert _updated_text({"source": "MEMORY_CACHE", "fetched_at": fetched_at}) == expected_text
 
 
 def test_wallet_lending_display_uses_two_decimal_usdc_and_rates() -> None:

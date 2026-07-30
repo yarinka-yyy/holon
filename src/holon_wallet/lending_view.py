@@ -198,4 +198,12 @@ def _updated_text(value: object) -> str:
     if not isinstance(value, Mapping) or value.get("fetched_at") is None:
         return "Data unavailable"
     prefix = "Cached · " if _cached(value) else "Updated · "
-    return prefix + str(value["fetched_at"])[11:16] + " UTC"
+    return prefix + _local_time(str(value["fetched_at"]))
+
+
+def _local_time(value: str) -> str:
+    try:
+        observed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return "Data unavailable"
+    return observed.astimezone().strftime("%H:%M")

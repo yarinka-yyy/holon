@@ -21,6 +21,7 @@ $lendingReadProfile = Join-Path $sourceRoot "holon_lending\read-profiles.json"
 $lendingActionProfile = Join-Path $sourceRoot "holon_lending\action-profiles.json"
 $baselinePolicy = Join-Path $sourceRoot "holon_policy\baseline-policy.json"
 New-Item -ItemType Directory -Force -Path $buildRoot | Out-Null
+$iconPath = Join-Path $buildRoot "holon-wallet.ico"
 $previousPythonPath = $env:PYTHONPATH
 
 try {
@@ -29,6 +30,9 @@ try {
     if ($LASTEXITCODE -ne 0 -or $pythonVersion -ne "3.13.14") {
         throw "Wallet build requires CPython 3.13.14; found $pythonVersion"
     }
+    & $PythonPath (Join-Path $PSScriptRoot "build_icon.py") `
+        (Join-Path $qmlRoot "assets\holon.svg") $iconPath
+    if ($LASTEXITCODE -ne 0) { throw "Wallet icon build failed" }
     & $PythonPath -m PyInstaller `
         --clean `
         --noconfirm `
@@ -36,6 +40,7 @@ try {
         --windowed `
         --noupx `
         --name HolonWallet `
+        --icon $iconPath `
         --paths $sourceRoot `
         --add-data "$qmlRoot;holon_wallet/qml" `
         --add-data "$resourceRoot;holon_wallet/resources" `
