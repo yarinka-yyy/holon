@@ -94,6 +94,9 @@ def test_language_rule_is_first_and_scenario_contracts_are_present() -> None:
             "A separate preview is not mandatory",
             "Hermes must not call `holon_lending_execute` again",
             "Resume, Revoke, or Cancel",
+            "resume_or_revoke",
+            "do not call `holon_recover_action` for it",
+            "holon_open_wallet",
         ),
     }
     for name, snippets in required.items():

@@ -28,7 +28,11 @@ class ControlUnavailable(ConnectionError):
 
 
 class ControlProtocolError(RuntimeError):
-    pass
+    def __init__(
+        self, message: str, code: str = "CONTROL_PROTOCOL_FAILED",
+    ) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 def _launch_id(value: object) -> str:
@@ -130,13 +134,19 @@ def _wait_pipe(pipe_name: str, timeout: float) -> None:
 
 def _server_pid(handle: int) -> int:
     if sys.platform != "win32":
-        raise ControlProtocolError("Wallet process verification is unavailable")
+        raise ControlProtocolError(
+            "Wallet process verification is unavailable",
+            "WALLET_PROCESS_VERIFICATION_FAILED",
+        )
     process_id = wintypes.ULONG()
     call = ctypes.WinDLL("kernel32", use_last_error=True).GetNamedPipeServerProcessId
     call.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.ULONG)]
     call.restype = wintypes.BOOL
     if not call(handle, ctypes.byref(process_id)) or process_id.value <= 0:
-        raise ControlProtocolError("Wallet process verification failed")
+        raise ControlProtocolError(
+            "Wallet process verification failed",
+            "WALLET_PROCESS_VERIFICATION_FAILED",
+        )
     return int(process_id.value)
 
 
@@ -164,12 +174,18 @@ def _process_image(pid: int) -> Path:
     kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
     handle = kernel32.OpenProcess(0x1000, False, pid)
     if not handle:
-        raise ControlProtocolError("Wallet process verification failed")
+        raise ControlProtocolError(
+            "Wallet process verification failed",
+            "WALLET_PROCESS_VERIFICATION_FAILED",
+        )
     try:
         size = wintypes.DWORD(32768)
         buffer = ctypes.create_unicode_buffer(size.value)
         if not kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
-            raise ControlProtocolError("Wallet process verification failed")
+            raise ControlProtocolError(
+                "Wallet process verification failed",
+                "WALLET_PROCESS_VERIFICATION_FAILED",
+            )
         return Path(buffer.value)
     finally:
         kernel32.CloseHandle(handle)
@@ -218,7 +234,10 @@ class WalletControlClient:
         if wallet_pid != peer_pid or not _same_path(
             self._process_image(peer_pid), expected_path,
         ):
-            raise ControlProtocolError("Wallet process verification failed")
+            raise ControlProtocolError(
+                "Wallet process verification failed",
+                "WALLET_PROCESS_VERIFICATION_FAILED",
+            )
         return wallet_pid
 
 

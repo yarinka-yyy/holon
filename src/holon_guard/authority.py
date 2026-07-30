@@ -19,6 +19,7 @@ from .authority_intent import prepare_intent
 from .lending_authority import prepare_lending_authority
 from .authority_responses import REFUSAL_CODES, ResponseMixin
 from .lifecycle import GuardLifecycle
+from .wallet import WALLET_OPEN_FAILURE_MESSAGES, wallet_open_failure
 
 
 class AuthorityService(ResponseMixin):
@@ -217,6 +218,9 @@ class AuthorityService(ResponseMixin):
                 or not result.ok
                 or result.wallet_state not in {"OPENED", "ACTIVATED"}
             ):
+                if result is not None and result.code in WALLET_OPEN_FAILURE_MESSAGES:
+                    failure = wallet_open_failure(result.code, result.exit_code)
+                    return self.error(request, failure.code, failure.message)
                 return self.error(
                     request,
                     "WALLET_UNAVAILABLE",
@@ -229,8 +233,12 @@ class AuthorityService(ResponseMixin):
                     "guard_state": self.lifecycle.snapshot.state.value,
                     "authority_available": False,
                     "wallet_state": result.wallet_state,
-                    "code": f"WALLET_{result.wallet_state}",
-                    "message": "Wallet is open.",
+                    "code": result.code,
+                    "message": (
+                        "Wallet activation was requested."
+                        if result.wallet_state == "ACTIVATED"
+                        else "Wallet launch was verified."
+                    ),
                 },
             )
         if request.kind is MessageKind.READ_WALLET_BALANCES:

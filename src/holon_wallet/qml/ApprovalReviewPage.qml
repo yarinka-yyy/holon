@@ -40,7 +40,7 @@ TransactionFlowShell {
         SummaryRow {
             x: 0; y: 198; width: 458; compact: true; label: "Current allowance"
             value: root.action.allowanceBefore || "Unavailable"
-            secondary: "Will become 0 USDC"; iconSource: "assets/usdc.png"
+            secondary: "Will become 0 USDC"; iconSource: "assets/usdc.webp"
         }
         SummaryRow {
             x: 0; y: 258; width: 458; compact: true; label: "Network"

@@ -85,7 +85,7 @@ Use only an exact `action_id` returned by Holon or already present in the conver
 - Transfer-specific lifecycle: `holon_transfer_status`, `holon_cancel_transfer`, `holon_recover_transfer`.
 - Common protected-action lifecycle: `holon_action_status`, `holon_cancel_action`, `holon_recover_action`.
 
-Status is read-only. Cancellation never authorizes signing. Recovery does not reuse an old signature, signed payload, nonce, or approval. If Holon reports that Wallet-only intervention is required, direct the user to Wallet and stop.
+Status is read-only. Cancellation never authorizes signing. Recovery does not reuse an old signature, signed payload, nonce, or approval. Wallet-local Lending `resume_or_revoke` is handled by `holon-lending`: call `holon_open_wallet`, not generic `holon_recover_action`. If Holon reports that Wallet-only intervention is required, direct the user to Wallet and stop.
 
 ## Completion standard
 

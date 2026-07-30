@@ -145,6 +145,23 @@ def test_client_refuses_correlation_pid_fields_and_path(
         client.activate(launch_id, expected, 0.2)
 
 
+def test_process_image_mismatch_has_safe_specific_code(tmp_path: Path) -> None:
+    launch_id = str(uuid.uuid4())
+    expected = tmp_path / "expected" / "HolonWallet.exe"
+    client = WalletControlClient(
+        pipe_name="fixture",
+        connector=lambda *args, **kwargs: FakeConnection(response(launch_id)),
+        waiter=lambda name, timeout: None,
+        peer_pid=lambda handle: 202,
+        process_image=lambda pid: tmp_path / "wrong" / "HolonWallet.exe",
+    )
+
+    with pytest.raises(ControlProtocolError) as captured:
+        client.activate(launch_id, expected, 0.2)
+
+    assert captured.value.code == "WALLET_PROCESS_VERIFICATION_FAILED"
+
+
 def test_public_client_binds_query_pid_and_exact_process_image(tmp_path: Path) -> None:
     query_id = str(uuid.uuid4())
     expected = tmp_path / "HolonWallet.exe"

@@ -40,8 +40,15 @@ CAPABILITIES = [
     "action_status", "cancel_action", "recover_action",
 ]
 PROTECTED_TOOL_ALLOWLIST = frozenset({
-    HEALTH_TOOL, TRANSFER_STATUS_TOOL, CANCEL_TRANSFER_TOOL, RECOVER_TRANSFER_TOOL,
+    HEALTH_TOOL, OPEN_WALLET_TOOL,
+    TRANSFER_STATUS_TOOL, CANCEL_TRANSFER_TOOL, RECOVER_TRANSFER_TOOL,
     ACTION_STATUS_TOOL, CANCEL_ACTION_TOOL, RECOVER_ACTION_TOOL,
+})
+WALLET_OPEN_FAILURE_CODES = frozenset({
+    "WALLET_EXECUTABLE_MISSING", "WALLET_START_FAILED",
+    "WALLET_INITIALIZATION_FAILED", "WALLET_EXITED",
+    "WALLET_INSTANCE_UNREACHABLE", "WALLET_STARTUP_TIMEOUT",
+    "CONTROL_PROTOCOL_FAILED", "WALLET_PROCESS_VERIFICATION_FAILED",
 })
 
 
@@ -279,7 +286,7 @@ class PluginRuntime:
     def handle_health(self, params: Optional[dict] = None, **kwargs: Any) -> str:
         del params, kwargs
         try:
-            health = self._connector.probe()
+            health = self._connector.ensure_available()
             self._observe(health)
             return self._health_response(health)
         except Exception:
@@ -302,8 +309,16 @@ class PluginRuntime:
                     ensure_ascii=False,
                     separators=(",", ":"),
                 )
-            code = "WALLET_UNAVAILABLE"
-            message = "Wallet could not be opened."
+            if (
+                response.kind.value == "error"
+                and payload.get("code") in WALLET_OPEN_FAILURE_CODES
+                and isinstance(payload.get("message"), str)
+            ):
+                code = str(payload["code"])
+                message = str(payload["message"])
+            else:
+                code = "WALLET_UNAVAILABLE"
+                message = "Wallet could not be opened."
         except Exception:
             code = "WALLET_UNAVAILABLE"
             message = "Wallet could not be opened."

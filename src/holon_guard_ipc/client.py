@@ -24,6 +24,9 @@ class PipeProtocolError(RuntimeError):
     pass
 
 
+WALLET_OPEN_RESPONSE_TIMEOUT = 15.0
+
+
 def wait_for_pipe(pipe_name: str, timeout: float) -> None:
     wait_named_pipe = ctypes.WinDLL("kernel32", use_last_error=True).WaitNamedPipeW
     wait_named_pipe.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32]
@@ -104,7 +107,10 @@ class PipeGuardClient:
             return GuardHealth.uncertain()
 
     def open_wallet(self) -> ContractEnvelope:
-        return self.client.request(MessageKind.OPEN_WALLET)
+        # Guard may wait up to ten seconds for a newly spawned Wallet control pipe.
+        return self.client.request(
+            MessageKind.OPEN_WALLET, response_timeout=WALLET_OPEN_RESPONSE_TIMEOUT,
+        )
 
     def wallet_balances(self) -> ContractEnvelope:
         return self.client.request(

@@ -31,7 +31,8 @@ FUTURE_TOLERANCE_SECONDS = 60
 MAX_RATE = Decimal("10")
 MAX_REWARDS = 8
 COMPARE_CACHE_SECONDS = 30
-DEFAULT_BASE_RPC_URL = "https://base-rpc.publicnode.com"
+DEFAULT_BASE_RPC_URL = "https://mainnet.base.org"
+ALCHEMY_BASE_RPC_URL = "https://base-mainnet.g.alchemy.com/public"
 BASE_RPC_ENV = "HOLON_BASE_RPC_URL"
 
 NETWORK = {"network": "base", "chain_id": BASE_CHAIN_ID}
@@ -99,6 +100,14 @@ STRING_GETTER_ABI = lambda name: [{
 
 class LendingReadError(RuntimeError):
     pass
+
+
+class LendingWrongChainError(LendingReadError):
+    """A candidate returned a chain other than the pinned Base Mainnet."""
+
+
+class LendingTransportError(RuntimeError):
+    """A Base RPC candidate could not complete a read-only request."""
 
 
 class LendingReader(Protocol):
@@ -195,10 +204,15 @@ class BaseRpcReader:
         self.web3 = Web3(Web3.HTTPProvider(endpoint, request_kwargs={"timeout": timeout}))
 
     def begin(self) -> ChainSnapshot:
-        if self.web3.eth.chain_id != BASE_CHAIN_ID:
-            raise LendingReadError("Wrong Base chain")
-        block = self.web3.eth.get_block("latest")
-        return ChainSnapshot(int(block["number"]), int(block["timestamp"]))
+        try:
+            if self.web3.eth.chain_id != BASE_CHAIN_ID:
+                raise LendingWrongChainError("Wrong Base chain")
+            block = self.web3.eth.get_block("latest")
+            return ChainSnapshot(int(block["number"]), int(block["timestamp"]))
+        except LendingReadError:
+            raise
+        except Exception as error:
+            raise LendingTransportError("Base RPC unavailable") from error
 
     def _contract(self, address: str, abi: list[dict[str, Any]]):
         if not self.web3.eth.get_code(address):
@@ -206,54 +220,69 @@ class BaseRpcReader:
         return self.web3.eth.contract(address=address, abi=abi)
 
     def aave(self, snapshot: ChainSnapshot, account: str | None = None) -> tuple[int, int | None]:
-        contracts = dict(self.profiles.protocols[0].contracts)
-        usdc = self._contract(BASE_USDC, UINT_GETTER_ABI("decimals"))
-        if usdc.functions.decimals().call(block_identifier=snapshot.block_number) != 6:
-            raise LendingReadError("USDC decimals changed")
-        provider = self._contract(contracts["pool_addresses_provider"], ADDRESS_GETTER_ABI("getPool"))
-        if Web3.to_checksum_address(provider.functions.getPool().call(block_identifier=snapshot.block_number)) != contracts["pool"]:
-            raise LendingReadError("Aave Pool identity changed")
-        pool = self._contract(contracts["pool"], AAVE_POOL_ABI)
-        reserve = pool.functions.getReserveData(BASE_USDC).call(block_identifier=snapshot.block_number)
-        if len(reserve) != 15 or Web3.to_checksum_address(reserve[8]) != contracts["a_token"]:
-            raise LendingReadError("Aave reserve identity changed")
-        balance = None
-        if account is not None:
-            token = self._contract(contracts["a_token"], BALANCE_ABI)
-            balance = int(token.functions.balanceOf(account).call(block_identifier=snapshot.block_number))
-        return int(reserve[2]), balance
+        try:
+            contracts = dict(self.profiles.protocols[0].contracts)
+            usdc = self._contract(BASE_USDC, UINT_GETTER_ABI("decimals"))
+            if usdc.functions.decimals().call(block_identifier=snapshot.block_number) != 6:
+                raise LendingReadError("USDC decimals changed")
+            provider = self._contract(contracts["pool_addresses_provider"], ADDRESS_GETTER_ABI("getPool"))
+            if Web3.to_checksum_address(provider.functions.getPool().call(block_identifier=snapshot.block_number)) != contracts["pool"]:
+                raise LendingReadError("Aave Pool identity changed")
+            pool = self._contract(contracts["pool"], AAVE_POOL_ABI)
+            reserve = pool.functions.getReserveData(BASE_USDC).call(block_identifier=snapshot.block_number)
+            if len(reserve) != 15 or Web3.to_checksum_address(reserve[8]) != contracts["a_token"]:
+                raise LendingReadError("Aave reserve identity changed")
+            balance = None
+            if account is not None:
+                token = self._contract(contracts["a_token"], BALANCE_ABI)
+                balance = int(token.functions.balanceOf(account).call(block_identifier=snapshot.block_number))
+            return int(reserve[2]), balance
+        except LendingReadError:
+            raise
+        except Exception as error:
+            raise LendingTransportError("Base RPC unavailable") from error
 
     def compound(self, snapshot: ChainSnapshot, account: str | None = None) -> tuple[int, int, int | None]:
-        contracts = dict(self.profiles.protocols[1].contracts)
-        abi = ADDRESS_GETTER_ABI("baseToken") + UINT_GETTER_ABI("getUtilization") + COMPOUND_RATE_ABI + BALANCE_ABI
-        comet = self._contract(contracts["comet"], abi)
-        if Web3.to_checksum_address(comet.functions.baseToken().call(block_identifier=snapshot.block_number)) != BASE_USDC:
-            raise LendingReadError("Compound base token changed")
-        utilization = int(comet.functions.getUtilization().call(block_identifier=snapshot.block_number))
-        supply_rate = int(comet.functions.getSupplyRate(utilization).call(block_identifier=snapshot.block_number))
-        balance = None if account is None else int(comet.functions.balanceOf(account).call(block_identifier=snapshot.block_number))
-        return utilization, supply_rate, balance
+        try:
+            contracts = dict(self.profiles.protocols[1].contracts)
+            abi = ADDRESS_GETTER_ABI("baseToken") + UINT_GETTER_ABI("getUtilization") + COMPOUND_RATE_ABI + BALANCE_ABI
+            comet = self._contract(contracts["comet"], abi)
+            if Web3.to_checksum_address(comet.functions.baseToken().call(block_identifier=snapshot.block_number)) != BASE_USDC:
+                raise LendingReadError("Compound base token changed")
+            utilization = int(comet.functions.getUtilization().call(block_identifier=snapshot.block_number))
+            supply_rate = int(comet.functions.getSupplyRate(utilization).call(block_identifier=snapshot.block_number))
+            balance = None if account is None else int(comet.functions.balanceOf(account).call(block_identifier=snapshot.block_number))
+            return utilization, supply_rate, balance
+        except LendingReadError:
+            raise
+        except Exception as error:
+            raise LendingTransportError("Base RPC unavailable") from error
 
     def morpho(self, snapshot: ChainSnapshot, account: str | None = None) -> int | None:
-        selected = self.profiles.selected_morpho_vault
-        value = selected.to_dict()
-        abi = (
-            ADDRESS_GETTER_ABI("asset") + UINT_GETTER_ABI("decimals")
-            + STRING_GETTER_ABI("name") + STRING_GETTER_ABI("symbol")
-            + BALANCE_ABI + CONVERT_ABI
-        )
-        vault = self._contract(MORPHO_VAULT_ADDRESS, abi)
-        block = snapshot.block_number
-        if Web3.to_checksum_address(vault.functions.asset().call(block_identifier=block)) != BASE_USDC:
-            raise LendingReadError("Morpho asset changed")
-        if vault.functions.decimals().call(block_identifier=block) != value["share_decimals"]:
-            raise LendingReadError("Morpho share decimals changed")
-        if vault.functions.name().call(block_identifier=block) != value["name"] or vault.functions.symbol().call(block_identifier=block) != value["symbol"]:
-            raise LendingReadError("Morpho identity changed")
-        if account is None:
-            return None
-        shares = int(vault.functions.balanceOf(account).call(block_identifier=block))
-        return int(vault.functions.convertToAssets(shares).call(block_identifier=block))
+        try:
+            selected = self.profiles.selected_morpho_vault
+            value = selected.to_dict()
+            abi = (
+                ADDRESS_GETTER_ABI("asset") + UINT_GETTER_ABI("decimals")
+                + STRING_GETTER_ABI("name") + STRING_GETTER_ABI("symbol")
+                + BALANCE_ABI + CONVERT_ABI
+            )
+            vault = self._contract(MORPHO_VAULT_ADDRESS, abi)
+            block = snapshot.block_number
+            if Web3.to_checksum_address(vault.functions.asset().call(block_identifier=block)) != BASE_USDC:
+                raise LendingReadError("Morpho asset changed")
+            if vault.functions.decimals().call(block_identifier=block) != value["share_decimals"]:
+                raise LendingReadError("Morpho share decimals changed")
+            if vault.functions.name().call(block_identifier=block) != value["name"] or vault.functions.symbol().call(block_identifier=block) != value["symbol"]:
+                raise LendingReadError("Morpho identity changed")
+            if account is None:
+                return None
+            shares = int(vault.functions.balanceOf(account).call(block_identifier=block))
+            return int(vault.functions.convertToAssets(shares).call(block_identifier=block))
+        except LendingReadError:
+            raise
+        except Exception as error:
+            raise LendingTransportError("Base RPC unavailable") from error
 
 
 MORPHO_QUERY = """query HolonVault {
@@ -305,9 +334,11 @@ class LendingReadService:
     def __init__(
         self, profiles_state: ReadProfilesState, rpc_factory: Callable[[], BaseRpcReader],
         morpho: MorphoApiClient, clock: Callable[[], float] = time.time,
+        rpc_fallback_factories: tuple[Callable[[], BaseRpcReader], ...] = (),
     ) -> None:
         self._state = profiles_state
         self._rpc_factory = rpc_factory
+        self._rpc_fallback_factories = rpc_fallback_factories
         self._morpho = morpho
         self._clock = clock
         self._compare_cache: dict[str, Any] | None = None
@@ -319,10 +350,21 @@ class LendingReadService:
         state = ReadProfilesState.load()
         endpoint = values.get(BASE_RPC_ENV, DEFAULT_BASE_RPC_URL).strip()
         profiles = state.profiles
+        endpoints = tuple(dict.fromkeys((
+            endpoint, DEFAULT_BASE_RPC_URL, ALCHEMY_BASE_RPC_URL,
+        )))
+
+        def factory(value: str) -> Callable[[], BaseRpcReader]:
+            return lambda: (
+                BaseRpcReader(value, profiles) if profiles is not None
+                else (_ for _ in ()).throw(LendingReadError("Profiles unavailable"))
+            )
+
         return cls(
             state,
-            lambda: BaseRpcReader(endpoint, profiles) if profiles is not None else (_ for _ in ()).throw(LendingReadError("Profiles unavailable")),
+            factory(endpoints[0]),
             MorphoApiClient("https://api.morpho.org/graphql"),
+            rpc_fallback_factories=tuple(factory(value) for value in endpoints[1:]),
         )
 
     @classmethod
@@ -378,19 +420,49 @@ class LendingReadService:
                 deepcopy(self._compare_cache), self._compare_cached_at,
                 now - self._compare_cached_at, False,
             )
-        try:
-            rpc = self._rpc_factory()
-            snapshot = self._retry(rpc.begin)
-            chain_freshness = _freshness(snapshot.timestamp, snapshot.block_number, now)
-        except Exception:
-            rpc = None
-            snapshot = None
-            chain_freshness = _unavailable_freshness()
+        result = None
+        unavailable_code = "BASE_RPC_UNAVAILABLE"
+        for factory in self._rpc_factories():
+            try:
+                rpc, snapshot, chain_freshness = self._candidate_snapshot(factory, now)
+                markets = self._compare_candidate(
+                    rpc, snapshot, chain_freshness, contracts, now,
+                )
+            except LendingWrongChainError:
+                unavailable_code = "BASE_WRONG_CHAIN"
+                break
+            except LendingReadError:
+                unavailable_code = "BASE_VALIDATION_FAILED"
+                break
+            except Exception:
+                continue
+            result = self._compare_response(markets)
+            break
+        if result is None:
+            result = self._unavailable_compare(unavailable_code)
+        self._compare_cache = deepcopy(result)
+        self._compare_cached_at = now
+        return self._with_delivery(result, now, 0, force_refresh)
 
+    def _rpc_factories(self) -> tuple[Callable[[], BaseRpcReader], ...]:
+        return (self._rpc_factory, *self._rpc_fallback_factories)
+
+    def _candidate_snapshot(
+        self, factory: Callable[[], BaseRpcReader], now: int,
+    ) -> tuple[BaseRpcReader, ChainSnapshot, dict[str, Any]]:
+        rpc = factory()
+        snapshot = self._retry(rpc.begin)
+        freshness = _freshness(snapshot.timestamp, snapshot.block_number, now)
+        if freshness["state"] == "UNAVAILABLE":
+            raise LendingTransportError("Base RPC is not current")
+        return rpc, snapshot, freshness
+
+    def _compare_candidate(
+        self, rpc: BaseRpcReader, snapshot: ChainSnapshot,
+        chain_freshness: Mapping[str, Any], contracts: tuple[str, str, str], now: int,
+    ) -> list[dict[str, Any]]:
         def aave() -> dict[str, Any]:
             try:
-                if rpc is None or snapshot is None or chain_freshness["state"] == "UNAVAILABLE":
-                    raise LendingReadError("On-chain data unavailable")
                 ray, _ = self._retry(lambda: rpc.aave(snapshot))
                 apr = _rate(Decimal(ray) / Decimal(10**27))
                 return self._market_rate(
@@ -398,13 +470,13 @@ class LendingReadService:
                     apr, "APR", _apy_from_apr(apr), "per_second_compounding_365d",
                     chain_freshness, _incentives_unavailable(), ["INCENTIVES_NOT_PROFILED"],
                 )
+            except LendingTransportError:
+                raise
             except Exception:
                 return _market_unavailable(*PROTOCOLS[0][:2], contracts[0], "AAVE_DATA_UNAVAILABLE")
 
         def compound() -> dict[str, Any]:
             try:
-                if rpc is None or snapshot is None or chain_freshness["state"] == "UNAVAILABLE":
-                    raise LendingReadError("On-chain data unavailable")
                 _utilization, per_second, _ = self._retry(lambda: rpc.compound(snapshot))
                 per_second_decimal = _rate(Decimal(per_second) / Decimal(10**18))
                 apr = _rate(per_second_decimal * SECONDS_PER_YEAR)
@@ -414,14 +486,19 @@ class LendingReadService:
                     "per_second_wad", apr, "APR", apy, "per_second_compounding_365d",
                     chain_freshness, _incentives_unavailable(), ["INCENTIVES_NOT_PROFILED"],
                 )
+            except LendingTransportError:
+                raise
             except Exception:
                 return _market_unavailable(*PROTOCOLS[1][:2], contracts[1], "COMPOUND_DATA_UNAVAILABLE")
 
         def morpho() -> dict[str, Any]:
             try:
-                if rpc is None or snapshot is None or chain_freshness["state"] == "UNAVAILABLE":
-                    raise LendingReadError("On-chain identity unavailable")
                 self._retry(lambda: rpc.morpho(snapshot))
+            except LendingTransportError:
+                raise
+            except Exception:
+                return _market_unavailable(*PROTOCOLS[2][:2], contracts[2], "MORPHO_DATA_UNAVAILABLE")
+            try:
                 raw = self._retry(self._morpho.query)
                 rate, incentives, api_freshness = self._parse_morpho(raw, now)
                 freshness = _worst_freshness(chain_freshness, api_freshness)
@@ -437,11 +514,7 @@ class LendingReadService:
 
         with ThreadPoolExecutor(max_workers=3, thread_name_prefix="holon-lending") as executor:
             futures = [executor.submit(call) for call in (aave, compound, morpho)]
-            markets = [future.result() for future in futures]
-        result = self._compare_response(markets)
-        self._compare_cache = deepcopy(result)
-        self._compare_cached_at = now
-        return self._with_delivery(result, now, 0, force_refresh)
+            return [future.result() for future in futures]
 
     @staticmethod
     def _market_rate(
@@ -583,14 +656,43 @@ class LendingReadService:
         if not isinstance(address, str) or not Web3.is_checksum_address(address) or not isinstance(label, str):
             return self._positions_unavailable(None, "WALLET_ACCOUNT_UNAVAILABLE")
         contracts = self._profile_contracts()
-        try:
-            rpc = self._rpc_factory()
-            snapshot = self._retry(rpc.begin)
-            freshness = _freshness(snapshot.timestamp, snapshot.block_number, int(self._clock()))
-            if freshness["state"] == "UNAVAILABLE":
-                raise LendingReadError("On-chain snapshot unavailable")
-        except Exception:
-            return self._positions_unavailable(dict(account), "BASE_RPC_UNAVAILABLE")
+        positions = None
+        unavailable_code = "BASE_RPC_UNAVAILABLE"
+        for factory in self._rpc_factories():
+            try:
+                rpc, snapshot, freshness = self._candidate_snapshot(factory, int(self._clock()))
+                positions = self._positions_candidate(
+                    rpc, snapshot, freshness, address, contracts,
+                )
+            except LendingWrongChainError:
+                unavailable_code = "BASE_WRONG_CHAIN"
+                break
+            except LendingReadError:
+                unavailable_code = "BASE_VALIDATION_FAILED"
+                break
+            except Exception:
+                continue
+            break
+        if positions is None:
+            return self._positions_unavailable(dict(account), unavailable_code)
+        usable = [item for item in positions if item["freshness"]["state"] in {"LIVE", "STALE"}]
+        live = sum(item["freshness"]["state"] == "LIVE" for item in positions)
+        if live == 3:
+            status, code, message = "READY", "LENDING_POSITIONS_READY", "Lending positions are available."
+        elif usable:
+            status, code, message = "PARTIAL", "LENDING_POSITIONS_PARTIAL", "Some Lending positions are unavailable or stale."
+        else:
+            status, code, message = "DEGRADED", "LENDING_POSITIONS_UNAVAILABLE", "Lending positions are unavailable."
+        return {
+            "status": status, "authority_available": False, "account": dict(account),
+            "network": dict(NETWORK), "asset": dict(ASSET), "positions": positions,
+            "code": code, "message": message,
+        }
+
+    def _positions_candidate(
+        self, rpc: BaseRpcReader, snapshot: ChainSnapshot,
+        freshness: Mapping[str, Any], address: str, contracts: tuple[str, str, str],
+    ) -> list[dict[str, Any]]:
         positions: list[dict[str, Any]] = []
         calls = (
             lambda: self._retry(lambda: rpc.aave(snapshot, address))[1],
@@ -610,21 +712,11 @@ class LendingReadService:
                     "decimals": 6, "display_amount": _display_amount(amount),
                     "freshness": dict(freshness), "caveats": [],
                 })
+            except LendingTransportError:
+                raise
             except Exception:
                 positions.append(_position_unavailable(protocol, market, contracts[index], errors[index]))
-        usable = [item for item in positions if item["freshness"]["state"] in {"LIVE", "STALE"}]
-        live = sum(item["freshness"]["state"] == "LIVE" for item in positions)
-        if live == 3:
-            status, code, message = "READY", "LENDING_POSITIONS_READY", "Lending positions are available."
-        elif usable:
-            status, code, message = "PARTIAL", "LENDING_POSITIONS_PARTIAL", "Some Lending positions are unavailable or stale."
-        else:
-            status, code, message = "DEGRADED", "LENDING_POSITIONS_UNAVAILABLE", "Lending positions are unavailable."
-        return {
-            "status": status, "authority_available": False, "account": dict(account),
-            "network": dict(NETWORK), "asset": dict(ASSET), "positions": positions,
-            "code": code, "message": message,
-        }
+        return positions
 
     def _positions_unavailable(self, account: Mapping[str, str] | None, caveat: str) -> dict[str, Any]:
         contracts = self._profile_contracts() if self._state.profiles else PINNED_CONTRACTS

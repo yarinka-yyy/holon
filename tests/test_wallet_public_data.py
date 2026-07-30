@@ -84,7 +84,7 @@ def test_reads_both_allowlisted_networks_and_preserves_real_zero() -> None:
     assert clients["base"].contracts == [BASE_USDC, BASE_USDC]
     assert endpoints == [
         ("ethereum", "https://ethereum-rpc.publicnode.com"),
-        ("base", "https://base-rpc.publicnode.com"),
+        ("base", "https://mainnet.base.org"),
     ]
 
 

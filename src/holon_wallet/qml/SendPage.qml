@@ -245,7 +245,7 @@ PageState {
                     x: 12; anchors.verticalCenter: parent.verticalCenter; width: 30; height: 30
                     visible: !!root.selectedAsset
                     source: root.selectedAsset === "eth"
-                        ? "assets/ethereum.svg" : "assets/usdc.png"
+                        ? "assets/ethereum.svg" : "assets/usdc.webp"
                     sourceSize: Qt.size(60, 60)
                 }
                 Text {
@@ -358,7 +358,7 @@ PageState {
                     function trigger() { root.chooseAsset("usdc") }
                     Image {
                         x: 12; anchors.verticalCenter: parent.verticalCenter
-                        width: 26; height: 26; source: "assets/usdc.png"
+                        width: 26; height: 26; source: "assets/usdc.webp"
                         sourceSize: Qt.size(52, 52)
                     }
                     Text {

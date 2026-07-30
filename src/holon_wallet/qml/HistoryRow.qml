@@ -17,7 +17,7 @@ Item {
         interactive: true; onTriggered: root.detailsRequested(root.record.actionId || "")
         Image {
             x: 14; anchors.verticalCenter: parent.verticalCenter; width: 44; height: 44
-            source: root.record.token === "ETH" ? "assets/ethereum.svg" : "assets/usdc.png"
+            source: root.record.token === "ETH" ? "assets/ethereum.svg" : "assets/usdc.webp"
             sourceSize: Qt.size(88, 88)
         }
         Text {

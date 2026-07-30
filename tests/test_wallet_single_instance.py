@@ -2,7 +2,9 @@ import sys
 import uuid
 
 import pytest
+from unittest.mock import patch
 
+from holon_wallet import application
 from holon_wallet.single_instance import ProcessInstance, WindowsInstanceBackend
 
 
@@ -50,6 +52,33 @@ def test_second_process_activates_first_and_does_not_keep_handle() -> None:
     assert backend.closed == [backend.handle]
     instance.release()
     assert backend.closed == [backend.handle]
+
+
+def test_application_reports_unreachable_existing_instance() -> None:
+    instance = type("Instance", (), {
+        "acquire": lambda self: False,
+        "release": lambda self: None,
+    })()
+    with patch.object(application, "ProcessInstance", return_value=instance):
+        result = application.main([])
+
+    assert result == application.WALLET_INSTANCE_UNREACHABLE_EXIT_CODE
+
+
+def test_application_reports_initialization_failure_and_releases_mutex() -> None:
+    released = []
+    instance = type("Instance", (), {
+        "acquire": lambda self: True,
+        "release": lambda self: released.append(True),
+    })()
+    with (
+        patch.object(application, "ProcessInstance", return_value=instance),
+        patch.object(application, "WalletApplication", side_effect=RuntimeError("private")),
+    ):
+        result = application.main([])
+
+    assert result == application.WALLET_INITIALIZATION_FAILED_EXIT_CODE
+    assert released == [True]
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows named mutex only")

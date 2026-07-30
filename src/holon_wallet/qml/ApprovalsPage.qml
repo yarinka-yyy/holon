@@ -77,7 +77,7 @@ PageState {
             }
             Image {
                 x: 44; y: 34; width: 22; height: 22
-                source: "assets/usdc.png"; sourceSize: Qt.size(44, 44)
+                source: "assets/usdc.webp"; sourceSize: Qt.size(44, 44)
             }
             Text {
                 x: 78; y: 14; text: modelData.network + " · USDC"

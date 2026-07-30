@@ -3,6 +3,8 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
+from holon_contracts import MessageKind
+from holon_guard_ipc.client import PipeGuardClient, WALLET_OPEN_RESPONSE_TIMEOUT
 from holon_hermes_plugin.guard import (
     GuardAvailability,
     GuardConnector,
@@ -46,6 +48,17 @@ class FakeProcess:
 
     def terminate(self) -> None:
         self.terminated = True
+
+
+class RecordingPipeClient:
+    def __init__(self) -> None:
+        self.kind = None
+        self.response_timeout = None
+
+    def request(self, kind, payload=None, **kwargs):
+        self.kind = kind
+        self.response_timeout = kwargs.get("response_timeout")
+        return object()
 
 
 class GuardConnectorTests(unittest.TestCase):
@@ -96,6 +109,15 @@ class GuardConnectorTests(unittest.TestCase):
         raw = GuardHealth(GuardAvailability.AVAILABLE, GuardState.NORMAL, "PRIVATE_CODE", "private")
         result = GuardConnector(FakeClient(raw), FakeLauncher()).probe()
         self.assertEqual(result, GuardHealth.available(GuardState.NORMAL))
+
+    def test_open_wallet_allows_guard_startup_window(self) -> None:
+        client = RecordingPipeClient()
+
+        PipeGuardClient(client).open_wallet()
+
+        self.assertIs(client.kind, MessageKind.OPEN_WALLET)
+        self.assertEqual(client.response_timeout, WALLET_OPEN_RESPONSE_TIMEOUT)
+        self.assertGreater(WALLET_OPEN_RESPONSE_TIMEOUT, 10.0)
 
     @patch("holon_hermes_plugin.launcher.wait_for_pipe")
     @patch("holon_hermes_plugin.launcher.subprocess.Popen")

@@ -150,3 +150,40 @@ def test_failed_approve_review_clears_current_lending_operation(tmp_path: Path) 
     assert guard.snapshot.state is GuardState.NORMAL
     assert guard.lending_operation_snapshot.current is None
     assert guard.lending_operation_snapshot.terminal[-1].phase == "failed"
+
+
+def test_deferred_approve_receipt_releases_guard_for_recovery(tmp_path: Path) -> None:
+    state_store = SnapshotStore(tmp_path / "guard-state.json")
+    state_store.bootstrap_normal_for_test(1.0)
+    operation_store = LendingOperationStore(tmp_path / "lending-operation-state.json")
+    guard = GuardLifecycle(
+        state_store, state_store.load(), CompositeWallet(), Owner(),
+        make_ledger(tmp_path), operation_store, operation_store.load(),
+        clock=lambda: 2.0,
+    )
+    result, _prepared = guard.start_lending_intent(
+        101, ACTION_ID, FINGERPRINT,
+        {"action": "supply", "amount_mode": "exact", "amount": "2"},
+        2_000_000, "3", None, None, 7,
+        "1" * 64, "2" * 64, operation_id=ACTION_ID,
+    )
+    assert result.ok
+    tx_hash = "0x" + "8" * 64
+    assert guard.accept_wallet_status(status(
+        guard, "BROADCASTED", "PENDING", outcome="pending",
+        receipt_state="pending", tx_hash=tx_hash,
+    ))
+
+    assert guard.accept_wallet_status(status(
+        guard, "FAILED", "RECEIPT_CHECK_DEFERRED",
+        receipt_state="unknown", tx_hash=tx_hash,
+    ))
+
+    assert guard.snapshot.state is GuardState.NORMAL
+    recovery = guard.lending_operation_snapshot.current
+    assert recovery is not None
+    assert recovery.phase == "resume_or_revoke"
+    assert recovery.transaction_hash == tx_hash
+    assert recovery.receipt_state == "unknown"
+    assert guard.ledger.snapshot.current is None
+    assert guard.ledger.snapshot.terminal[-1].code == "RECEIPT_CHECK_DEFERRED"

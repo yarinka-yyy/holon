@@ -22,7 +22,7 @@ TransactionFlowShell {
         x: 0; y: 0; width: 458; height: 168
         Image {
             anchors.right: parent.right; anchors.rightMargin: 18; y: 20
-            width: 50; height: 50; source: "assets/usdc.png"
+            width: 50; height: 50; source: "assets/usdc.webp"
             sourceSize: Qt.size(100, 100)
         }
         Text {

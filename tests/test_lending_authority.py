@@ -12,8 +12,9 @@ from holon_lending import (
 from holon_lending.preflight import MAX_UINT256
 from holon_policy import LendingRule, Policy
 from holon_wallet.broadcast import (
-    BASE_RPC_ENV, BroadcastReceiptTracker, MainnetBroadcastPolicy,
-    MainnetTransferCode, MainnetTransferExecutor,
+    ALCHEMY_BASE_RPC_URL, BASE_RPC_ENV, DEFAULT_BASE_RPC_URL,
+    BroadcastReceiptTracker, MainnetBroadcastPolicy, MainnetTransferCode,
+    MainnetTransferExecutor, ReceiptTrackingCode, _final_protocol_revalidation,
 )
 from holon_wallet.history import HistoryStatus, HistoryStore, WalletHistoryRecord
 from holon_wallet.lending_action import prepare_lending_action
@@ -211,6 +212,49 @@ def test_wallet_builds_and_signer_accepts_generic_protocol_actions(
     assert prepared.method == method
     assert prepared.action_profile_digest == profile.digest
     assert validate_signing_action(prepared, prepared.digest, now) is None
+
+
+def test_morpho_deposit_revalidation_does_not_query_withdraw_limit() -> None:
+    state = ActionProfilesState.load()
+    profile = state.select("morpho-v1-gauntlet-usdc-prime")
+    assert profile is not None
+    now = datetime.now(UTC).replace(microsecond=0)
+    account = ProfileSummary("p", "Main", SENDER, "mnemonic", "m", "2026-07-26T00:00:00Z")
+    value = request(now)
+    value.update({
+        "protocol_profile_id": profile.profile_id,
+        "action_profile_digest": profile.digest,
+    })
+    action = prepare_lending_action(
+        LendingPreflightService(state, lambda: GenericRpc(profile, allowance=1_000_000)),
+        state, account, value,
+    )
+
+    class DepositRpc:
+        def latest_block(self): return action.block_number, 10
+        def lending_has_code(self, address, block): del address, block; return True
+        def lending_token_decimals(self, token, block): del token, block; return 6
+        def lending_protocol_asset(self, target, block): del target, block; return profile.asset
+        def lending_token_balance(self, token, account, block):
+            del token, block
+            return 10**12 if account.lower().endswith("dead") else 10_000_000
+        def lending_allowance(self, token, owner, spender, block):
+            del token, owner, spender, block
+            return action.amount_atomic
+        def lending_vault_limit(self, target, method, account, block):
+            del target, account, block
+            if method == "maxWithdraw":
+                raise AssertionError("deposit must not query maxWithdraw")
+            return 10_000_000
+        def estimate_gas(self, transaction): del transaction; return action.transaction.gas
+        def max_priority_fee_per_gas(self): return action.transaction.max_priority_fee_per_gas
+        def native_balance(self, account): del account; return 10**18
+        def lending_simulate(self, transaction): del transaction; return b""
+        def chain_id(self): return 8453
+        def pending_nonce(self, account): del account; return action.transaction.nonce
+
+    assert action.method == "deposit"
+    assert _final_protocol_revalidation(DepositRpc(), action, profile)
 
 
 @pytest.mark.parametrize("profile_id", [
@@ -516,3 +560,86 @@ def test_lending_receipt_tracker_fetches_transaction_and_confirms(
     assert rpc.transaction_calls == 1
     assert history.load()[0].status is HistoryStatus.CONFIRMED
     assert history.load()[0].actual_fee_wei == "203"
+
+
+def test_morpho_approval_fallback_keeps_receipt_tx_and_poststate_together(
+    tmp_path,
+) -> None:
+    state = ActionProfilesState.load()
+    profile = state.select("morpho-v1-gauntlet-usdc-prime")
+    assert profile is not None
+    transaction_hash = "0x" + "91" * 32
+    action_id = "act-morpho-fallback"
+    history = HistoryStore(WalletPaths(tmp_path))
+    history.append(WalletHistoryRecord(
+        action_id, "profile", "lending_approve", "base", 8453,
+        SENDER, profile.spender, profile.asset, "USDC", "1000000", 6,
+        transaction_hash, HistoryStatus.PENDING, "2026-07-26T00:00:00Z",
+        "2026-07-26T00:00:00Z", False, "100000000000000", None,
+        "operation-morpho", "0", profile.protocol_id, "1000000",
+    ))
+
+    class ReceiptRpc:
+        def __init__(self, *, poststate_error=False):
+            self.poststate_error = poststate_error
+            self.send_calls = 0
+            self.transaction_calls = 0
+
+        def chain_id(self):
+            return 8453
+
+        def transaction_receipt(self, _transaction_hash):
+            return {
+                "transactionHash": transaction_hash, "from": SENDER,
+                "to": profile.asset, "status": 1, "gasUsed": 100,
+                "effectiveGasPrice": 2, "l1Fee": "0x3", "logs": [],
+                "blockNumber": 100,
+            }
+
+        def transaction(self, _transaction_hash):
+            self.transaction_calls += 1
+            return {
+                "hash": transaction_hash, "from": SENDER, "to": profile.asset,
+                "value": 0, "input": encode_approve(profile.spender, 1_000_000),
+                "chainId": 8453,
+            }
+
+        def lending_allowance(self, token, owner, spender, block):
+            del token, owner, spender, block
+            if self.poststate_error:
+                raise RuntimeError("archive capability unavailable")
+            return 1_000_000
+
+        def lending_token_balance(self, token, owner, block):
+            del token, owner, block
+            return 0
+
+        def lending_vault_convert(self, target, method, shares, block):
+            del target, method, shares, block
+            return 0
+
+    configured = ReceiptRpc(poststate_error=True)
+    official = ReceiptRpc()
+    alchemy = ReceiptRpc()
+    endpoints = {
+        "fixture://configured": configured,
+        DEFAULT_BASE_RPC_URL: official,
+        ALCHEMY_BASE_RPC_URL: alchemy,
+    }
+
+    result = BroadcastReceiptTracker(
+        history, endpoints.__getitem__, {BASE_RPC_ENV: "fixture://configured"},
+        timeout_seconds=0,
+    ).check_once(action_id)
+
+    assert result.status is HistoryStatus.CONFIRMED
+    assert result.code is ReceiptTrackingCode.CONFIRMED
+    assert result.endpoint_class == "official"
+    assert configured.transaction_calls == 1
+    assert official.transaction_calls == 1
+    assert alchemy.transaction_calls == 0
+    assert configured.send_calls == official.send_calls == alchemy.send_calls == 0
+    stored = history.load()[0]
+    assert stored.allowance_after_atomic == "1000000"
+    assert stored.position_after_atomic == "0"
+    assert stored.position_verified is True

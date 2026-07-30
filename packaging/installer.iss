@@ -297,20 +297,24 @@ begin
       if IsPathInsideHermes(ProcessPath, HermesHome) then
       begin
         Log('Closing Hermes process: ' + ProcessPath);
-        TerminateResult := ProcessItem.Terminate(0);
-        if Integer(TerminateResult) <> 0 then
-        begin
-          Log('Hermes process termination failed with code ' +
-            IntToStr(Integer(TerminateResult)) + ': ' + ProcessPath);
-          Exit;
+        try
+          TerminateResult := ProcessItem.Terminate(0);
+          if Integer(TerminateResult) <> 0 then
+            Log('Hermes process termination failed with code ' +
+              IntToStr(Integer(TerminateResult)) + ': ' + ProcessPath +
+              '; checking the selected installation again.');
+        except
+          Log('Hermes process disappeared while closing: ' + ProcessPath +
+            '; checking the selected installation again.');
         end;
       end;
     end;
     Sleep(500);
     Result := CountHermesProcesses(HermesHome) = 0;
   except
-    Log('Hermes process termination failed: ' + GetExceptionMessage);
-    Result := False;
+    Log('Hermes process termination failed: ' + GetExceptionMessage +
+      '; checking the selected installation again.');
+    Result := CountHermesProcesses(HermesHome) = 0;
   end;
 end;
 

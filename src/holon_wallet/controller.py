@@ -1572,9 +1572,32 @@ class WalletController(QObject):
         self._set_screen("main")
 
     @Slot()
+    def returnToTransferReview(self) -> None:
+        if (
+            self._mainnet_in_progress
+            or self._current_screen != "sign_transfer"
+            or self._transfer_flow.current is None
+        ):
+            return
+        self._clear_mainnet_result()
+        self._set_screen("transfer_review")
+
+    @Slot()
     def finishMainnetExecution(self) -> None:
         if self._mainnet_in_progress:
             return
+        result = self._mainnet_result
+        if (
+            result is not None
+            and result.action_type.startswith("lending")
+            and result.transaction_hash
+            and result.history_status in {HistoryStatus.PENDING, HistoryStatus.UNKNOWN}
+            and self._external_transfer is not None
+        ):
+            self._receipt_cancelled.set()
+            self._receipt_generation += 1
+            self._receipt_checking = False
+            self._notify_external_transfer("FAILED", "RECEIPT_CHECK_DEFERRED")
         self._clear_mainnet_result()
         self._cancel_transfer_request(clear_recipient=True)
         self._set_screen("main")
@@ -2965,14 +2988,26 @@ class WalletController(QObject):
             or self._receipt_checking
         ):
             return False
-        action_id = str(self._lending_recovery["phaseActionId"])
-        self._lending_resume_action_id = action_id
+        # The phase action can be an interrupted, unsigned Supply review.  The
+        # operation ID is the original approve action and is the only record
+        # whose receipt may safely authorize the next fresh Supply review.
+        approval_action_id = str(self._lending_recovery["operationId"])
+        self._lending_resume_action_id = approval_action_id
         self._lending_recovery["status"] = "Checking confirmed approval receipt…"
         self.lendingRecoveryChanged.emit()
-        if not self._start_receipt_check(action_id, track=False):
-            self._lending_resume_action_id = ""
+        if not self._start_receipt_check(approval_action_id, track=False):
+            self._finish_lending_resume_check_unavailable()
             return False
         return True
+
+    def _finish_lending_resume_check_unavailable(self) -> None:
+        self._lending_resume_action_id = ""
+        if not self._lending_recovery:
+            return
+        self._lending_recovery["status"] = (
+            "Approval receipt could not be checked · no rebroadcast will occur"
+        )
+        self.lendingRecoveryChanged.emit()
 
     def _finish_lending_resume_check(self, result: ReceiptTrackingResult) -> None:
         self._lending_resume_action_id = ""
@@ -2980,7 +3015,11 @@ class WalletController(QObject):
             self._lending_recovery["status"] = (
                 "Approval failed · revoke or cancel the operation"
                 if result.status is HistoryStatus.FAILED
-                else "Approval is not confirmed · use Resume supply to check again"
+                else (
+                    "Receipt RPC is unavailable · no rebroadcast will occur"
+                    if result.code.value == "RECEIPT_RPC_UNAVAILABLE"
+                    else "Approval is not confirmed · use Resume supply to check again"
+                )
             )
             self.lendingRecoveryChanged.emit()
             return
@@ -3328,6 +3367,13 @@ class WalletController(QObject):
                     self._notify_external_transfer(
                         "RECEIPT_FAILED", current.code.value,
                     )
+                elif (
+                    current.action_type.startswith("lending")
+                    and current.history_status in {
+                        HistoryStatus.PENDING, HistoryStatus.UNKNOWN,
+                    }
+                ):
+                    self._notify_external_transfer("FAILED", result.code.value)
             if result.action_id == self._lending_resume_action_id:
                 self._finish_lending_resume_check(result)
             if (
@@ -3338,6 +3384,8 @@ class WalletController(QObject):
                 and self._is_recovery_revoke(result.action_id)
             ):
                 self._cancel_lending_recovery(after_revoke=True)
+        elif self._lending_resume_action_id:
+            self._finish_lending_resume_check_unavailable()
         self.transferChanged.emit()
         self.approvalChanged.emit()
 
@@ -3456,6 +3504,7 @@ class WalletController(QObject):
         active = self._state.active_profile
         if isinstance(result, (TransferPreflightError, LendingPreflightError)):
             self._transfer_flow.close()
+            is_lending = isinstance(result, LendingPreflightError)
             message = (
                 _transfer_error_message(result.code)
                 if isinstance(result, TransferPreflightError)
@@ -3465,6 +3514,13 @@ class WalletController(QObject):
             self.transferChanged.emit()
             code = result.code.value if isinstance(result, TransferPreflightError) else result.code
             self._finish_external_preflight(None, code)
+            if is_lending and self._load_lending_recovery():
+                self._lending_recovery["status"] = (
+                    f"Fresh preflight could not be completed ({code}) · "
+                    "no Supply Review was prepared"
+                )
+                self.lendingRecoveryChanged.emit()
+                return
             self._set_screen("send")
             return
         if not isinstance(result, PreparedTransferAction) or active is None:

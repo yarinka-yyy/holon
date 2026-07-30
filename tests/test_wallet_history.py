@@ -84,6 +84,58 @@ def test_v1_loads_without_fee_fields_and_migrates_on_next_mutation(tmp_path) -> 
     migrated = store.path.read_text(encoding="utf-8")
     assert f'"schema_version": {HISTORY_SCHEMA_VERSION}' in migrated
     assert '"max_total_fee_wei": null' in migrated
+    assert '"receipt_code": null' in migrated
+    assert '"receipt_endpoint_class": null' in migrated
+
+
+def test_v5_loads_and_migrates_to_v6_on_next_mutation(tmp_path) -> None:
+    store = HistoryStore(WalletPaths(tmp_path))
+    legacy = record(
+        action_type="lending_approve",
+        contract="0x" + "44" * 20,
+        operation_id="operation-1",
+        protocol_id="morpho-v1",
+        call_amount_atomic="1000000",
+        position_after_atomic="0",
+        allowance_after_atomic="1000000",
+        position_verified=True,
+    )
+    atomic_write_json(
+        store.path,
+        {"schema_version": 5, "records": [legacy.to_dict(include_v5=True)]},
+    )
+
+    loaded = store.load()
+    assert loaded[0].protocol_id == "morpho-v1"
+    assert loaded[0].receipt_code is None
+    store.update_status(
+        "act-1", HistoryStatus.UNKNOWN, "2026-07-20T12:01:00Z", HASH,
+        receipt_code="RECEIPT_RPC_UNAVAILABLE",
+        receipt_endpoint_class="official",
+    )
+
+    migrated = store.path.read_text(encoding="utf-8")
+    assert '"schema_version": 6' in migrated
+    assert '"receipt_code": "RECEIPT_RPC_UNAVAILABLE"' in migrated
+    assert '"receipt_endpoint_class": "official"' in migrated
+
+
+@pytest.mark.parametrize("schema_version", [2, 3, 4])
+def test_v2_through_v4_history_remains_readable(tmp_path, schema_version) -> None:
+    store = HistoryStore(WalletPaths(tmp_path))
+    legacy = record().to_dict()
+    if schema_version < 4:
+        legacy.pop("position_before_atomic")
+    if schema_version < 3:
+        legacy.pop("operation_id")
+    atomic_write_json(
+        store.path,
+        {"schema_version": schema_version, "records": [legacy]},
+    )
+
+    loaded = store.load()
+
+    assert loaded == (record(),)
 
 
 def test_fee_fields_are_public_decimal_strings_and_mapped_as_eth(tmp_path) -> None:
@@ -146,7 +198,9 @@ def test_history_is_trimmed_to_latest_500_records(tmp_path) -> None:
         store.path,
         {
             "schema_version": HISTORY_SCHEMA_VERSION,
-            "records": [item.to_dict() for item in initial],
+            "records": [
+                item.to_dict(include_v5=True, include_v6=True) for item in initial
+            ],
         },
     )
 
@@ -206,6 +260,8 @@ def test_simulated_record_is_explicit_in_qml_map(tmp_path) -> None:
         {"created_at": "not-utc"},
         {"max_total_fee_wei": "1.2"},
         {"actual_fee_wei": "-1"},
+        {"receipt_code": "RAW_PROVIDER_EXCEPTION"},
+        {"receipt_endpoint_class": "https://secret.invalid/token"},
     ],
 )
 def test_invalid_public_record_fields_are_refused(changes) -> None:

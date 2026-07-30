@@ -60,7 +60,7 @@ def _protocol_to_map(value: object, prices: PriceSnapshot) -> dict[str, object]:
             "aave-v3": "assets/aave-logo-white.png",
             "compound-v3": "assets/compound-logo-white.svg",
             "morpho-v1": "assets/morpho-logo-white.svg",
-        }.get(protocol, "assets/usdc.png"),
+        }.get(protocol, "assets/usdc.webp"),
         "position": _usdc(position_atomic),
         "positionUsd": _usd(position_atomic, prices),
         "positionKnown": position_known,

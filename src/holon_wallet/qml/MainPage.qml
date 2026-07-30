@@ -190,7 +190,7 @@ PageState {
                         divider: walletController.portfolioData.assets.length > 2
                         asset: walletController.portfolioData.assets.length > 1
                             ? walletController.portfolioData.assets[1] : ({})
-                        iconSource: "assets/usdc.png"
+                        iconSource: "assets/usdc.webp"
                         amountsVisible: walletController.balancesVisible
                     }
                     Repeater {

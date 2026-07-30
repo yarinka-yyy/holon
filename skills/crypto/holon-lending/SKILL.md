@@ -92,8 +92,9 @@ Insufficient position, debt, liquidity, paused protocol state, changed profile i
 After the user returns from Wallet, call `holon_action_status` with the exact known `action_id`.
 
 - Use `holon_cancel_action` only after the user explicitly asks to cancel and Holon permits cancellation.
-- Use `holon_recover_action` only for a reported recovery-required state.
-- If recovery offers Resume, Revoke, or Cancel, explain those exact choices and wait for the user. Do not choose one automatically.
+- A Wallet-local Lending `resume_or_revoke` state is not generic Guard recovery. When the user asks to continue that current Lending/Morpho recovery, call `holon_open_wallet`, including while Guard reports `RECOVERY_REQUIRED`; do not call `holon_recover_action` for it.
+- `ACTIVATED` means Wallet activation was requested and `OPENED` means its launch was verified. Do not claim that the window is visibly open; ask the user to use the local Recovery screen only after they can see it.
+- Use `holon_recover_action` only when the exact known action is reported as generic recovery-required. If Wallet-local recovery offers Resume, Revoke, or Cancel, explain those exact choices and wait for the user. Do not choose one automatically.
 - Never reuse an old action, preview, signature, signed bytes, nonce, fee fields, or transaction after failure or uncertainty.
 
 Preserve whether the reported outcome is local approval, broadcast, pending receipt, confirmed receipt, failed receipt, refusal, cancellation, expiry, or recovery-required. Only a verified confirmed receipt proves the on-chain phase completed.

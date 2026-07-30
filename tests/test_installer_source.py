@@ -45,6 +45,12 @@ def test_installer_requires_safe_hermes_and_uses_transactional_backend() -> None
     assert "SELECT ProcessId, ExecutablePath FROM Win32_Process" in source
     assert "IsPathInsideHermes(ProcessPath, HermesHome)" in source
     assert "ProcessItem.Terminate(0)" in source
+    close_processes = source.split("function CloseHermesProcesses", 1)[1].split(
+        "function RunDetector", 1,
+    )[0]
+    assert "checking the selected installation again" in close_processes
+    assert "Result := CountHermesProcesses(HermesHome) = 0;" in close_processes
+    assert "          Exit;" not in close_processes
     assert "HermesClosePrompt" in source
     prepare = source.split("function PrepareToInstall", 1)[1].split(
         "function JoinOutput", 1

@@ -15,8 +15,11 @@ from holon_wallet_control import AUTHORITY_VERSION, ControlProtocolError, Contro
 class FakeProcess:
     pid = 202
 
+    def __init__(self, exit_code: int | None = None) -> None:
+        self.exit_code = exit_code
+
     def poll(self) -> int | None:
-        return None
+        return self.exit_code
 
 
 class GuardWalletTests(unittest.TestCase):
@@ -198,10 +201,77 @@ class GuardWalletTests(unittest.TestCase):
                 path, Control(), lambda *args, **kwargs: spawned.append(args),
             ).open_public()
         self.assertFalse(result.ok)
-        self.assertEqual(result.code, "WALLET_UNAVAILABLE")
+        self.assertEqual(result.code, "CONTROL_PROTOCOL_FAILED")
         self.assertEqual(calls, 1)
         self.assertEqual(spawned, [])
         self.assertNotIn("mismatch", result.message)
+
+    def test_open_public_distinguishes_missing_and_spawn_failure(self) -> None:
+        class Control:
+            def activate(self, *_args):
+                raise ControlUnavailable("not ready")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "HolonWallet.exe"
+            missing = VerifiedWalletController(path, Control()).open_public()
+            path.write_bytes(b"fixture")
+
+            def fail_spawn(*_args, **_kwargs):
+                raise OSError("private spawn detail")
+
+            failed = VerifiedWalletController(
+                path, Control(), fail_spawn,
+            ).open_public()
+
+        self.assertEqual(missing.code, "WALLET_EXECUTABLE_MISSING")
+        self.assertEqual(failed.code, "WALLET_START_FAILED")
+        self.assertNotIn("private", failed.message.lower())
+
+    def test_open_public_classifies_post_spawn_exit_and_timeout(self) -> None:
+        class Control:
+            def activate(self, *_args):
+                raise ControlUnavailable("not ready")
+
+        cases = [
+            (None, "WALLET_STARTUP_TIMEOUT"),
+            (0, "WALLET_INSTANCE_UNREACHABLE"),
+            (21, "WALLET_INSTANCE_UNREACHABLE"),
+            (20, "WALLET_INITIALIZATION_FAILED"),
+            (7, "WALLET_EXITED"),
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "HolonWallet.exe"
+            path.write_bytes(b"fixture")
+            for exit_code, expected_code in cases:
+                with self.subTest(exit_code=exit_code):
+                    process = FakeProcess(exit_code)
+                    controller = VerifiedWalletController(
+                        path, Control(), lambda *_args, **_kwargs: process,
+                    )
+                    result = controller.open_public()
+                    self.assertEqual(result.code, expected_code)
+                    self.assertIs(controller._current, process)
+                    self.assertNotIn(str(path), result.message)
+                    if expected_code == "WALLET_EXITED":
+                        self.assertIn("exit code 7", result.message)
+
+    def test_process_verification_code_is_preserved_without_private_detail(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "HolonWallet.exe"
+            path.write_bytes(b"fixture")
+
+            class Control:
+                def activate(self, *_args):
+                    raise ControlProtocolError(
+                        "private pid path pipe detail",
+                        "WALLET_PROCESS_VERIFICATION_FAILED",
+                    )
+
+            result = VerifiedWalletController(path, Control()).open_public()
+
+        self.assertEqual(result.code, "WALLET_PROCESS_VERIFICATION_FAILED")
+        for value in ("private", "pid", "path", "pipe"):
+            self.assertNotIn(value, result.message.lower())
 
     def test_public_balances_spawn_one_hidden_worker_and_read_once(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

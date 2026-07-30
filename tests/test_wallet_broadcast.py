@@ -9,14 +9,17 @@ from web3 import Web3
 from holon_policy import Policy, RecipientRule, TransferRule
 
 from holon_wallet.broadcast import (
+    ALCHEMY_BASE_RPC_URL,
     BASE_RPC_ENV,
     BROADCAST_ENABLED_ENV,
+    DEFAULT_BASE_RPC_URL,
     TRANSFER_EVENT_TOPIC,
     BroadcastReceiptTracker,
     MainnetBroadcastPolicy,
     MainnetTransferCode,
     MainnetTransferExecutor,
     MainnetTransferResult,
+    ReceiptTrackingCode,
     mainnet_result_to_map,
 )
 from holon_wallet.history import (
@@ -54,6 +57,7 @@ class MainnetRpcStub:
             "remote_hash": None,
             "transaction": None,
             "receipt": None,
+            "receipt_error": None,
     }
         self.values.update(overrides)
         self.chain_calls = 0
@@ -98,7 +102,14 @@ class MainnetRpcStub:
 
     def transaction_receipt(self, _transaction_hash):
         self.receipt_calls += 1
+        if self.values["receipt_error"] is not None:
+            raise self.values["receipt_error"]
         return self.values["receipt"]
+
+
+class ReadUnavailableRpc(MainnetRpcStub):
+    def chain_id(self):
+        raise RuntimeError("read-only provider unavailable")
 
 
 def new_password() -> str:
@@ -440,6 +451,70 @@ def test_final_live_revalidation_fails_closed_before_authentication(
     assert history.load()[0].status is HistoryStatus.PREPARED
 
 
+def test_readonly_revalidation_falls_back_but_broadcasts_primary_once(tmp_path) -> None:
+    repository, history, action, password, _secret, _rpc = prepared_fixture(tmp_path)
+    primary = ReadUnavailableRpc()
+    fallback = MainnetRpcStub()
+    endpoints = {
+        "fixture://primary": primary,
+        DEFAULT_BASE_RPC_URL: fallback,
+        ALCHEMY_BASE_RPC_URL: fallback,
+    }
+    result = MainnetTransferExecutor(
+        repository, history, MainnetBroadcastPolicy(True, OfflineSigningPolicy(10**18)),
+        endpoints.__getitem__, {BASE_RPC_ENV: "fixture://primary"}, lambda: NOW,
+    ).execute(action, action.digest, password, SigningPermit())
+
+    assert result.code is MainnetTransferCode.PENDING
+    assert primary.send_calls == 1
+    assert fallback.send_calls == 0
+
+
+def test_revalidation_semantic_failure_does_not_fall_back_or_authenticate(
+    tmp_path, monkeypatch,
+) -> None:
+    repository, history, action, password, _secret, _rpc = prepared_fixture(tmp_path)
+    primary = MainnetRpcStub(chain_id=1)
+    fallback = MainnetRpcStub()
+    endpoints = {
+        "fixture://primary": primary,
+        DEFAULT_BASE_RPC_URL: fallback,
+        ALCHEMY_BASE_RPC_URL: fallback,
+    }
+
+    def forbidden_authentication(*_args):
+        raise AssertionError("Final revalidation reached vault authentication")
+
+    monkeypatch.setattr(repository, "_authenticate_profile", forbidden_authentication)
+    result = MainnetTransferExecutor(
+        repository, history, MainnetBroadcastPolicy(True, OfflineSigningPolicy(10**18)),
+        endpoints.__getitem__, {BASE_RPC_ENV: "fixture://primary"}, lambda: NOW,
+    ).execute(action, action.digest, password, SigningPermit())
+
+    assert result.code is MainnetTransferCode.REVALIDATION_FAILED
+    assert primary.send_calls == fallback.send_calls == 0
+    assert fallback.chain_calls == 0
+
+
+def test_revalidation_provider_exhaustion_fails_before_authentication(
+    tmp_path, monkeypatch,
+) -> None:
+    repository, history, action, password, _secret, _rpc = prepared_fixture(tmp_path)
+    unavailable = ReadUnavailableRpc()
+
+    def forbidden_authentication(*_args):
+        raise AssertionError("Final revalidation reached vault authentication")
+
+    monkeypatch.setattr(repository, "_authenticate_profile", forbidden_authentication)
+    result = MainnetTransferExecutor(
+        repository, history, MainnetBroadcastPolicy(True, OfflineSigningPolicy(10**18)),
+        lambda _endpoint: unavailable, {BASE_RPC_ENV: "fixture://primary"}, lambda: NOW,
+    ).execute(action, action.digest, password, SigningPermit())
+
+    assert result.code is MainnetTransferCode.REVALIDATION_RPC_UNAVAILABLE
+    assert unavailable.send_calls == 0
+
+
 def test_history_hash_gate_blocks_broadcast_on_atomic_failure(
     tmp_path, monkeypatch,
 ) -> None:
@@ -620,11 +695,11 @@ def test_receipt_tracker_rejects_wrong_event_and_recovers_unknown_pending(
     }
     chain_calls = rpc.chain_calls
     assert tracker.check_once(action.action_id).status is HistoryStatus.PENDING
-    assert rpc.chain_calls == chain_calls + 1
+    assert rpc.chain_calls == chain_calls + 3
 
     rpc.values["receipt"] = receipt(action, sent.transaction_hash, amount=2_000_000)
     assert tracker.check_once(action.action_id).status is HistoryStatus.UNKNOWN
-    assert rpc.chain_calls == chain_calls + 2
+    assert rpc.chain_calls == chain_calls + 4
 
     malformed_fee = receipt(action, sent.transaction_hash)
     malformed_fee.pop("effectiveGasPrice")
@@ -633,7 +708,7 @@ def test_receipt_tracker_rejects_wrong_event_and_recovers_unknown_pending(
     assert history.load()[0].actual_fee_wei is None
 
 
-def test_tracking_timeout_is_read_only_and_keeps_accepted_submission_pending(
+def test_tracking_timeout_is_read_only_and_defers_as_unknown(
     tmp_path,
 ) -> None:
     repository, history, action, password, _secret, rpc = prepared_fixture(tmp_path)
@@ -656,6 +731,113 @@ def test_tracking_timeout_is_read_only_and_keeps_accepted_submission_pending(
         poll_interval_seconds=3,
     ).track(action.action_id)
 
-    assert result.status is HistoryStatus.PENDING
-    assert rpc.receipt_calls == 3
+    assert result.status is HistoryStatus.UNKNOWN
+    assert result.code is ReceiptTrackingCode.TRANSACTION_UNKNOWN
+    assert history.load()[0].status is HistoryStatus.UNKNOWN
+    assert rpc.receipt_calls == 9
     assert rpc.send_calls == 1
+
+
+def test_receipt_rpc_failure_becomes_unknown_without_rebroadcast(tmp_path) -> None:
+    repository, history, action, password, _secret, rpc = prepared_fixture(tmp_path)
+    sent = executor(repository, history, rpc).execute(
+        action, action.digest, password, SigningPermit(),
+    )
+    rpc.values["receipt_error"] = TimeoutError("provider canary must not persist")
+
+    tracked = BroadcastReceiptTracker(
+        history,
+        lambda _endpoint: rpc,
+        {BASE_RPC_ENV: "fixture://configured"},
+        lambda: NOW,
+        timeout_seconds=0,
+    ).check_once(action.action_id)
+
+    assert tracked.status is HistoryStatus.UNKNOWN
+    assert tracked.code is ReceiptTrackingCode.RPC_UNAVAILABLE
+    assert tracked.endpoint_class == "alchemy_public"
+    stored = history.load()[0]
+    assert stored.status is HistoryStatus.UNKNOWN
+    assert stored.receipt_code == "RECEIPT_RPC_UNAVAILABLE"
+    assert stored.receipt_endpoint_class == "alchemy_public"
+    assert "provider canary" not in history.path.read_text(encoding="utf-8")
+    assert rpc.send_calls == 1
+
+
+def test_receipt_pool_uses_validated_official_fallback(tmp_path) -> None:
+    repository, history, action, password, _secret, primary = prepared_fixture(tmp_path)
+    sent = executor(repository, history, primary).execute(
+        action, action.digest, password, SigningPermit(),
+    )
+    configured = MainnetRpcStub(
+        receipt_error=RuntimeError("configured endpoint unavailable"),
+    )
+    official = MainnetRpcStub(receipt=receipt(action, sent.transaction_hash))
+    alchemy = MainnetRpcStub(receipt_error=AssertionError("fallback must stop"))
+    endpoints = {
+        "fixture://configured": configured,
+        DEFAULT_BASE_RPC_URL: official,
+        ALCHEMY_BASE_RPC_URL: alchemy,
+    }
+
+    tracked = BroadcastReceiptTracker(
+        history,
+        endpoints.__getitem__,
+        {BASE_RPC_ENV: "fixture://configured"},
+        lambda: NOW,
+        timeout_seconds=0,
+    ).check_once(action.action_id)
+
+    assert tracked.status is HistoryStatus.CONFIRMED
+    assert tracked.code is ReceiptTrackingCode.CONFIRMED
+    assert tracked.endpoint_class == "official"
+    assert configured.receipt_calls == 1
+    assert official.receipt_calls == 1
+    assert alchemy.receipt_calls == 0
+    assert primary.send_calls == 1
+    assert configured.send_calls == official.send_calls == alchemy.send_calls == 0
+    stored = history.load()[0]
+    assert stored.receipt_code == "RECEIPT_CONFIRMED"
+    assert stored.receipt_endpoint_class == "official"
+
+
+@pytest.mark.parametrize(
+    ("configured_chain", "official_chain", "alchemy_chain", "expected"),
+    [
+        (1, 1, 1, ReceiptTrackingCode.WRONG_CHAIN),
+        (8453, 1, 1, ReceiptTrackingCode.VALIDATION_FAILED),
+    ],
+)
+def test_receipt_pool_fails_closed_for_wrong_chain_or_malformed_receipt(
+    tmp_path, configured_chain, official_chain, alchemy_chain, expected,
+) -> None:
+    repository, history, action, password, _secret, primary = prepared_fixture(tmp_path)
+    sent = executor(repository, history, primary).execute(
+        action, action.digest, password, SigningPermit(),
+    )
+    malformed = receipt(action, sent.transaction_hash)
+    malformed["transactionHash"] = "0x" + "99" * 32
+    configured = MainnetRpcStub(
+        chain_id=configured_chain,
+        receipt=malformed if configured_chain == 8453 else None,
+    )
+    official = MainnetRpcStub(chain_id=official_chain)
+    alchemy = MainnetRpcStub(chain_id=alchemy_chain)
+    endpoints = {
+        "fixture://configured": configured,
+        DEFAULT_BASE_RPC_URL: official,
+        ALCHEMY_BASE_RPC_URL: alchemy,
+    }
+
+    tracked = BroadcastReceiptTracker(
+        history,
+        endpoints.__getitem__,
+        {BASE_RPC_ENV: "fixture://configured"},
+        lambda: NOW,
+        timeout_seconds=0,
+    ).check_once(action.action_id)
+
+    assert tracked.status is HistoryStatus.UNKNOWN
+    assert tracked.code is expected
+    assert primary.send_calls == 1
+    assert configured.send_calls == official.send_calls == alchemy.send_calls == 0

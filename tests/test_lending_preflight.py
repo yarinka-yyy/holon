@@ -300,6 +300,54 @@ def test_compound_and_morpho_support_all_four_intents_without_signing(profile_id
     assert withdraw_all["gas"] == "90000"
 
 
+def test_protocol_preflight_uses_one_fallback_after_archive_capability_failure() -> None:
+    state = ActionProfilesState.load()
+    profile = state.select("morpho-v1-gauntlet-usdc-prime")
+    assert profile is not None
+    primary = ProtocolRpc(profile)
+    fallback = ProtocolRpc(profile)
+
+    def archive_unavailable(*_args):
+        raise OSError("archive capability unavailable")
+
+    primary.vault_convert = archive_unavailable
+    service = LendingPreflightService(
+        state, lambda: primary, clock=lambda: NOW,
+        rpc_fallback_factories=(lambda: fallback,),
+    )
+
+    result = service.prepare(
+        protocol_intent(profile.profile_id, "supply", "exact", "1"),
+        {"label": "Main", "address": SENDER},
+        expected_profile_digest=profile.digest,
+    )
+
+    assert result["next_action"] == "approve"
+    assert primary.calls.count("begin") == 1
+    assert fallback.calls.count("begin") == 1
+
+
+def test_preflight_does_not_fallback_from_wrong_chain() -> None:
+    state = ActionProfilesState.load()
+    assert state.profile is not None
+    primary = FakeRpc(state.profile)
+    fallback = FakeRpc(state.profile)
+    primary.chain_ok = False
+    service = LendingPreflightService(
+        state, lambda: primary, clock=lambda: NOW,
+        rpc_fallback_factories=(lambda: fallback,),
+    )
+
+    with pytest.raises(LendingPreflightError) as raised:
+        service.prepare(
+            intent(), {"label": "Main", "address": SENDER},
+            expected_profile_digest=state.profile.digest,
+        )
+
+    assert raised.value.code == "WRONG_CHAIN"
+    assert fallback.calls == []
+
+
 def test_compound_refuses_borrow_position_and_liquidity_overrun() -> None:
     state = ActionProfilesState.load()
     profile = state.select("compound-v3-base-usdc")

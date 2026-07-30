@@ -16,15 +16,15 @@ TransactionFlowShell {
     property string lendingMethod: action.method === "withdraw" && action.amountMode === "all"
         ? "withdraw all" : (action.method || "action")
     property url assetIcon: action.assetId === "eth"
-        ? "assets/ethereum.svg" : "assets/usdc.png"
+        ? "assets/ethereum.svg" : "assets/usdc.webp"
     property url networkIcon: action.networkId === "ethereum"
         ? "assets/ethereum.svg" : "assets/base.png"
     readonly property int reviewCardWidth: 458
     readonly property int accountY: root.isLending ? 0 : 50
     readonly property int recipientY: root.isLending ? 74 : 118
-    readonly property int summaryY: root.isLending ? 154 : 190
+    readonly property int summaryY: root.isLending ? 142 : 190
     readonly property int detailsY: root.isLending
-        ? (root.highLendingFee ? 384 : 340) : 372
+        ? (root.highLendingFee ? 372 : 328) : 372
     readonly property int collapsedContentHeight: root.detailsY + 48
 
     function lendingTitle() {
@@ -83,26 +83,26 @@ TransactionFlowShell {
         }
         SurfaceCard {
             objectName: "transferReviewRecipient"; x: 0; y: root.recipientY
-            width: root.reviewCardWidth; height: root.isLending ? 72 : 66
+            width: root.reviewCardWidth; height: root.isLending ? 60 : 66
             Image {
-                x: 16; y: 14; width: 24; height: 24
-                source: root.isLending ? "assets/usdc.png" : "assets/user.svg"
+                x: 16; y: root.isLending ? 18 : 14; width: 24; height: 24
+                source: root.isLending ? "assets/usdc.webp" : "assets/user.svg"
             }
             Image {
                 visible: root.isLending
-                x: parent.width - 126; y: 24; width: 110; height: 22
+                x: parent.width - 126; y: 19; width: 110; height: 22
                 source: root.action.protocolLogo || ""
                 fillMode: Image.PreserveAspectFit
                 sourceSize: Qt.size(220, 44)
             }
             Text {
-                x: 52; y: 11; width: root.isLending ? 248 : 370
+                x: 52; y: root.isLending ? 8 : 11; width: root.isLending ? 248 : 370
                 text: root.isLending ? root.lendingTitle() : "To"
                 color: Design.text; font.family: Design.fontFamily
                 font.pixelSize: 14; font.weight: Font.Medium
             }
             Text {
-                x: 52; y: 35; width: root.isLending ? 248 : 370
+                x: 52; y: root.isLending ? 31 : 35; width: root.isLending ? 248 : 370
                 text: root.isLending ? root.lendingStep() : (root.action.recipient || "")
                 color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 11
                 elide: root.isLending ? Text.ElideRight : Text.ElideMiddle

@@ -8,12 +8,38 @@ Item {
     property bool divider: true
     property bool amountsVisible: true
     property bool expanded: false
+    readonly property string protocolBadgeLabel: ({
+        "aave-v3": "Aave",
+        "compound-v3": "Compound",
+        "morpho-v1": "Morpho"
+    })[String(root.asset.assetId || "")] || ""
+    readonly property bool isLendingPosition: protocolBadgeLabel.length > 0
     height: 74 + (expanded ? 54 : 0)
 
     Image {
+        visible: !root.isLendingPosition
         x: 14; y: 17; width: 40; height: 40
         source: root.iconSource; sourceSize: Qt.size(80, 80)
         fillMode: Image.PreserveAspectFit
+    }
+    Rectangle {
+        visible: root.isLendingPosition
+        x: 14; y: 17; width: 40; height: 40; radius: 20
+        color: Design.surfaceSecondary; border.width: 1; border.color: Design.border
+        Image {
+            anchors.horizontalCenter: parent.horizontalCenter
+            y: 5; width: 20; height: 11
+            source: root.iconSource; sourceSize: Qt.size(40, 22)
+            fillMode: Image.PreserveAspectFit
+        }
+        Text {
+            anchors.horizontalCenter: parent.horizontalCenter
+            y: 20; width: parent.width - 2; horizontalAlignment: Text.AlignHCenter
+            text: root.protocolBadgeLabel; color: Design.text
+            font.family: Design.fontFamily
+            font.pixelSize: root.protocolBadgeLabel === "Compound" ? 8 : 10
+            font.weight: Font.DemiBold; elide: Text.ElideRight
+        }
     }
     Text {
         x: 70; y: 15; text: root.asset.label || "Asset"; color: Design.text

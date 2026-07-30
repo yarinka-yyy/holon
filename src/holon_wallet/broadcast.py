@@ -74,7 +74,8 @@ from .wallet_crypto import InvalidSecretError, private_key_bytes, rederive
 
 BROADCAST_ENABLED_ENV = "HOLON_BASE_BROADCAST_ENABLED"
 BASE_RPC_ENV = "HOLON_BASE_RPC_URL"
-DEFAULT_BASE_RPC_URL = "https://base-rpc.publicnode.com"
+DEFAULT_BASE_RPC_URL = "https://mainnet.base.org"
+ALCHEMY_BASE_RPC_URL = "https://base-mainnet.g.alchemy.com/public"
 BROADCAST_ENABLED_ENVS = {
     "base": BROADCAST_ENABLED_ENV,
     "ethereum": "HOLON_ETHEREUM_BROADCAST_ENABLED",
@@ -92,6 +93,9 @@ class MainnetTransferCode(str, Enum):
     CONFIRMED = "CONFIRMED"
     PENDING = "PENDING"
     UNKNOWN = "UNKNOWN"
+    RECEIPT_RPC_UNAVAILABLE = "RECEIPT_RPC_UNAVAILABLE"
+    RECEIPT_WRONG_CHAIN = "RECEIPT_WRONG_CHAIN"
+    RECEIPT_VALIDATION_FAILED = "RECEIPT_VALIDATION_FAILED"
     FAILED = "FAILED"
     AUTHENTICATION_FAILED = "AUTHENTICATION_FAILED"
     POLICY_UNAVAILABLE = "POLICY_UNAVAILABLE"
@@ -105,9 +109,20 @@ class MainnetTransferCode(str, Enum):
     ACTION_INVALID = "ACTION_INVALID"
     ACTION_EXPIRED = "ACTION_EXPIRED"
     REVALIDATION_FAILED = "REVALIDATION_FAILED"
+    REVALIDATION_RPC_UNAVAILABLE = "REVALIDATION_RPC_UNAVAILABLE"
     HISTORY_UNAVAILABLE = "HISTORY_UNAVAILABLE"
     CANCELLED = "CANCELLED"
     SIGNING_FAILED = "SIGNING_FAILED"
+
+
+class ReceiptTrackingCode(str, Enum):
+    PENDING = "RECEIPT_PENDING"
+    CONFIRMED = "RECEIPT_CONFIRMED"
+    FAILED = "RECEIPT_FAILED"
+    TRANSACTION_UNKNOWN = "RECEIPT_TRANSACTION_UNKNOWN"
+    RPC_UNAVAILABLE = "RECEIPT_RPC_UNAVAILABLE"
+    WRONG_CHAIN = "RECEIPT_WRONG_CHAIN"
+    VALIDATION_FAILED = "RECEIPT_VALIDATION_FAILED"
 
 
 @dataclass(slots=True)
@@ -448,6 +463,8 @@ class ReceiptTrackingResult:
     status: HistoryStatus
     checked_at: str
     history_available: bool
+    code: ReceiptTrackingCode
+    endpoint_class: str | None
 
 
 class MainnetRpc(Protocol):
@@ -695,12 +712,11 @@ class MainnetTransferExecutor:
         endpoint = _endpoint(self._environ, action.network_id)
         if endpoint is None:
             return self._failure(action, MainnetTransferCode.POLICY_UNAVAILABLE)
-        try:
-            rpc = self._rpc_factory(endpoint)
-            if not _final_revalidation(rpc, action):
-                return self._failure(action, MainnetTransferCode.REVALIDATION_FAILED)
-        except Exception:
-            return self._failure(action, MainnetTransferCode.REVALIDATION_FAILED)
+        read_rpc, revalidation_code, read_endpoint = _final_revalidation_with_fallback(
+            self._rpc_factory, self._environ, action,
+        )
+        if read_rpc is None:
+            return self._failure(action, revalidation_code)
         if permit.cancelled:
             return self._failure(action, MainnetTransferCode.CANCELLED)
         if self._clock().astimezone(UTC) >= action.expires_at:
@@ -754,14 +770,16 @@ class MainnetTransferExecutor:
                 )
             if action.action_type == "lending":
                 try:
-                    exact_l1_fee = rpc.l1_fee(bytes(signed.raw_transaction))
+                    exact_l1_fee = read_rpc.l1_fee(bytes(signed.raw_transaction))
                     total_fee = action.l2_fee_ceiling_wei + exact_l1_fee
                 except Exception:
-                    return self._failure(action, MainnetTransferCode.REVALIDATION_FAILED)
+                    return self._failure(
+                        action, MainnetTransferCode.REVALIDATION_RPC_UNAVAILABLE,
+                    )
                 if (
                     exact_l1_fee <= 0
                     or total_fee > action.max_total_fee_wei
-                    or int(rpc.native_balance(action.sender)) < total_fee
+                    or int(read_rpc.native_balance(action.sender)) < total_fee
                 ):
                     return self._failure(action, MainnetTransferCode.FEE_LIMIT_EXCEEDED)
             transaction_hash = Web3.to_hex(signed.hash)
@@ -804,7 +822,10 @@ class MainnetTransferExecutor:
 
             broadcast_attempted = True
             try:
-                remote_hash = rpc.send_raw_transaction(signed.raw_transaction)
+                primary_rpc = (
+                    read_rpc if read_endpoint == endpoint else self._rpc_factory(endpoint)
+                )
+                remote_hash = primary_rpc.send_raw_transaction(signed.raw_transaction)
             except Exception:
                 return self._result(
                     action,
@@ -904,39 +925,48 @@ def _lending_post_state(
     )
     if profile is None:
         return None
-    try:
-        allowance = int(rpc.lending_allowance(
-            profile.asset, record.sender, profile.spender, block,
-        ))
-        if profile.protocol_id == "morpho-v1":
-            shares = int(rpc.lending_token_balance(
-                profile.position_token, record.sender, block,
-            ))
-            position = int(rpc.lending_vault_convert(
-                profile.target, "convertToAssets", shares, block,
-            ))
-        else:
-            shares = -1
-            position = int(rpc.lending_token_balance(
-                profile.position_token, record.sender, block,
-            ))
-        amount = int(record.amount_atomic)
-        before = int(record.position_before_atomic or "0")
-        if record.action_type == "lending_approve":
-            verified = allowance == amount
-        elif record.action_type in {"lending_supply", "lending_deposit"}:
-            verified = allowance == 0 and position >= before + amount - 1
-        elif record.action_type in {"lending_withdraw_all", "lending_redeem"}:
-            verified = allowance == 0 and (
-                shares == 0 if record.action_type == "lending_redeem" else position <= 1
-            )
-        elif record.action_type == "lending_withdraw":
-            verified = allowance == 0 and position + amount <= before + 10
-        else:
-            return None
-        return position, allowance, verified
-    except Exception:
+    allowance_value = rpc.lending_allowance(
+        profile.asset, record.sender, profile.spender, block,
+    )
+    if type(allowance_value) is not int or allowance_value < 0:
         return None
+    allowance = allowance_value
+    if profile.protocol_id == "morpho-v1":
+        shares_value = rpc.lending_token_balance(
+            profile.position_token, record.sender, block,
+        )
+        position_value = rpc.lending_vault_convert(
+            profile.target, "convertToAssets", shares_value, block,
+        ) if type(shares_value) is int and shares_value >= 0 else None
+        if type(shares_value) is not int or type(position_value) is not int:
+            return None
+        if shares_value < 0 or position_value < 0:
+            return None
+        shares = shares_value
+        position = position_value
+    else:
+        shares = -1
+        position_value = rpc.lending_token_balance(
+            profile.position_token, record.sender, block,
+        )
+        if type(position_value) is not int or position_value < 0:
+            return None
+        position = position_value
+    amount = int(record.amount_atomic)
+    before = int(record.position_before_atomic or "0")
+    if record.action_type == "lending_approve":
+        verified = allowance == amount
+    elif record.action_type in {"lending_supply", "lending_deposit"}:
+        verified = allowance == 0 and position >= before + amount - 1
+    elif record.action_type in {"lending_withdraw_all", "lending_redeem"}:
+        verified = allowance == 0 and (
+            shares == 0 if record.action_type == "lending_redeem" else position <= 1
+        )
+    elif record.action_type == "lending_withdraw":
+        verified = allowance == 0 and position + amount <= before + 10
+    else:
+        return None
+    return position, allowance, verified
 
 
 class BroadcastReceiptTracker:
@@ -978,6 +1008,27 @@ class BroadcastReceiptTracker:
             if cancelled is not None and cancelled.is_set():
                 break
             result = self.check_once(action_id)
+        if (
+            self.timeout_seconds > 0
+            and
+            result.status is HistoryStatus.PENDING
+            and not (cancelled is not None and cancelled.is_set())
+            and self._monotonic() >= deadline
+        ):
+            record = next(
+                (
+                    item for item in self.history_store.load()
+                    if item.action_id == action_id
+                ),
+                None,
+            )
+            if record is not None:
+                result = self._save_observation(
+                    record,
+                    HistoryStatus.UNKNOWN,
+                    ReceiptTrackingCode.TRANSACTION_UNKNOWN,
+                    result.endpoint_class,
+                )
         return result
 
     def check_once(self, action_id: str) -> ReceiptTrackingResult:
@@ -986,75 +1037,158 @@ class BroadcastReceiptTracker:
         if record is None or record.transaction_hash is None:
             raise HistoryValidationError("History action cannot be checked")
         if record.status in {HistoryStatus.CONFIRMED, HistoryStatus.FAILED}:
-            return self._result(record, record.status, True)
-        endpoint = _endpoint(self._environ, record.network)
-        if endpoint is None:
-            return self._result(record, record.status, True)
-        observed = record.status
-        actual_fee_wei: str | None = None
+            code = _stored_receipt_code(record) or _receipt_code(record.status)
+            return self._result(
+                record, record.status, True, code, record.receipt_endpoint_class,
+            )
+        candidates = _receipt_endpoints(self._environ, record.network)
+        if not candidates:
+            return self._save_observation(
+                record, HistoryStatus.UNKNOWN,
+                ReceiptTrackingCode.RPC_UNAVAILABLE, None,
+            )
+        pending: tuple[str, MainnetRpc] | None = None
+        transaction_unknown: tuple[str, MainnetRpc] | None = None
+        last_failure = ReceiptTrackingCode.RPC_UNAVAILABLE
+        last_failure_class: str | None = candidates[-1][0]
+        for endpoint_class, endpoint in candidates:
+            try:
+                rpc = self._rpc_factory(endpoint)
+                if rpc.chain_id() != record.chain_id:
+                    last_failure = ReceiptTrackingCode.WRONG_CHAIN
+                    last_failure_class = endpoint_class
+                    continue
+                receipt = rpc.transaction_receipt(record.transaction_hash)
+                if receipt is None:
+                    if record.status is HistoryStatus.PENDING:
+                        pending = pending or (endpoint_class, rpc)
+                        continue
+                    transaction = rpc.transaction(record.transaction_hash)
+                    if transaction is None:
+                        transaction_unknown = transaction_unknown or (endpoint_class, rpc)
+                        continue
+                    if not _public_transaction_matches(transaction, record):
+                        return self._save_observation(
+                            record, HistoryStatus.UNKNOWN,
+                            ReceiptTrackingCode.VALIDATION_FAILED, endpoint_class,
+                        )
+                    pending = pending or (endpoint_class, rpc)
+                    continue
+                if not isinstance(receipt, Mapping):
+                    return self._save_observation(
+                        record, HistoryStatus.UNKNOWN,
+                        ReceiptTrackingCode.VALIDATION_FAILED, endpoint_class,
+                    )
+                observation = self._receipt_observation(
+                    record, rpc, receipt, endpoint_class,
+                )
+            except Exception:
+                last_failure = ReceiptTrackingCode.RPC_UNAVAILABLE
+                last_failure_class = endpoint_class
+                continue
+            if observation[0] is HistoryStatus.UNKNOWN:
+                return self._save_observation(record, *observation)
+            return self._save_observation(record, *observation)
+        if pending is not None:
+            return self._save_observation(
+                record, HistoryStatus.PENDING, ReceiptTrackingCode.PENDING,
+                pending[0],
+            )
+        if transaction_unknown is not None:
+            return self._save_observation(
+                record, HistoryStatus.UNKNOWN,
+                ReceiptTrackingCode.TRANSACTION_UNKNOWN, transaction_unknown[0],
+            )
+        return self._save_observation(
+            record, HistoryStatus.UNKNOWN, last_failure, last_failure_class,
+        )
+
+    def _receipt_observation(
+        self,
+        record: WalletHistoryRecord,
+        rpc: MainnetRpc,
+        receipt: Mapping[str, object],
+        endpoint_class: str,
+    ) -> tuple[
+        HistoryStatus, ReceiptTrackingCode, str,
+        str | None, str | None, str | None, bool | None,
+    ]:
+        transaction = (
+            rpc.transaction(record.transaction_hash or "")
+            if (
+                record.token == "ETH"
+                or record.action_type == REVOKE_ACTION_TYPE
+                or record.action_type.startswith("lending_")
+            )
+            else None
+        )
+        observed = _receipt_status(receipt, record, transaction)
+        if observed is HistoryStatus.UNKNOWN:
+            return (
+                observed, ReceiptTrackingCode.VALIDATION_FAILED, endpoint_class,
+                None, None, None, None,
+            )
         position_after_atomic: str | None = None
         allowance_after_atomic: str | None = None
         position_verified: bool | None = None
-        try:
-            rpc = self._rpc_factory(endpoint)
-            if rpc.chain_id() != record.chain_id:
-                raise RuntimeError("Receipt RPC chain mismatch")
-            receipt = rpc.transaction_receipt(record.transaction_hash)
-            if receipt is not None:
-                transaction = (
-                    rpc.transaction(record.transaction_hash)
-                    if (
-                        record.token == "ETH"
-                        or record.action_type == REVOKE_ACTION_TYPE
-                        or record.action_type.startswith("lending_")
-                    )
-                    else None
-                )
-                observed = _receipt_status(receipt, record, transaction)
-                if (
-                    observed is HistoryStatus.CONFIRMED
-                    and record.action_type.startswith("lending_")
-                    and (
-                        record.protocol_id is not None
-                        or record.action_type == "lending_supply"
-                    )
-                ):
-                    block = receipt.get("blockNumber")
-                    post_state = (
-                        _lending_post_state(rpc, record, block)
-                        if type(block) is int else None
-                    )
-                    if post_state is None:
-                        observed = HistoryStatus.UNKNOWN
-                    else:
-                        position_after, allowance_after, verified = post_state
-                        position_after_atomic = str(position_after)
-                        allowance_after_atomic = str(allowance_after)
-                        position_verified = verified
-                        if not verified:
-                            observed = HistoryStatus.UNKNOWN
-                if observed in {HistoryStatus.CONFIRMED, HistoryStatus.FAILED}:
-                    actual_fee_wei = _receipt_fee_wei(receipt)
-            elif record.status is HistoryStatus.PENDING:
-                observed = HistoryStatus.PENDING
-            else:
-                transaction = rpc.transaction(record.transaction_hash)
-                observed = (
-                    HistoryStatus.PENDING
-                    if transaction is not None
-                    and _public_transaction_matches(transaction, record)
-                    else HistoryStatus.UNKNOWN
-                )
-        except Exception:
-            observed = (
-                HistoryStatus.PENDING
-                if record.status is HistoryStatus.PENDING
-                else HistoryStatus.UNKNOWN
-            )
-        if observed is record.status and (
-            actual_fee_wei is None or record.actual_fee_wei is not None
+        if (
+            observed is HistoryStatus.CONFIRMED
+            and record.action_type.startswith("lending_")
+            and (record.protocol_id is not None or record.action_type == "lending_supply")
         ):
-            return self._result(record, observed, True)
+            block = receipt.get("blockNumber")
+            if type(block) is not int:
+                return (
+                    HistoryStatus.UNKNOWN, ReceiptTrackingCode.VALIDATION_FAILED,
+                    endpoint_class, None, None, None, None,
+                )
+            post_state = _lending_post_state(rpc, record, block)
+            if post_state is None:
+                return (
+                    HistoryStatus.UNKNOWN, ReceiptTrackingCode.VALIDATION_FAILED,
+                    endpoint_class, None, None, None, None,
+                )
+            position_after, allowance_after, verified = post_state
+            position_after_atomic = str(position_after)
+            allowance_after_atomic = str(allowance_after)
+            position_verified = verified
+            if not verified:
+                return (
+                    HistoryStatus.UNKNOWN, ReceiptTrackingCode.VALIDATION_FAILED,
+                    endpoint_class, None, position_after_atomic,
+                    allowance_after_atomic, False,
+                )
+        code = (
+            ReceiptTrackingCode.CONFIRMED
+            if observed is HistoryStatus.CONFIRMED
+            else ReceiptTrackingCode.FAILED
+        )
+        return (
+            observed, code, endpoint_class, _receipt_fee_wei(receipt),
+            position_after_atomic, allowance_after_atomic, position_verified,
+        )
+
+    def _save_observation(
+        self,
+        record: WalletHistoryRecord,
+        observed: HistoryStatus,
+        code: ReceiptTrackingCode,
+        endpoint_class: str | None,
+        actual_fee_wei: str | None = None,
+        position_after_atomic: str | None = None,
+        allowance_after_atomic: str | None = None,
+        position_verified: bool | None = None,
+    ) -> ReceiptTrackingResult:
+        if (
+            observed is record.status
+            and code.value == record.receipt_code
+            and endpoint_class == record.receipt_endpoint_class
+            and (actual_fee_wei is None or record.actual_fee_wei is not None)
+            and (position_after_atomic is None or record.position_after_atomic is not None)
+            and (allowance_after_atomic is None or record.allowance_after_atomic is not None)
+            and (position_verified is None or record.position_verified is not None)
+        ):
+            return self._result(record, observed, True, code, endpoint_class)
         try:
             updated = self.history_store.update_status(
                 record.action_id,
@@ -1065,17 +1199,21 @@ class BroadcastReceiptTracker:
                 position_after_atomic,
                 allowance_after_atomic,
                 position_verified,
+                code.value,
+                endpoint_class,
             )
             current = next(item for item in updated if item.action_id == record.action_id)
-            return self._result(current, observed, True)
+            return self._result(current, observed, True, code, endpoint_class)
         except (HistoryUnavailableError, HistoryValidationError, StorageError):
-            return self._result(record, observed, False)
+            return self._result(record, observed, False, code, endpoint_class)
 
     def _result(
         self,
         record: WalletHistoryRecord,
         status: HistoryStatus,
         history_available: bool,
+        code: ReceiptTrackingCode,
+        endpoint_class: str | None,
     ) -> ReceiptTrackingResult:
         return ReceiptTrackingResult(
             record.action_id,
@@ -1083,6 +1221,8 @@ class BroadcastReceiptTracker:
             status,
             _timestamp(self._clock()),
             history_available,
+            code,
+            endpoint_class,
         )
 
 
@@ -1119,11 +1259,17 @@ def result_from_tracking(
     tracking: ReceiptTrackingResult,
 ) -> MainnetTransferResult:
     code = {
-        HistoryStatus.CONFIRMED: MainnetTransferCode.CONFIRMED,
-        HistoryStatus.FAILED: MainnetTransferCode.FAILED,
-        HistoryStatus.PENDING: MainnetTransferCode.PENDING,
-        HistoryStatus.UNKNOWN: MainnetTransferCode.UNKNOWN,
-    }[tracking.status]
+        ReceiptTrackingCode.CONFIRMED: MainnetTransferCode.CONFIRMED,
+        ReceiptTrackingCode.FAILED: MainnetTransferCode.FAILED,
+        ReceiptTrackingCode.PENDING: MainnetTransferCode.PENDING,
+        ReceiptTrackingCode.RPC_UNAVAILABLE:
+            MainnetTransferCode.RECEIPT_RPC_UNAVAILABLE,
+        ReceiptTrackingCode.WRONG_CHAIN:
+            MainnetTransferCode.RECEIPT_WRONG_CHAIN,
+        ReceiptTrackingCode.VALIDATION_FAILED:
+            MainnetTransferCode.RECEIPT_VALIDATION_FAILED,
+        ReceiptTrackingCode.TRANSACTION_UNKNOWN: MainnetTransferCode.UNKNOWN,
+    }[tracking.code]
     return MainnetTransferResult(
         code,
         previous.action_id,
@@ -1152,6 +1298,23 @@ def _evaluate_policy(
     if code is not None:
         return MainnetTransferCode.POLICY_UNAVAILABLE
     return None
+
+
+def _final_revalidation_with_fallback(
+    rpc_factory: MainnetRpcFactory,
+    environ: Mapping[str, str],
+    action: PreparedTransactionAction,
+) -> tuple[MainnetRpc | None, MainnetTransferCode, str | None]:
+    """Read-only revalidation may fail over; broadcast never does."""
+    for _endpoint_class, endpoint in _receipt_endpoints(environ, action.network_id):
+        try:
+            rpc = rpc_factory(endpoint)
+            if _final_revalidation(rpc, action):
+                return rpc, MainnetTransferCode.CONFIRMED, endpoint
+        except Exception:
+            continue
+        return None, MainnetTransferCode.REVALIDATION_FAILED, None
+    return None, MainnetTransferCode.REVALIDATION_RPC_UNAVAILABLE, None
 
 
 def _final_revalidation(rpc: MainnetRpc, action: PreparedTransactionAction) -> bool:
@@ -1235,15 +1398,17 @@ def _final_protocol_revalidation(
             dead = "0x000000000000000000000000000000000000dEaD"
             if rpc.lending_token_balance(profile.position_token, dead, block) < 10**12:
                 return False
-            shares = int(rpc.lending_token_balance(
-                profile.position_token, action.sender, block,
-            ))
-            position = int(rpc.lending_vault_convert(
-                profile.target, "convertToAssets", shares, block,
-            ))
-            liquidity = int(rpc.lending_vault_limit(
-                profile.target, "maxWithdraw", action.sender, block,
-            ))
+            shares = position = liquidity = 0
+            if action.method in {"withdraw", "redeem"}:
+                shares = int(rpc.lending_token_balance(
+                    profile.position_token, action.sender, block,
+                ))
+                position = int(rpc.lending_vault_convert(
+                    profile.target, "convertToAssets", shares, block,
+                ))
+                liquidity = int(rpc.lending_vault_limit(
+                    profile.target, "maxWithdraw", action.sender, block,
+                ))
         if action.method == "approve":
             expected_data = encode_approve(profile.spender, action.amount_atomic)
             state_ok = allowance == 0 and balance >= action.amount_atomic
@@ -1287,7 +1452,7 @@ def _final_protocol_revalidation(
             "maxPriorityFeePerGas": tx.max_priority_fee_per_gas, "gas": tx.gas,
         })
     except Exception:
-        return False
+        raise
     expected_target = profile.asset if action.method == "approve" else profile.target
     return (
         state_ok and rpc.chain_id() == profile.chain_id and block >= action.block_number
@@ -1387,7 +1552,7 @@ def _final_lending_revalidation(rpc: MainnetRpc, action: PreparedTransferAction)
             "maxPriorityFeePerGas": tx.max_priority_fee_per_gas, "gas": tx.gas,
         })
     except Exception:
-        return False
+        raise
     supply_state = (
         balance >= action.amount_atomic
         and (
@@ -1444,7 +1609,7 @@ def _final_revoke_revalidation(
             "maxPriorityFeePerGas": tx.max_priority_fee_per_gas,
         }))
     except Exception:
-        return False
+        raise
     current_required_fee = 2 * int(base_fee) + priority_fee
     return (
         block_number >= action.block_number
@@ -1659,6 +1824,47 @@ def _endpoint(environ: Mapping[str, str], network_id: str = BASE_NETWORK_ID) -> 
     return value or None
 
 
+def _receipt_endpoints(
+    environ: Mapping[str, str], network_id: str,
+) -> tuple[tuple[str, str], ...]:
+    if network_id != BASE_NETWORK_ID:
+        endpoint = _endpoint(environ, network_id)
+        return (("configured", endpoint),) if endpoint is not None else ()
+    configured = environ.get(BASE_RPC_ENV, "").strip()
+    candidates = (
+        (("configured", configured),) if configured else ()
+    ) + (
+        ("official", DEFAULT_BASE_RPC_URL),
+        ("alchemy_public", ALCHEMY_BASE_RPC_URL),
+    )
+    seen: set[str] = set()
+    result: list[tuple[str, str]] = []
+    for endpoint_class, endpoint in candidates:
+        normalized = endpoint.rstrip("/").lower()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append((endpoint_class, endpoint))
+    return tuple(result)
+
+
+def _stored_receipt_code(record: WalletHistoryRecord) -> ReceiptTrackingCode | None:
+    try:
+        return ReceiptTrackingCode(record.receipt_code)
+    except (TypeError, ValueError):
+        return None
+
+
+def _receipt_code(status: HistoryStatus) -> ReceiptTrackingCode:
+    return {
+        HistoryStatus.PENDING: ReceiptTrackingCode.PENDING,
+        HistoryStatus.CONFIRMED: ReceiptTrackingCode.CONFIRMED,
+        HistoryStatus.FAILED: ReceiptTrackingCode.FAILED,
+        HistoryStatus.UNKNOWN: ReceiptTrackingCode.TRANSACTION_UNKNOWN,
+        HistoryStatus.PREPARED: ReceiptTrackingCode.TRANSACTION_UNKNOWN,
+    }[status]
+
+
 def _transaction_data(value: Mapping[str, object]) -> str:
     candidate = value.get("input", value.get("data", "0x"))
     return _hex_value(candidate)
@@ -1709,6 +1915,18 @@ def _result_text(
         MainnetTransferCode.UNKNOWN: (
             "Submission status unknown",
             "The transaction will not be sent again. Check its public hash safely.",
+        ),
+        MainnetTransferCode.RECEIPT_RPC_UNAVAILABLE: (
+            "Receipt RPC unavailable",
+            "Broadcast already occurred once. Receipt checks failed; no rebroadcast will occur.",
+        ),
+        MainnetTransferCode.RECEIPT_WRONG_CHAIN: (
+            "Receipt network mismatch",
+            "Broadcast already occurred once. No trusted Base receipt was accepted.",
+        ),
+        MainnetTransferCode.RECEIPT_VALIDATION_FAILED: (
+            "Receipt could not be verified",
+            "Broadcast already occurred once. Conflicting or incomplete data was rejected.",
         ),
         MainnetTransferCode.FAILED: (
             "Transaction reverted",
@@ -1761,6 +1979,10 @@ def _result_text(
         MainnetTransferCode.REVALIDATION_FAILED: (
             "Live revalidation failed",
             "Nothing was sent. Network data changed or became unavailable.",
+        ),
+        MainnetTransferCode.REVALIDATION_RPC_UNAVAILABLE: (
+            "Live revalidation unavailable",
+            "Nothing was sent. Read-only Base RPC checks could not be completed.",
         ),
         MainnetTransferCode.HISTORY_UNAVAILABLE: (
             "History unavailable",

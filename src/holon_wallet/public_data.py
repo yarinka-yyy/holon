@@ -74,7 +74,7 @@ NETWORKS: tuple[NetworkSpec, ...] = (
         "Base",
         8453,
         "HOLON_BASE_RPC_URL",
-        "https://base-rpc.publicnode.com",
+        "https://mainnet.base.org",
         BASE_USDC,
     ),
 )

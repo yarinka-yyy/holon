@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-from importlib import metadata
 from pathlib import Path
 import subprocess
 import sys
@@ -59,13 +58,36 @@ class InstalledGuardLauncher(SubprocessGuardLauncher):
         super().__init__(command, pipe_name)
 
 
+def _installed_hermes_version(plugin_root: Path) -> str:
+    """Read the selected Hermes installation's unambiguous local metadata."""
+    site_packages = (
+        plugin_root.parent.parent / "hermes-agent" / "venv" / "Lib"
+        / "site-packages"
+    )
+    try:
+        metadata_files = tuple(site_packages.glob("hermes_agent-*.dist-info/METADATA"))
+    except OSError:
+        return ""
+    if len(metadata_files) != 1:
+        return ""
+    try:
+        fields = {
+            key.casefold(): value.strip()
+            for line in metadata_files[0].read_text(encoding="utf-8").splitlines()
+            if ":" in line
+            for key, value in (line.split(":", 1),)
+        }
+    except OSError:
+        return ""
+    if fields.get("name", "").casefold() != "hermes-agent":
+        return ""
+    return fields.get("version", "")
+
+
 def production_launcher() -> DisabledGuardLauncher | InstalledGuardLauncher:
     local_app_data = os.environ.get("LOCALAPPDATA")
     if not local_app_data:
         return DisabledGuardLauncher()
-    try:
-        hermes_version = metadata.version("hermes-agent")
-    except Exception:
-        hermes_version = ""
     plugin_root = Path(__file__).resolve().parent
+    hermes_version = _installed_hermes_version(plugin_root)
     return InstalledGuardLauncher(Path(local_app_data), plugin_root, hermes_version)

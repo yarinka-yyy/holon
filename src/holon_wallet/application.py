@@ -42,6 +42,8 @@ from .vault import VaultRepository
 
 WINDOW_TITLE = "Holon Wallet"
 MUTEX_NAME = r"Local\HolonWallet.M3.01"
+WALLET_INITIALIZATION_FAILED_EXIT_CODE = 20
+WALLET_INSTANCE_UNREACHABLE_EXIT_CODE = 21
 _RECOVERY_TYPE_REGISTERED = False
 
 
@@ -406,13 +408,16 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     instance = ProcessInstance(MUTEX_NAME, WINDOW_TITLE)
     if not instance.acquire():
-        return 0
+        return WALLET_INSTANCE_UNREACHABLE_EXIT_CODE
     application: WalletApplication | None = None
     try:
-        application = WalletApplication(
-            control_pipe_name=CONTROL_PIPE_NAME,
-            authority_pipe_name=AUTHORITY_PIPE_NAME,
-        )
+        try:
+            application = WalletApplication(
+                control_pipe_name=CONTROL_PIPE_NAME,
+                authority_pipe_name=AUTHORITY_PIPE_NAME,
+            )
+        except Exception:
+            return WALLET_INITIALIZATION_FAILED_EXIT_CODE
         return application.run()
     finally:
         if application is not None:

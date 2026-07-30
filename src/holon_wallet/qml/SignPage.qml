@@ -6,13 +6,13 @@ TransactionFlowShell {
     title: "Confirm Transaction"
     subtitle: action.actionType === "lending"
         ? "Authorize this exact Lending action once" : "Authorize this exact transfer once"
-    activeStep: 1; onBackRequested: walletController.cancelMainnetExecution()
+    activeStep: 1; onBackRequested: walletController.returnToTransferReview()
     property var action: walletController.transferAction
     property bool isLending: action.actionType === "lending"
     property string lendingMethod: action.method === "withdraw" && action.amountMode === "all"
         ? "withdraw all" : (action.method || "action")
     property url assetIcon: action.assetId === "eth"
-        ? "assets/ethereum.svg" : "assets/usdc.png"
+        ? "assets/ethereum.svg" : "assets/usdc.webp"
     property bool readyToSign: passwordField.text.length >= 4
         && walletController.mainnetExecutionAvailable
 

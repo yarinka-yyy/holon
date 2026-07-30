@@ -10,13 +10,16 @@ from holon_policy import (
 )
 from holon_policy.baseline import BASELINE_POLICY_DIGEST
 from holon_policy.baseline import load_baseline_policy
-from holon_lending import ACTION_PROFILES_DIGEST
+from holon_lending import ACTION_PROFILES_DIGEST, LendingPreflightError
 
 from holon_wallet.broadcast import (
     TRANSFER_EVENT_TOPIC,
     MainnetBroadcastPolicy,
     MainnetTransferCode,
     MainnetTransferExecutor,
+    MainnetTransferResult,
+    ReceiptTrackingCode,
+    ReceiptTrackingResult,
 )
 from holon_wallet.controller import WalletController, _display_local_time
 from holon_wallet.history import HistoryStatus, HistoryStore
@@ -326,6 +329,119 @@ def test_confirmed_approval_recovery_is_account_bound_and_cancelled_via_guard(
     assert restarted.cancelLendingOperation()
     assert restarted.currentScreen == "main"
     assert policy_control.operation_cancels == [operation.operation_id]
+
+
+def test_lending_resume_rechecks_approve_not_stale_supply_draft(
+    tmp_path, monkeypatch,
+) -> None:
+    policy_control = StubPolicyControl()
+    item = controller(tmp_path, policy_control)
+    secret = password()
+    item.beginCreate()
+    assert item.submitPassword(secret, secret)
+    assert item.finishBackup()
+    active = item.activeProfile
+    operation = LendingOperation(
+        operation_id="act-11111111-1111-4111-8111-111111111111",
+        requested_action="supply", amount_mode="exact", amount="2",
+        resolved_amount_atomic=2_000_000, owner_pid=42, policy_version="3",
+        policy_revision=7, policy_digest="1" * 64,
+        action_profile_digest="2" * 64, safety_digest="3" * 64,
+        phase="resume_or_revoke",
+        phase_action_id="act-22222222-2222-4222-8222-222222222222",
+        phase_fingerprint="4" * 64, created_at="2026-07-26T00:00:00Z",
+        account_profile_id=active["id"], account_address=active["address"],
+        transaction_hash="0x" + "5" * 64, receipt_state="confirmed",
+        updated_at="2026-07-26T00:01:00Z",
+    )
+    LendingOperationStore(tmp_path / "lending-operation-state.json").save(
+        LendingOperationSnapshot(operation),
+    )
+    restarted = controller(tmp_path, policy_control)
+    checks: list[tuple[str, bool]] = []
+
+    def check_receipt(action_id: str, track: bool) -> bool:
+        checks.append((action_id, track))
+        return True
+
+    monkeypatch.setattr(restarted, "_start_receipt_check", check_receipt)
+
+    assert restarted.resumeLendingOperation()
+    assert checks == [(operation.operation_id, False)]
+    restarted._finish_lending_resume_check(ReceiptTrackingResult(
+        operation.operation_id, operation.transaction_hash or "", HistoryStatus.CONFIRMED,
+        "2026-07-26T00:02:00Z", True, ReceiptTrackingCode.CONFIRMED, "official",
+    ))
+
+    assert policy_control.operation_resumes == [(
+        operation.operation_id, operation.phase_action_id, operation.transaction_hash,
+    )]
+    assert restarted.currentScreen == "main"
+
+
+def test_lending_resume_check_failure_is_visible_and_never_rebroadcasts(tmp_path) -> None:
+    item = controller(tmp_path, StubPolicyControl())
+    item._lending_recovery = {"status": "Checking confirmed approval receipt…"}
+    item._lending_resume_action_id = "act-11111111-1111-4111-8111-111111111111"
+    item._receipt_checking = True
+
+    item._accept_receipt_result(item._receipt_generation, None)
+
+    assert not item._lending_resume_action_id
+    assert item.lendingRecovery["status"] == (
+        "Approval receipt could not be checked · no rebroadcast will occur"
+    )
+
+
+def test_lending_preflight_failure_returns_to_recovery_not_generic_send(tmp_path) -> None:
+    item = controller(tmp_path, StubPolicyControl())
+    secret = password()
+    item.beginCreate()
+    assert item.submitPassword(secret, secret)
+    assert item.finishBackup()
+    active = item.activeProfile
+    operation = LendingOperation(
+        operation_id="act-11111111-1111-4111-8111-111111111111",
+        requested_action="supply",
+        amount_mode="exact",
+        amount="1",
+        resolved_amount_atomic=1_000_000,
+        owner_pid=42,
+        policy_version="3",
+        policy_revision=7,
+        policy_digest="1" * 64,
+        action_profile_digest="2" * 64,
+        safety_digest="3" * 64,
+        phase="resume_or_revoke",
+        phase_action_id="act-22222222-2222-4222-8222-222222222222",
+        phase_fingerprint="4" * 64,
+        created_at="2026-07-26T00:00:00Z",
+        account_profile_id=active["id"],
+        account_address=active["address"],
+        transaction_hash="0x" + "5" * 64,
+        receipt_state="confirmed",
+        updated_at="2026-07-26T00:01:00Z",
+    )
+    LendingOperationStore(tmp_path / "lending-operation-state.json").save(
+        LendingOperationSnapshot(operation),
+    )
+    assert item._load_lending_recovery()
+    item._lending_recovery = {}
+    responses: list[dict[str, object]] = []
+    item._external_transfer = {
+        "flow_id": "11111111-1111-4111-8111-111111111111",
+        "action_id": "act-33333333-3333-4333-8333-333333333333",
+    }
+    item._external_completion = responses.append
+    item._transfer_preparing = True
+    item._transfer_generation = 5
+
+    item._accept_transfer_preflight(5, LendingPreflightError("BASE_RPC_UNAVAILABLE"))
+
+    assert responses[-1]["code"] == "BASE_RPC_UNAVAILABLE"
+    assert item.currentScreen == "lending_recovery"
+    assert "BASE_RPC_UNAVAILABLE" in item.lendingRecovery["status"]
+    assert item.transferAction == {}
 
 
 def test_trusted_recipients_draft_review_password_restart_and_cancel(tmp_path) -> None:
@@ -774,6 +890,93 @@ def test_confirmed_lending_approve_releases_wallet_before_guard_callback(tmp_pat
     assert item.currentScreen == "main"
 
 
+def test_done_defers_pending_lending_receipt_exactly_once(tmp_path) -> None:
+    item = controller(tmp_path)
+    updates = []
+    action_id = "act-22222222-2222-4222-8222-222222222222"
+    transaction_hash = "0x" + "7" * 64
+    item._external_transfer = {
+        "flow_id": "11111111-1111-4111-8111-111111111111",
+        "action_id": action_id,
+        "operation_id": "act-33333333-3333-4333-8333-333333333333",
+        "phase_action_id": action_id,
+        "prepared_digest": "a" * 64,
+        "executed_phase": "approve",
+    }
+    item._mainnet_result = MainnetTransferResult(
+        MainnetTransferCode.PENDING,
+        action_id,
+        "b" * 64,
+        transaction_hash,
+        "0x" + "1" * 40,
+        HistoryStatus.PENDING,
+        "2026-07-30T00:00:00Z",
+        True,
+        True,
+        False,
+        "lending:morpho-v1:approve",
+    )
+    item.attach_guard_status_sender(updates.append)
+
+    item.finishMainnetExecution()
+    item.finishMainnetExecution()
+
+    assert len(updates) == 1
+    assert updates[0]["event"] == "FAILED"
+    assert updates[0]["code"] == "RECEIPT_CHECK_DEFERRED"
+    assert updates[0]["transaction_hash"] == transaction_hash
+    assert updates[0]["receipt_state"] == "pending"
+    assert item._external_transfer is None
+    assert item.currentScreen == "main"
+
+
+def test_receipt_rpc_failure_releases_lending_to_recovery(tmp_path) -> None:
+    item = controller(tmp_path)
+    updates = []
+    action_id = "act-22222222-2222-4222-8222-222222222222"
+    transaction_hash = "0x" + "7" * 64
+    item._external_transfer = {
+        "flow_id": "11111111-1111-4111-8111-111111111111",
+        "action_id": action_id,
+        "operation_id": "act-33333333-3333-4333-8333-333333333333",
+        "phase_action_id": action_id,
+        "prepared_digest": "a" * 64,
+        "executed_phase": "approve",
+    }
+    item._mainnet_result = MainnetTransferResult(
+        MainnetTransferCode.PENDING,
+        action_id,
+        "b" * 64,
+        transaction_hash,
+        "0x" + "1" * 40,
+        HistoryStatus.PENDING,
+        "2026-07-30T00:00:00Z",
+        True,
+        True,
+        False,
+        "lending:morpho-v1:approve",
+    )
+    item.attach_guard_status_sender(updates.append)
+    generation = item._receipt_generation
+
+    item._accept_receipt_result(generation, ReceiptTrackingResult(
+        action_id,
+        transaction_hash,
+        HistoryStatus.UNKNOWN,
+        "2026-07-30T00:01:00Z",
+        True,
+        ReceiptTrackingCode.RPC_UNAVAILABLE,
+        "official",
+    ))
+
+    assert len(updates) == 1
+    assert updates[0]["event"] == "FAILED"
+    assert updates[0]["code"] == "RECEIPT_RPC_UNAVAILABLE"
+    assert updates[0]["receipt_state"] == "unknown"
+    assert updates[0]["transaction_hash"] == transaction_hash
+    assert item._external_transfer is None
+
+
 def test_guard_handoff_refuses_busy_and_reserved_sender(tmp_path) -> None:
     item = controller(tmp_path)
     secret = password()
@@ -958,6 +1161,27 @@ def test_generalized_draft_binds_network_asset_recipient_and_exact_amount(tmp_pa
     assert item.transferAmountInput == "0.001"
     assert item.transferRecipient.endswith("444444")
     assert item.transferAction == {}
+
+
+def test_confirmation_back_returns_to_exact_review_without_cancelling(tmp_path) -> None:
+    item = controller(tmp_path)
+    secret = password()
+    item.beginCreate()
+    assert item.submitPassword(secret, secret)
+    assert item.finishBackup()
+    item.showSend()
+    assert item.prepareTransfer("0x" + "44" * 20)
+    action_id = item.transferAction["actionId"]
+
+    assert item.beginMainnetExecution()
+    assert item.currentScreen == "sign_transfer"
+    item.returnToTransferReview()
+
+    assert item.currentScreen == "transfer_review"
+    assert item.transferAction["actionId"] == action_id
+    assert item._transfer_flow.state is TransferFlowState.PREPARED
+    assert item._test_mainnet_rpc.send_calls == 0
+    assert item.beginMainnetExecution()
 
 
 def test_configured_amount_cap_refuses_before_rpc(tmp_path) -> None:

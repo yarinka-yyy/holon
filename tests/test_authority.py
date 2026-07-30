@@ -13,8 +13,8 @@ from holon_guard.authority import AuthorityService
 from holon_guard.authority_audit import AuthorityAudit
 from holon_guard.request_control import RequestController
 from holon_guard.wallet import (
-    WalletBalancesResult, WalletLendingPreviewResult, WalletOpenResult,
-    WalletPreparedResult,
+    WALLET_OPEN_FAILURE_MESSAGES, WalletBalancesResult,
+    WalletLendingPreviewResult, WalletOpenResult, WalletPreparedResult,
 )
 from holon_journal import EventType
 from holon_policy import LendingRule, Policy, PolicyEngine, PolicySnapshot, policy_digest
@@ -240,6 +240,10 @@ class AuthorityTests(unittest.TestCase):
         opened = self.service.handle(request, owner_pid=None)
         self.assertEqual(opened.kind, MessageKind.WALLET_OPENED)
         self.assertEqual(opened.payload["wallet_state"], "ACTIVATED")
+        self.assertEqual(opened.payload["code"], "WALLET_ACTIVATED")
+        self.assertEqual(
+            opened.payload["message"], "Wallet activation was requested.",
+        )
         self.assertFalse(opened.payload["authority_available"])
         self.assertEqual(self.lifecycle.snapshot.state.value, "NORMAL")
         self.assertIsNone(self.lifecycle.ledger.snapshot.current)
@@ -260,6 +264,31 @@ class AuthorityTests(unittest.TestCase):
         self.assertNotIn("private", str(response.to_dict()).lower())
         self.assertEqual(self.lifecycle.snapshot.state.value, "NORMAL")
         self.assertIsNone(self.lifecycle.ledger.snapshot.current)
+
+    def test_public_open_passes_only_known_safe_startup_failure(self) -> None:
+        for code, safe_message in WALLET_OPEN_FAILURE_MESSAGES.items():
+            with self.subTest(code=code):
+                exit_code = 7 if code == "WALLET_EXITED" else None
+                self.wallet.open_public = lambda code=code, exit_code=exit_code: (  # type: ignore[method-assign]
+                    WalletOpenResult(
+                        False, "", code, "private path pipe pid", exit_code,
+                    )
+                )
+
+                response = self.service.handle(
+                    make_envelope(MessageKind.OPEN_WALLET, {}), None,
+                )
+
+                self.assertEqual(response.kind, MessageKind.ERROR)
+                self.assertEqual(response.payload["code"], code)
+                expected_message = (
+                    "Wallet exited before it became ready (exit code 7)."
+                    if code == "WALLET_EXITED" else safe_message
+                )
+                self.assertEqual(response.payload["message"], expected_message)
+                serialized = str(response.to_dict()).lower()
+                for value in ("private", "path", "pipe", "pid"):
+                    self.assertNotIn(value, serialized)
 
     def test_public_balances_preserve_guard_state_and_create_no_action(self) -> None:
         request = make_envelope(MessageKind.READ_WALLET_BALANCES, {})

@@ -517,6 +517,17 @@ class GuardLifecycle(GuardCore):
                 elif event == "FAILED":
                     self.ledger.terminalize(ActionState.FAILED, str(update["code"]))
                     if is_lending:
+                        if (
+                            update.get("transaction_hash") is not None
+                            and update.get("receipt_state") in {
+                                "pending", "unknown", "confirmed", "failed",
+                            }
+                        ):
+                            operation = operation.with_receipt(
+                                str(update["transaction_hash"]),
+                                str(update["receipt_state"]),
+                                datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                            )
                         if operation.phase == "approve_review":
                             failed = operation.with_phase("failed")
                             next_snapshot = LendingOperationSnapshot(

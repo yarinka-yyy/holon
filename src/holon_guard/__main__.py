@@ -52,6 +52,13 @@ from holon_wallet.history import (
 from holon_wallet.trusted_recipients import TrustedPolicyDraftStore
 
 
+RECOVERABLE_SIGNING_REASONS = frozenset({
+    RefusalCode.POLICY_AUTHORITY_DISABLED.value,
+    "LENDING_AUTHORITY_DISABLED",
+    SecurityCode.HERMES_VERSION_UNSUPPORTED.value,
+})
+
+
 def _default_data_dir() -> Path:
     local_app_data = os.environ.get("LOCALAPPDATA")
     if not local_app_data:
@@ -115,6 +122,15 @@ def _wallet_controller(
     return VerifiedWalletController(args.wallet_path)
 
 
+def _restore_revalidated_signing(lifecycle: GuardLifecycle, failure: str | None) -> None:
+    if (
+        failure is None
+        and lifecycle.snapshot.state.value == "SIGNING_DISABLED"
+        and lifecycle.snapshot.reason in RECOVERABLE_SIGNING_REASONS
+    ):
+        lifecycle.enable_signing("AAVE_CAPABILITY_READY")
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     data_dir = args.data_dir or _default_data_dir()
@@ -171,14 +187,8 @@ def main(argv: list[str] | None = None) -> int:
             )
             if failure is not None:
                 lifecycle.disable_signing(failure)
-            elif (
-                lifecycle.snapshot.state.value == "SIGNING_DISABLED"
-                and lifecycle.snapshot.reason in {
-                    RefusalCode.POLICY_AUTHORITY_DISABLED.value,
-                    "LENDING_AUTHORITY_DISABLED",
-                }
-            ):
-                lifecycle.enable_signing("AAVE_CAPABILITY_READY")
+            else:
+                _restore_revalidated_signing(lifecycle, failure)
             lending_reader = LendingReadService.default()
             history_store = HistoryStore(WalletPaths(data_dir))
 

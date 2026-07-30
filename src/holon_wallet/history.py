@@ -11,11 +11,13 @@ from typing import Any, Mapping
 from .public_data import NETWORK_BY_ID
 from .storage import StorageError, WalletPaths, atomic_write_json, read_json
 
-HISTORY_SCHEMA_VERSION = 5
+HISTORY_SCHEMA_VERSION = 6
 LEGACY_HISTORY_SCHEMA_VERSION = 1
 FEE_HISTORY_SCHEMA_VERSION = 2
 OPERATION_HISTORY_SCHEMA_VERSION = 3
 POSITION_HISTORY_SCHEMA_VERSION = 4
+LENDING_HISTORY_SCHEMA_VERSION = 5
+RECEIPT_HISTORY_SCHEMA_VERSION = 6
 MAX_HISTORY_RECORDS = 500
 MONTH_LABELS = (
     "Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -24,6 +26,12 @@ MONTH_LABELS = (
 ADDRESS_RE = re.compile(r"^0x[0-9A-Fa-f]{40}$")
 HASH_RE = re.compile(r"^0x[0-9A-Fa-f]{64}$")
 DECIMAL_RE = re.compile(r"^(0|[1-9][0-9]{0,77})$")
+RECEIPT_CODES = {
+    "RECEIPT_PENDING", "RECEIPT_CONFIRMED", "RECEIPT_FAILED",
+    "RECEIPT_TRANSACTION_UNKNOWN", "RECEIPT_RPC_UNAVAILABLE",
+    "RECEIPT_WRONG_CHAIN", "RECEIPT_VALIDATION_FAILED",
+}
+RECEIPT_ENDPOINT_CLASSES = {"configured", "official", "alchemy_public"}
 
 
 class HistoryStatus(str, Enum):
@@ -93,11 +101,15 @@ class WalletHistoryRecord:
     position_after_atomic: str | None = None
     allowance_after_atomic: str | None = None
     position_verified: bool | None = None
+    receipt_code: str | None = None
+    receipt_endpoint_class: str | None = None
 
     def __post_init__(self) -> None:
         _validate_record(self)
 
-    def to_dict(self, *, include_v5: bool = False) -> dict[str, object]:
+    def to_dict(
+        self, *, include_v5: bool = False, include_v6: bool = False,
+    ) -> dict[str, object]:
         value = {
             "action_id": self.action_id,
             "profile_id": self.profile_id,
@@ -128,6 +140,11 @@ class WalletHistoryRecord:
                 "allowance_after_atomic": self.allowance_after_atomic,
                 "position_verified": self.position_verified,
             })
+        if include_v6:
+            value.update({
+                "receipt_code": self.receipt_code,
+                "receipt_endpoint_class": self.receipt_endpoint_class,
+            })
         return value
 
     @classmethod
@@ -146,17 +163,20 @@ class WalletHistoryRecord:
             expected |= {"operation_id"}
         if schema_version >= POSITION_HISTORY_SCHEMA_VERSION:
             expected |= {"position_before_atomic"}
-        if schema_version >= HISTORY_SCHEMA_VERSION:
+        if schema_version >= LENDING_HISTORY_SCHEMA_VERSION:
             expected |= {
                 "protocol_id", "call_amount_atomic", "position_after_atomic",
                 "allowance_after_atomic", "position_verified",
             }
-        legacy_v5 = schema_version == HISTORY_SCHEMA_VERSION and set(value) == (
-            expected - {
-                "protocol_id", "call_amount_atomic", "position_after_atomic",
-                "allowance_after_atomic", "position_verified",
-            }
+        lending_fields = {
+            "protocol_id", "call_amount_atomic", "position_after_atomic",
+            "allowance_after_atomic", "position_verified",
+        }
+        legacy_v5 = schema_version == LENDING_HISTORY_SCHEMA_VERSION and set(value) == (
+            expected - lending_fields
         )
+        if schema_version >= RECEIPT_HISTORY_SCHEMA_VERSION:
+            expected |= {"receipt_code", "receipt_endpoint_class"}
         if set(value) != expected and not legacy_v5:
             raise HistoryValidationError("History record fields are invalid")
         try:
@@ -190,6 +210,8 @@ class WalletHistoryRecord:
                 position_after_atomic=value.get("position_after_atomic"),
                 allowance_after_atomic=value.get("allowance_after_atomic"),
                 position_verified=value.get("position_verified"),
+                receipt_code=value.get("receipt_code"),
+                receipt_endpoint_class=value.get("receipt_endpoint_class"),
             )
         except (TypeError, ValueError) as error:
             if isinstance(error, HistoryValidationError):
@@ -216,7 +238,8 @@ class HistoryStore:
             if schema_version not in {
                 LEGACY_HISTORY_SCHEMA_VERSION, FEE_HISTORY_SCHEMA_VERSION,
                 OPERATION_HISTORY_SCHEMA_VERSION,
-                POSITION_HISTORY_SCHEMA_VERSION, HISTORY_SCHEMA_VERSION,
+                POSITION_HISTORY_SCHEMA_VERSION, LENDING_HISTORY_SCHEMA_VERSION,
+                RECEIPT_HISTORY_SCHEMA_VERSION,
             }:
                 raise HistoryValidationError("History schema is unsupported")
             records = value["records"]
@@ -250,6 +273,8 @@ class HistoryStore:
         position_after_atomic: str | None = None,
         allowance_after_atomic: str | None = None,
         position_verified: bool | None = None,
+        receipt_code: str | None = None,
+        receipt_endpoint_class: str | None = None,
     ) -> tuple[WalletHistoryRecord, ...]:
         records = list(self.load())
         for index, record in enumerate(records):
@@ -281,6 +306,14 @@ class HistoryStore:
                     position_verified if position_verified is not None
                     else record.position_verified
                 ),
+                receipt_code=(
+                    receipt_code if receipt_code is not None else record.receipt_code
+                ),
+                receipt_endpoint_class=(
+                    receipt_endpoint_class
+                    if receipt_endpoint_class is not None
+                    else record.receipt_endpoint_class
+                ),
             )
             self._save(records)
             return tuple(records)
@@ -291,7 +324,10 @@ class HistoryStore:
             self._path,
             {
                 "schema_version": HISTORY_SCHEMA_VERSION,
-                "records": [record.to_dict(include_v5=True) for record in records],
+                "records": [
+                    record.to_dict(include_v5=True, include_v6=True)
+                    for record in records
+                ],
             },
         )
 
@@ -313,6 +349,8 @@ def history_record_to_map(record: WalletHistoryRecord) -> dict[str, object]:
         "positionAfterAtomic": record.position_after_atomic or "",
         "allowanceAfterAtomic": record.allowance_after_atomic or "",
         "positionVerified": record.position_verified is True,
+        "receiptCode": record.receipt_code or "",
+        "receiptEndpointClass": record.receipt_endpoint_class or "",
         "profileId": record.profile_id,
         "actionType": record.action_type,
         "network": record.network,
@@ -438,6 +476,13 @@ def _validate_record(record: WalletHistoryRecord) -> None:
         raise HistoryValidationError("History Lending protocol is invalid")
     if record.position_verified is not None and type(record.position_verified) is not bool:
         raise HistoryValidationError("History Lending verification is invalid")
+    if record.receipt_code is not None and record.receipt_code not in RECEIPT_CODES:
+        raise HistoryValidationError("History receipt code is invalid")
+    if (
+        record.receipt_endpoint_class is not None
+        and record.receipt_endpoint_class not in RECEIPT_ENDPOINT_CLASSES
+    ):
+        raise HistoryValidationError("History receipt endpoint class is invalid")
     if not isinstance(record.profile_id, str) or not 1 <= len(record.profile_id) <= 128:
         raise HistoryValidationError("History profile ID is invalid")
     if record.action_type not in {

@@ -20,6 +20,19 @@ from holon_wallet_control import (
     WalletPublicClient,
 )
 
+WALLET_INITIALIZATION_FAILED_EXIT_CODE = 20
+WALLET_INSTANCE_UNREACHABLE_EXIT_CODE = 21
+WALLET_OPEN_FAILURE_MESSAGES = {
+    "WALLET_EXECUTABLE_MISSING": "Wallet executable is missing.",
+    "WALLET_START_FAILED": "Wallet could not be started.",
+    "WALLET_INITIALIZATION_FAILED": "Wallet could not initialize.",
+    "WALLET_EXITED": "Wallet exited before it became ready.",
+    "WALLET_INSTANCE_UNREACHABLE": "The existing Wallet instance could not be reached.",
+    "WALLET_STARTUP_TIMEOUT": "Wallet did not become ready in time.",
+    "CONTROL_PROTOCOL_FAILED": "Wallet control protocol failed.",
+    "WALLET_PROCESS_VERIFICATION_FAILED": "Wallet process verification failed.",
+}
+
 
 class WalletHandle(Protocol):
     @property
@@ -58,6 +71,19 @@ class WalletOpenResult:
     wallet_state: str
     code: str
     message: str
+    exit_code: int | None = None
+
+
+def wallet_open_failure(code: str, exit_code: int | None = None) -> WalletOpenResult:
+    if code not in WALLET_OPEN_FAILURE_MESSAGES:
+        code = "WALLET_UNAVAILABLE"
+    if code == "WALLET_UNAVAILABLE":
+        message = "Wallet is unavailable."
+    else:
+        message = WALLET_OPEN_FAILURE_MESSAGES[code]
+    if code == "WALLET_EXITED" and type(exit_code) is int:
+        message = f"Wallet exited before it became ready (exit code {exit_code})."
+    return WalletOpenResult(False, "", code, message, exit_code)
 
 
 @dataclass(frozen=True)
@@ -180,6 +206,7 @@ class VerifiedWalletController(UnavailableWalletController):
         self._authority_timeout = authority_timeout
         self._lending_preview_control = lending_preview_control or WalletLendingPreviewClient()
         self._lending_preview_timeout = lending_preview_timeout
+        self._current: WalletHandle | None = None
 
     @property
     def wallet_path(self) -> Path:
@@ -197,38 +224,47 @@ class VerifiedWalletController(UnavailableWalletController):
                 True,
                 "ACTIVATED",
                 "WALLET_ACTIVATED",
-                "Wallet is open.",
+                "Wallet activation was requested.",
             )
         except ControlUnavailable:
             pass
-        except ControlProtocolError:
-            return self._unavailable()
+        except ControlProtocolError as error:
+            return wallet_open_failure(error.code)
 
         if not self._wallet_path.is_file():
-            return self._unavailable()
+            return wallet_open_failure("WALLET_EXECUTABLE_MISSING")
         creationflags = 0x08000000 if sys.platform == "win32" else 0
         try:
-            self._process_factory(
+            self._current = self._process_factory(
                 [str(self._wallet_path)],
                 shell=False,
                 close_fds=True,
                 creationflags=creationflags,
             )
         except Exception:
-            return self._unavailable()
+            return wallet_open_failure("WALLET_START_FAILED")
         try:
             self._control.activate(
                 launch_id,
                 self._wallet_path,
                 self._readiness_timeout,
             )
-        except (ControlProtocolError, ControlUnavailable):
-            return self._unavailable()
+        except ControlProtocolError as error:
+            return wallet_open_failure(error.code)
+        except ControlUnavailable:
+            exit_code = self._safe_exit_code(self._current)
+            if exit_code in {0, WALLET_INSTANCE_UNREACHABLE_EXIT_CODE}:
+                return wallet_open_failure("WALLET_INSTANCE_UNREACHABLE")
+            if exit_code == WALLET_INITIALIZATION_FAILED_EXIT_CODE:
+                return wallet_open_failure("WALLET_INITIALIZATION_FAILED")
+            if exit_code is not None:
+                return wallet_open_failure("WALLET_EXITED", exit_code)
+            return wallet_open_failure("WALLET_STARTUP_TIMEOUT")
         return WalletOpenResult(
             True,
             "OPENED",
             "WALLET_OPENED",
-            "Wallet is open.",
+            "Wallet launch was verified.",
         )
 
     def read_public_balances(self) -> WalletBalancesResult:
@@ -354,13 +390,14 @@ class VerifiedWalletController(UnavailableWalletController):
         return response.get("kind") in {"transfer_cancelled", "action_cancelled"}
 
     @staticmethod
-    def _unavailable() -> WalletOpenResult:
-        return WalletOpenResult(
-            False,
-            "",
-            "WALLET_UNAVAILABLE",
-            "Wallet is unavailable.",
-        )
+    def _safe_exit_code(handle: WalletHandle | None) -> int | None:
+        if handle is None:
+            return None
+        try:
+            value = handle.poll()
+        except Exception:
+            return None
+        return value if type(value) is int else None
 
 
 class WindowsProcessReference:

@@ -235,7 +235,8 @@ class PluginTests(unittest.TestCase):
                 self.assertEqual(make_envelope(kind, payload).kind, kind)
 
     def test_health_response_is_safe_and_authority_disabled(self) -> None:
-        runtime = plugin.PluginRuntime(StaticConnector(GuardHealth.available(GuardState.NORMAL)))
+        connector = StaticConnector(GuardHealth.available(GuardState.NORMAL))
+        runtime = plugin.PluginRuntime(connector)
         payload = json.loads(runtime.handle_health({"secret": "must-not-return"}))
         self.assertEqual(payload["status"], "READY")
         self.assertEqual(
@@ -249,6 +250,7 @@ class PluginTests(unittest.TestCase):
             ],
         )
         self.assertFalse(payload["authority_available"])
+        self.assertEqual(connector.ensure_calls, 1)
         self.assertNotIn("must-not-return", json.dumps(payload))
         self.assertNotIn("pid", runtime.handle_health().lower())
 
@@ -266,6 +268,29 @@ class PluginTests(unittest.TestCase):
         payload = json.loads(plugin.PluginRuntime(RaisingConnector()).handle_open_wallet())
         self.assertEqual(payload["status"], "DEGRADED")
         self.assertEqual(payload["code"], "WALLET_UNAVAILABLE")
+
+    def test_safe_wallet_startup_code_passes_from_guard_to_hermes(self) -> None:
+        connector = StaticConnector(GuardHealth.available(GuardState.NORMAL))
+        for code in plugin.WALLET_OPEN_FAILURE_CODES:
+            with self.subTest(code=code):
+                connector.open_wallet = lambda code=code: make_envelope(  # type: ignore[method-assign]
+                    MessageKind.ERROR,
+                    {
+                        "code": code,
+                        "message": "Safe startup diagnostic.",
+                        "retryable": False,
+                    },
+                )
+
+                payload = json.loads(
+                    plugin.PluginRuntime(connector).handle_open_wallet(),
+                )
+
+                self.assertEqual(payload["status"], "DEGRADED")
+                self.assertEqual(payload["code"], code)
+                self.assertEqual(payload["message"], "Safe startup diagnostic.")
+                for field in ("pid", "path", "pipe", "launch_id"):
+                    self.assertNotIn(field, json.dumps(payload).lower())
 
     def test_balance_tool_returns_public_snapshot_without_echoing_arguments(self) -> None:
         runtime = plugin.PluginRuntime(StaticConnector(GuardHealth.available(GuardState.NORMAL)))
@@ -305,7 +330,7 @@ class PluginTests(unittest.TestCase):
     def test_session_start_never_raises(self) -> None:
         plugin.PluginRuntime(RaisingConnector()).on_session_start(session_id="public")
 
-    def test_every_non_lifecycle_tool_blocks_in_every_protected_state(self) -> None:
+    def test_non_recovery_tools_block_in_every_protected_state(self) -> None:
         for state in (
             GuardState.ENTERING,
             GuardState.ACTIVE,
@@ -316,10 +341,9 @@ class PluginTests(unittest.TestCase):
                 runtime = plugin.PluginRuntime(StaticConnector(GuardHealth.available(state)))
                 for tool_name in (
                     "terminal", "browser", "future_unknown_tool",
-                    "holon_open_wallet", "holon_wallet_balances",
-                "holon_lending_compare", "holon_lending_positions",
-                "holon_lending_portfolio",
-                "holon_lending_prepare",
+                    "holon_wallet_balances", "holon_lending_compare",
+                    "holon_lending_positions", "holon_lending_portfolio",
+                    "holon_lending_prepare",
                     "holon_prepare_transfer",
                 ):
                     with self.subTest(tool_name=tool_name):
@@ -332,7 +356,8 @@ class PluginTests(unittest.TestCase):
             StaticConnector(GuardHealth.available(GuardState.ACTIVE)),
         )
         for tool_name in (
-            "holon_health", "holon_transfer_status", "holon_cancel_transfer",
+            "holon_health", "holon_open_wallet",
+            "holon_transfer_status", "holon_cancel_transfer",
             "holon_recover_transfer",
         ):
             with self.subTest(tool_name=tool_name):

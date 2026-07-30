@@ -12,6 +12,7 @@ from enum import Enum
 from typing import Any, Callable, Mapping, Protocol
 
 from web3 import Web3
+from web3.exceptions import BadFunctionCallOutput, ContractLogicError
 
 from .action_profiles import ActionProfilesState, AaveActionProfile, ProtocolActionProfile
 from .runtime import BASE_RPC_ENV, DEFAULT_BASE_RPC_URL
@@ -25,6 +26,7 @@ LENDING_TRANSACTION_SIZE_UPPER_BOUND = 512
 GAS_ESTIMATE_HEADROOM_BPS = 2_000
 GAS_BPS_DENOMINATOR = 10_000
 AMOUNT_RE = re.compile(r"^[0-9]+(?:[.,][0-9]+)?$")
+ALCHEMY_BASE_RPC_URL = "https://base-mainnet.g.alchemy.com/public"
 
 
 def gas_with_headroom(estimate: int) -> int:
@@ -329,9 +331,9 @@ class Web3AavePreflightRpc:
                         block_identifier=block,
                     ),
                 )
-            except Exception:
+            except (BadFunctionCallOutput, ContractLogicError):
                 continue
-        raise LendingPreflightError(LendingPreflightCode.IDENTITY_MISMATCH)
+        raise LendingPreflightError("LENDING_IDENTITY_MISMATCH")
 
     def protocol_paused(self, target: str, action: str, block: int) -> bool:
         name = "isSupplyPaused" if action == "supply" else "isWithdrawPaused"
@@ -365,10 +367,15 @@ class LendingPreflightService:
         rpc_factory: RpcFactory | None = None,
         clock: Callable[[], datetime] | None = None,
         environ: Mapping[str, str] | None = None,
+        rpc_fallback_factories: tuple[RpcFactory, ...] = (),
     ) -> None:
         self.profiles = profiles or ActionProfilesState.load()
         self._environ = os.environ if environ is None else environ
-        self._rpc_factory = rpc_factory or self._default_rpc
+        self._rpc_factories = (
+            (rpc_factory, *rpc_fallback_factories)
+            if rpc_factory is not None
+            else self._default_rpc_factories()
+        )
         self._clock = clock or (lambda: datetime.now(UTC))
 
     def prepare(
@@ -389,26 +396,36 @@ class LendingPreflightService:
             or not isinstance(sender, str) or not Web3.is_checksum_address(sender)
         ):
             raise LendingPreflightError(LendingPreflightCode.ACCOUNT_UNAVAILABLE)
-        try:
-            if isinstance(profile, AaveActionProfile):
-                return self._prepare(
-                    profile, intent, label, sender,
+        for index, factory in enumerate(self._rpc_factories):
+            try:
+                rpc = factory()
+                if isinstance(profile, AaveActionProfile):
+                    return self._prepare(
+                        profile, intent, label, sender, rpc,
+                        frozen_amount_atomic=frozen_amount_atomic,
+                    )
+                return self._prepare_protocol(
+                    profile, intent, label, sender, rpc,
                     frozen_amount_atomic=frozen_amount_atomic,
                 )
-            return self._prepare_protocol(
-                profile, intent, label, sender,
-                frozen_amount_atomic=frozen_amount_atomic,
-            )
-        except LendingPreflightError:
-            raise
-        except Exception as exc:
-            raise LendingPreflightError(LendingPreflightCode.RPC_UNAVAILABLE) from exc
+            except LendingPreflightError as exc:
+                if (
+                    exc.code == LendingPreflightCode.RPC_UNAVAILABLE.value
+                    and index + 1 < len(self._rpc_factories)
+                ):
+                    continue
+                raise
+            except Exception as exc:
+                if index + 1 < len(self._rpc_factories):
+                    continue
+                raise LendingPreflightError(LendingPreflightCode.RPC_UNAVAILABLE) from exc
+        raise LendingPreflightError(LendingPreflightCode.RPC_UNAVAILABLE)
 
     def _prepare(
         self, profile: AaveActionProfile, intent: LendingIntent,
-        label: str, sender: str, *, frozen_amount_atomic: int | None = None,
+        label: str, sender: str, rpc: AavePreflightRpc,
+        *, frozen_amount_atomic: int | None = None,
     ) -> dict[str, object]:
-        rpc = self._rpc_factory()
         block, block_time, base_fee = rpc.begin()
         now = self._clock().astimezone(UTC).replace(microsecond=0)
         age = int(now.timestamp()) - block_time
@@ -553,9 +570,9 @@ class LendingPreflightService:
 
     def _prepare_protocol(
         self, profile: ProtocolActionProfile, intent: LendingIntent,
-        label: str, sender: str, *, frozen_amount_atomic: int | None = None,
+        label: str, sender: str, rpc: AavePreflightRpc,
+        *, frozen_amount_atomic: int | None = None,
     ) -> dict[str, object]:
-        rpc = self._rpc_factory()
         block, block_time, base_fee = rpc.begin()
         now = self._clock().astimezone(UTC).replace(microsecond=0)
         age = int(now.timestamp()) - block_time
@@ -711,11 +728,20 @@ class LendingPreflightService:
             "position_before_atomic": str(position),
         }
 
-    def _default_rpc(self) -> AavePreflightRpc:
-        endpoint = self._environ.get(BASE_RPC_ENV, DEFAULT_BASE_RPC_URL).strip()
-        if not endpoint:
-            raise LendingPreflightError(LendingPreflightCode.RPC_UNAVAILABLE)
-        return Web3AavePreflightRpc(endpoint)
+    def _default_rpc_factories(self) -> tuple[RpcFactory, ...]:
+        configured = self._environ.get(BASE_RPC_ENV, "").strip()
+        endpoints = (
+            ((configured,) if configured else ())
+            + (DEFAULT_BASE_RPC_URL, ALCHEMY_BASE_RPC_URL)
+        )
+        unique: list[str] = []
+        for endpoint in endpoints:
+            if endpoint and endpoint not in unique:
+                unique.append(endpoint)
+        return tuple(
+            lambda endpoint=endpoint: Web3AavePreflightRpc(endpoint)
+            for endpoint in unique
+        )
 
 
 def encode_approve(spender: str, amount: int) -> str:

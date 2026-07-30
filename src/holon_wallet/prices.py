@@ -17,7 +17,7 @@ from .public_data import NetworkSnapshot, PublicDataStatus
 
 BASE_CHAIN_ID = 8453
 BASE_RPC_ENV = "HOLON_BASE_RPC_URL"
-BASE_PUBLIC_RPC = "https://base-rpc.publicnode.com"
+BASE_PUBLIC_RPC = "https://mainnet.base.org"
 SEQUENCER_FEED = "0xBCF85224fc0756B9Fa45aA7892530B47e10b6433"
 SEQUENCER_GRACE_SECONDS = 3_600
 BASE_HIGH_FEE_WARNING_USD = Decimal("0.05")
@@ -519,7 +519,7 @@ def _lending_asset_model(
             "aave-v3": "assets/aave-logo-white.png",
             "compound-v3": "assets/compound-logo-white.svg",
             "morpho-v1": "assets/morpho-logo-white.svg",
-        }.get(protocol, "assets/usdc.png"),
+        }.get(protocol, "assets/usdc.webp"),
     }
 
 

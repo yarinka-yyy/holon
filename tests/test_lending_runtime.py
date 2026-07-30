@@ -12,7 +12,9 @@ from holon_lending import (
     BASE_USDC, LendingAnalyticsStore, LendingPortfolioService,
     LendingReadService, ReadProfilesState,
 )
-from holon_lending.runtime import ChainSnapshot, _freshness
+from holon_lending.runtime import (
+    ChainSnapshot, LendingTransportError, LendingWrongChainError, _freshness,
+)
 
 NOW = 1_800_000_000
 BLOCK = 50_000_000
@@ -95,6 +97,19 @@ class FakeMorpho:
         return copy.deepcopy(self.value)
 
 
+class TransportFailingRpc(FakeRpc):
+    def aave(self, snapshot: ChainSnapshot, account: str | None = None):
+        del snapshot, account
+        self.calls.append("aave")
+        raise LendingTransportError("provider unavailable")
+
+
+class WrongChainRpc(FakeRpc):
+    def begin(self) -> ChainSnapshot:
+        self.calls.append("begin")
+        raise LendingWrongChainError("wrong chain")
+
+
 def refresh_fake_time(rpc: FakeRpc, morpho: FakeMorpho, now: int) -> None:
     rpc.timestamp = now - 10
     morpho.value["state"]["timestamp"] = now - 30
@@ -170,6 +185,37 @@ def test_one_protocol_failure_is_partial_not_zero(runtime) -> None:
     assert failed["base_yield"] is None
     assert failed["freshness"]["state"] == "UNAVAILABLE"
     assert failed["caveats"] == ["COMPOUND_DATA_UNAVAILABLE"]
+
+
+def test_current_reads_fall_back_only_after_transport_failure() -> None:
+    primary, fallback, morpho = TransportFailingRpc(), FakeRpc(), FakeMorpho()
+    service = LendingReadService(
+        ReadProfilesState.load(), lambda: primary, morpho, clock=lambda: NOW,
+        rpc_fallback_factories=(lambda: fallback,),
+    )
+
+    compared = service.compare(True)
+    positions = service.positions(ACCOUNT)
+
+    assert compared["status"] == "READY"
+    assert positions["status"] == "READY"
+    assert primary.calls.count("aave") >= 2
+    assert fallback.calls.count("aave") >= 2
+
+
+def test_wrong_chain_does_not_try_lending_read_fallback() -> None:
+    primary, fallback, morpho = WrongChainRpc(), FakeRpc(), FakeMorpho()
+    service = LendingReadService(
+        ReadProfilesState.load(), lambda: primary, morpho, clock=lambda: NOW,
+        rpc_fallback_factories=(lambda: fallback,),
+    )
+
+    compared = service.compare(True)
+    positions = service.positions(ACCOUNT)
+
+    assert compared["status"] == "DEGRADED"
+    assert positions["status"] == "DEGRADED"
+    assert fallback.calls == []
 
 
 def test_compare_reuses_thirty_second_cache_and_force_refreshes() -> None:

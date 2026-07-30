@@ -6,7 +6,9 @@ from pathlib import Path
 
 from holon_contracts import MessageKind, SecurityCode, make_envelope
 from holon_guard import GuardLifecycle, SnapshotStore
-from holon_guard.__main__ import _integrity_failure, _policy_path
+from holon_guard.__main__ import (
+    _integrity_failure, _policy_path, _restore_revalidated_signing,
+)
 from holon_guard.authority import AuthorityService
 from holon_policy import PolicyEngine
 from guard_support import enabled_policy, make_audit, make_ledger, transfer_request
@@ -71,3 +73,34 @@ def test_integrity_failure_keeps_health_readable_and_blocks_authority(tmp_path: 
     assert health.payload["code"] == code and not health.payload["authority_available"]
     assert refused.kind is MessageKind.SIGNING_DISABLED and refused.payload["code"] == code
     assert wallet.calls == 0
+
+
+def test_revalidated_hermes_version_restores_only_idle_guard(tmp_path: Path) -> None:
+    store = SnapshotStore(tmp_path / "guard-state.json")
+    store.bootstrap_normal_for_test()
+    lifecycle = GuardLifecycle(
+        store, store.load(), NoLaunchWallet(), LiveOwner(), make_ledger(tmp_path),
+    )
+    lifecycle.disable_signing(SecurityCode.HERMES_VERSION_UNSUPPORTED.value)
+
+    _restore_revalidated_signing(lifecycle, None)
+
+    assert lifecycle.snapshot.state.value == "NORMAL"
+    assert lifecycle.snapshot.reason == "AAVE_CAPABILITY_READY"
+
+
+def test_current_or_unrelated_failure_remains_signing_disabled(tmp_path: Path) -> None:
+    store = SnapshotStore(tmp_path / "guard-state.json")
+    store.bootstrap_normal_for_test()
+    lifecycle = GuardLifecycle(
+        store, store.load(), NoLaunchWallet(), LiveOwner(), make_ledger(tmp_path),
+    )
+    lifecycle.disable_signing("STATE_INVALID")
+
+    _restore_revalidated_signing(lifecycle, None)
+    assert lifecycle.snapshot.state.value == "SIGNING_DISABLED"
+    lifecycle.disable_signing(SecurityCode.HERMES_VERSION_UNSUPPORTED.value)
+    _restore_revalidated_signing(
+        lifecycle, SecurityCode.HERMES_VERSION_UNSUPPORTED.value,
+    )
+    assert lifecycle.snapshot.state.value == "SIGNING_DISABLED"
