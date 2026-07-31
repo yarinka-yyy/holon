@@ -389,6 +389,40 @@ def test_portfolio_marks_earnings_unknown_without_reliable_wallet_history(tmp_pa
     assert all(item["earnings_status"] == "NOT_ENOUGH_HISTORY" for item in result["protocols"])
 
 
+def test_portfolio_rechecks_invalid_retained_cashflow_before_showing_earnings(tmp_path) -> None:
+    now = [NOW]
+    rpc, morpho = FakeRpc(), FakeMorpho()
+    rpc.aave_position = 1_000_000
+    store = LendingAnalyticsStore(tmp_path / "analytics.json")
+    portfolio = LendingPortfolioService(
+        LendingReadService(
+            ReadProfilesState.load(), lambda: rpc, morpho, clock=lambda: now[0],
+        ),
+        store,
+        clock=lambda: now[0],
+    )
+    portfolio.read(ACCOUNT, [])
+    retained = store.load(ACCOUNT["address"])
+    assert retained is not None
+    retained["baselines"]["aave-v3"].update({
+        "net_contributions_atomic": "0",
+        "processed_action_ids": ["withdraw-all"],
+        "history_complete": True,
+    })
+    assert store.save(retained)
+
+    now[0] += 61
+    rpc.aave_position = 0
+    result = portfolio.read(ACCOUNT, [{
+        "action_id": "withdraw-all", "protocol": "aave-v3",
+        "direction": "withdraw", "amount_atomic": None, "verified": True,
+        "updated_at": "2027-01-15T08:01:00Z",
+    }], force_refresh=True)
+
+    assert result["protocols"][0]["tracked_earnings_atomic"] is None
+    assert result["protocols"][0]["earnings_status"] == "NOT_ENOUGH_HISTORY"
+
+
 def test_portfolio_keeps_contribution_total_after_wallet_history_rotation(tmp_path) -> None:
     now = [NOW]
     rpc, morpho = FakeRpc(), FakeMorpho()

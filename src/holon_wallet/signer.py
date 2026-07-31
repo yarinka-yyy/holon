@@ -325,7 +325,8 @@ def _validate_lending_action(
         return OfflineSigningCode.ACTION_INVALID
     expected_target = profile.asset if action.method == "approve" else profile.target
     valid_mode = (
-        action.method in {"approve", "supply", "deposit"} and action.amount_mode == "exact"
+        action.method in {"approve", "supply", "deposit"}
+        and action.amount_mode in {"exact", "all"}
     ) or (
         action.method in {"withdraw", "redeem"} and action.amount_mode in {"exact", "all"}
     )

@@ -424,7 +424,10 @@ def lending_cashflows(
             else:
                 before = int(record.position_before_atomic)
                 after = int(record.position_after_atomic)
-                amount = str(before - after) if before >= after else None
+                # An all-withdraw/redeem must have reduced the verified position.
+                # A zero or reversed delta is insufficient history, not a zero
+                # cashflow: accepting it would fabricate a negative earning.
+                amount = str(before - after) if before > after else None
         result.append({
             "action_id": record.action_id,
             "protocol": record.protocol_id,

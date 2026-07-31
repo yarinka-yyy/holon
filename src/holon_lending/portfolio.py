@@ -702,12 +702,22 @@ class LendingPortfolioService:
                     if (
                         operation.get("protocol") != protocol
                         or not isinstance(action_id, str)
-                        or action_id in processed
                         or str(operation.get("updated_at", "")) < str(baseline["started_at"])
                     ):
                         continue
                     amount = operation.get("amount_atomic")
-                    if operation.get("verified") is not True or not isinstance(amount, str) or not amount.isdecimal():
+                    valid_cashflow = (
+                        operation.get("verified") is True
+                        and isinstance(amount, str)
+                        and amount.isdecimal()
+                    )
+                    if action_id in processed:
+                        # Re-evaluate retained actions. Older versions accepted
+                        # zero-delta all-withdraws and could show false losses.
+                        if not valid_cashflow:
+                            complete = False
+                        continue
+                    if not valid_cashflow:
                         complete = False
                         processed.add(action_id)
                         continue

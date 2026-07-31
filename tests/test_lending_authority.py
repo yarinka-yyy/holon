@@ -189,6 +189,8 @@ def test_exact_and_all_withdraw_bind_distinct_calldata_and_mode() -> None:
 @pytest.mark.parametrize(("profile_id", "action", "mode", "amount", "allowance", "method"), [
     ("compound-v3-base-usdc", "supply", "exact", "1", 1_000_000, "supply"),
     ("morpho-v1-gauntlet-usdc-prime", "supply", "exact", "1", 1_000_000, "deposit"),
+    ("compound-v3-base-usdc", "supply", "all", None, 10_000_000, "supply"),
+    ("morpho-v1-gauntlet-usdc-prime", "supply", "all", None, 10_000_000, "deposit"),
     ("compound-v3-base-usdc", "withdraw", "all", None, 0, "withdraw"),
     ("morpho-v1-gauntlet-usdc-prime", "withdraw", "all", None, 0, "redeem"),
 ])
@@ -203,6 +205,8 @@ def test_wallet_builds_and_signer_accepts_generic_protocol_actions(
     value = request(now, action, mode, amount)
     value["protocol_profile_id"] = profile_id
     value["action_profile_digest"] = profile.digest
+    if action == "supply" and mode == "all":
+        value["resolved_amount_atomic"] = "10000000"
     prepared = prepare_lending_action(
         LendingPreflightService(
             state, lambda: GenericRpc(profile, allowance=allowance, position=2_000_000),
@@ -211,6 +215,8 @@ def test_wallet_builds_and_signer_accepts_generic_protocol_actions(
     )
     assert prepared.method == method
     assert prepared.action_profile_digest == profile.digest
+    if action == "supply" and mode == "all":
+        assert prepared.amount_atomic == 10_000_000
     assert validate_signing_action(prepared, prepared.digest, now) is None
 
 

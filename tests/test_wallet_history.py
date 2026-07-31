@@ -13,6 +13,7 @@ from holon_wallet.history import (
     HistoryValidationError,
     WalletHistoryRecord,
     history_record_to_map,
+    lending_cashflows,
 )
 from holon_wallet.storage import StorageError, WalletPaths, atomic_write_json
 
@@ -176,6 +177,29 @@ def test_history_uses_action_semantics_and_only_transfer_is_negative(
     assert mapped["shortRecipient"] == (
         "Aave V3" if action_type.startswith("lending_") else "0x222222…222222"
     )
+
+
+def test_zero_delta_all_withdraw_is_not_a_verified_cashflow() -> None:
+    item = record(
+        action_type="lending_withdraw_all",
+        contract="0x" + "44" * 20,
+        status=HistoryStatus.CONFIRMED,
+        protocol_id="aave-v3",
+        position_before_atomic="0",
+        position_after_atomic="0",
+        position_verified=True,
+    )
+
+    cashflows = lending_cashflows((item,), item.profile_id)
+
+    assert cashflows == [{
+        "action_id": item.action_id,
+        "protocol": "aave-v3",
+        "direction": "withdraw",
+        "amount_atomic": None,
+        "verified": True,
+        "updated_at": item.updated_at,
+    }]
 
 
 def test_duplicate_unknown_and_invalid_transition_are_refused(tmp_path) -> None:
