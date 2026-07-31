@@ -8,17 +8,12 @@ Item {
     property bool divider: true
     property bool amountsVisible: true
     property bool expanded: false
-    readonly property string protocolBadgeLabel: ({
-        "aave-v3": "Aave",
-        "compound-v3": "Compound",
-        "morpho-v1": "Morpho"
-    })[String(root.asset.assetId || "")] || ""
-    readonly property bool isLendingPosition: protocolBadgeLabel.length > 0
     readonly property url protocolBadgeIcon: ({
         "aave-v3": "assets/aave-mark-white.svg",
         "compound-v3": "assets/compound-mark.svg",
         "morpho-v1": "assets/morpho-mark-white.svg"
     })[String(root.asset.assetId || "")] || ""
+    readonly property bool isLendingPosition: protocolBadgeIcon.toString().length > 0
     height: 74 + (expanded ? 54 : 0)
 
     Image {
@@ -34,18 +29,9 @@ Item {
         clip: true
         Image {
             visible: root.protocolBadgeIcon !== ""
-            anchors.horizontalCenter: parent.horizontalCenter
-            y: 6; width: 18; height: 14
-            source: root.protocolBadgeIcon; sourceSize: Qt.size(36, 28)
+            anchors.centerIn: parent; width: 30; height: 30
+            source: root.protocolBadgeIcon; sourceSize: Qt.size(60, 60)
             fillMode: Image.PreserveAspectFit
-        }
-        Text {
-            anchors.horizontalCenter: parent.horizontalCenter
-            y: 24; width: parent.width - 4; horizontalAlignment: Text.AlignHCenter
-            text: root.protocolBadgeLabel; color: Design.text
-            font.family: Design.fontFamily
-            font.pixelSize: root.protocolBadgeLabel === "Compound" ? 8 : 9
-            font.weight: Font.DemiBold; elide: Text.ElideRight
         }
     }
     Text {

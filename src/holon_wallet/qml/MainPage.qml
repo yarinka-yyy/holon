@@ -176,35 +176,20 @@ PageState {
                 height: assetRows.height
                 Column {
                     id: assetRows; width: parent.width
-                    AssetRow {
-                        id: ethRow; objectName: "ethAssetRow"
-                        width: parent.width
-                        asset: walletController.portfolioData.assets.length > 0
-                            ? walletController.portfolioData.assets[0] : ({})
-                        iconSource: "assets/ethereum.svg"
-                        amountsVisible: walletController.balancesVisible
-                    }
-                    AssetRow {
-                        id: usdcRow; objectName: "usdcAssetRow"
-                        width: parent.width
-                        divider: walletController.portfolioData.assets.length > 2
-                        asset: walletController.portfolioData.assets.length > 1
-                            ? walletController.portfolioData.assets[1] : ({})
-                        iconSource: "assets/usdc.webp"
-                        amountsVisible: walletController.balancesVisible
-                    }
                     Repeater {
-                        model: walletController.portfolioData.assets.length > 2
-                            ? walletController.portfolioData.assets.slice(2) : []
+                        model: walletController.portfolioData.assets
                         delegate: AssetRow {
                             required property var modelData
                             required property int index
-                            objectName: "lendingAssetRow-" + modelData.assetId
+                            objectName: "assetRow-" + modelData.assetId
                             width: assetRows.width
                             asset: modelData
-                            iconSource: modelData.iconSource
+                            iconSource: modelData.iconSource || (
+                                modelData.assetId === "eth"
+                                ? "assets/ethereum.svg" : "assets/usdc.webp"
+                            )
                             amountsVisible: walletController.balancesVisible
-                            divider: index < walletController.portfolioData.assets.length - 3
+                            divider: index < walletController.portfolioData.assets.length - 1
                         }
                     }
                 }

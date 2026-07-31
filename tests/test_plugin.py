@@ -563,10 +563,11 @@ class PluginTests(unittest.TestCase):
         self.assertEqual(result["turn_state"], "END_REQUIRED")
 
         supply = json.loads(plugin.PluginRuntime(connector).handle_lending_execute({
-            "action": "supply", "amount_mode": "exact", "amount": "1",
+            "action": "supply", "amount_mode": "all", "amount": None,
         }))
         self.assertEqual(supply["status"], "AWAITING_LOCAL_CONFIRMATION")
         self.assertEqual(supply["action"], "supply")
+        self.assertEqual(supply["amount_mode"], "all")
 
     def test_failed_lending_status_offers_only_confirmed_fresh_retry(self) -> None:
         connector = StaticConnector(GuardHealth.available(GuardState.NORMAL))

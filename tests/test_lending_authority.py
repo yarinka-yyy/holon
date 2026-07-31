@@ -189,6 +189,7 @@ def test_exact_and_all_withdraw_bind_distinct_calldata_and_mode() -> None:
 @pytest.mark.parametrize(("profile_id", "action", "mode", "amount", "allowance", "method"), [
     ("compound-v3-base-usdc", "supply", "exact", "1", 1_000_000, "supply"),
     ("morpho-v1-gauntlet-usdc-prime", "supply", "exact", "1", 1_000_000, "deposit"),
+    ("aave-v3-base-usdc", "supply", "all", None, 10_000_000, "supply"),
     ("compound-v3-base-usdc", "supply", "all", None, 10_000_000, "supply"),
     ("morpho-v1-gauntlet-usdc-prime", "supply", "all", None, 10_000_000, "deposit"),
     ("compound-v3-base-usdc", "withdraw", "all", None, 0, "withdraw"),
@@ -207,10 +208,13 @@ def test_wallet_builds_and_signer_accepts_generic_protocol_actions(
     value["action_profile_digest"] = profile.digest
     if action == "supply" and mode == "all":
         value["resolved_amount_atomic"] = "10000000"
+    rpc = (
+        Rpc(profile, allowance=allowance, position=2_000_000)
+        if profile.protocol_id == "aave-v3"
+        else GenericRpc(profile, allowance=allowance, position=2_000_000)
+    )
     prepared = prepare_lending_action(
-        LendingPreflightService(
-            state, lambda: GenericRpc(profile, allowance=allowance, position=2_000_000),
-        ),
+        LendingPreflightService(state, lambda: rpc),
         state, account, value,
     )
     assert prepared.method == method

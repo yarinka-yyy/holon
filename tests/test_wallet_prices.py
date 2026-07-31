@@ -184,10 +184,10 @@ def test_lending_positions_extend_all_and_base_without_double_counting() -> None
     combined = portfolio_to_map(snapshots, prices, "all", lending)
     assert combined["totalUsd"] == "$7,535.00"
     assert [item["assetId"] for item in combined["assets"]] == [
-        "eth", "usdc", "aave-v3", "compound-v3",
+        "eth", "compound-v3", "aave-v3", "usdc",
     ]
     assert combined["networks"][1]["totalUsd"] == "$5,033.00"
-    assert combined["assets"][2]["amount"] == "10.00 USDC"
+    assert combined["assets"][1]["amount"] == "20.00 USDC"
 
     ethereum = portfolio_to_map(snapshots, prices, "ethereum", lending)
     assert ethereum["totalUsd"] == "$2,502.00"

@@ -279,7 +279,10 @@ def portfolio_to_map(
         and item["position_atomic"].isdecimal()
         and int(item["position_atomic"]) > 0
     )
-    asset_models = wallet_assets + lending_assets
+    asset_models = tuple(sorted(
+        wallet_assets + lending_assets,
+        key=_asset_sort_key,
+    ))
     all_lending_total = (
         sum(int(item["position_atomic"]) for item in lending_items)
         if known_lending_complete else None
@@ -437,6 +440,7 @@ def _asset_model(
     )
     return {
         "assetId": asset_id,
+        "isGasAsset": asset_id == "eth",
         "symbol": symbol,
         "label": label,
         "balanceAvailable": balances_available,
@@ -506,6 +510,7 @@ def _lending_asset_model(
     }.get(protocol, str(value.get("display_name", "Lending")))
     return {
         "assetId": protocol,
+        "isGasAsset": False,
         "symbol": "USDC · Base Lending",
         "label": label,
         "balanceAvailable": True,
@@ -521,6 +526,24 @@ def _lending_asset_model(
             "morpho-v1": "assets/morpho-logo-white.svg",
         }.get(protocol, "assets/usdc.webp"),
     }
+
+
+def _asset_sort_key(value: Mapping[str, object]) -> tuple[int, int, Decimal, str]:
+    """Keep the native gas asset first; rank all other known assets by USD."""
+    asset_id = str(value.get("assetId", ""))
+    if value.get("isGasAsset") is True:
+        return 0, 0, Decimal(0), asset_id
+    raw_usd = value.get("usdRaw")
+    try:
+        usd = Decimal(str(raw_usd)) if raw_usd not in {None, ""} else None
+    except (ArithmeticError, ValueError):
+        usd = None
+    return (
+        1,
+        0 if usd is not None else 1,
+        -usd if usd is not None else Decimal(0),
+        asset_id,
+    )
 
 
 def _format_token(value: int, decimals: int, symbol: str) -> str:

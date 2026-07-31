@@ -29,7 +29,7 @@ def test_aave_mark_is_a_compact_transparent_logo_not_a_banner() -> None:
     )
 
 
-def test_lending_badges_use_compact_marks_and_keep_the_protocol_name_inside() -> None:
+def test_lending_badges_use_centered_marks_without_repeated_protocol_names() -> None:
     qml = ASSETS.parent.joinpath("AssetRow.qml").read_text(encoding="utf-8")
 
     assert ASSETS.joinpath("aave-mark-white.svg").is_file()
@@ -39,7 +39,8 @@ def test_lending_badges_use_compact_marks_and_keep_the_protocol_name_inside() ->
     assert '"assets/compound-mark.svg"' in qml
     assert '"assets/morpho-mark-white.svg"' in qml
     assert "clip: true" in qml
-    assert "parent.width - 4" in qml
+    assert "anchors.centerIn: parent; width: 30; height: 30" in qml
+    assert "protocolBadgeLabel" not in qml
 
 
 def test_ethereum_logo_is_clean_vector_without_embedded_checkerboard() -> None:

@@ -70,6 +70,13 @@ When execution returns `PROTECTED_FLOW_STARTED`, state that the exact action mus
 
 ## Composite Supply and approval
 
+Both exact Supply and Supply all are supported for Aave V3, Compound III, and Morpho V1.
+For an explicit Supply all request, call `holon_lending_execute` with
+`amount_mode=all` and `amount=null`; Wallet freezes the current live USDC amount
+before its local Review. Any required approval remains exact to that frozen amount.
+Never replace the user's `all` request with `exact` or claim that Supply all is
+unsupported because of an old validator result.
+
 Supply may require an exact USDC approval before protocol supply:
 
 1. Holon Wallet reviews and authenticates the approval as its own signable phase.
