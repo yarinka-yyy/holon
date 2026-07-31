@@ -19,9 +19,23 @@ PageState {
         onBackRequested: walletController.showMain()
     }
 
+    SurfaceCard {
+        objectName: "lendingPreflightNotice"
+        visible: walletController.lendingNotice.length > 0
+        x: 28; y: 112; width: 458; height: 56
+        color: "#251B12"; border.width: 1; border.color: Design.warning
+        Text {
+            x: 14; anchors.verticalCenter: parent.verticalCenter; width: parent.width - 28
+            text: walletController.lendingNotice
+            color: Design.text; font.family: Design.fontFamily; font.pixelSize: 12
+            wrapMode: Text.WordWrap; maximumLineCount: 2
+        }
+    }
+
     Flickable {
         id: scroll
-        x: 0; y: 120; width: parent.width; height: parent.height - 126
+        x: 0; y: walletController.lendingNotice.length > 0 ? 182 : 120
+        width: parent.width; height: parent.height - y - 6
         contentWidth: width; contentHeight: content.height + 28
         clip: true; boundsBehavior: Flickable.StopAtBounds
 

@@ -9,7 +9,7 @@ from concurrent.futures import Executor, Future, ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime
 from threading import Event
-from typing import Callable
+from typing import Callable, Mapping
 
 from PySide6.QtCore import Property, QLocale, QObject, QTime, QTimer, Signal, Slot
 from PySide6.QtGui import QGuiApplication
@@ -184,6 +184,7 @@ class WalletController(QObject):
     approvalChanged = Signal()
     guardNoticeChanged = Signal()
     lendingRecoveryChanged = Signal()
+    lendingNoticeChanged = Signal()
     _publicDataReady = Signal(int, object)
     _lendingDataReady = Signal(int, object)
     _transferReady = Signal(int, object)
@@ -305,6 +306,7 @@ class WalletController(QObject):
         self._external_completion: Callable[[dict[str, object]], None] | None = None
         self._external_begin_delivery: Callable[[], bool] | None = None
         self._guard_status_sender: Callable[[dict[str, object]], None] | None = None
+        self._lending_notice = ""
         self._mainnet_in_progress = False
         self._mainnet_result: MainnetTransferResult | None = None
         self._receipt_checking = False
@@ -445,6 +447,10 @@ class WalletController(QObject):
     @Property(bool, notify=lendingRecoveryChanged)
     def lendingRecoveryChecking(self) -> bool:
         return bool(self._lending_resume_action_id and self._receipt_checking)
+
+    @Property(str, notify=lendingNoticeChanged)
+    def lendingNotice(self) -> str:
+        return self._lending_notice
 
     @Property(str, notify=errorMessageChanged)
     def errorMessage(self) -> str:
@@ -1296,6 +1302,7 @@ class WalletController(QObject):
         self._external_transfer = dict(request)
         self._external_completion = completion
         self._external_begin_delivery = begin_delivery
+        self._set_lending_notice("")
         self._transfer_network = "base"
         self._transfer_asset = "usdc"
         self._transfer_recipient = {
@@ -3504,7 +3511,13 @@ class WalletController(QObject):
         active = self._state.active_profile
         if isinstance(result, (TransferPreflightError, LendingPreflightError)):
             self._transfer_flow.close()
-            is_lending = isinstance(result, LendingPreflightError)
+            is_lending = (
+                isinstance(result, LendingPreflightError)
+                or (
+                    context is not None
+                    and context.get("kind") == "prepare_lending_action"
+                )
+            )
             message = (
                 _transfer_error_message(result.code)
                 if isinstance(result, TransferPreflightError)
@@ -3520,6 +3533,11 @@ class WalletController(QObject):
                     "no Supply Review was prepared"
                 )
                 self.lendingRecoveryChanged.emit()
+                return
+            if is_lending:
+                self._cancel_transfer_request(clear_recipient=True)
+                self._set_lending_notice(_lending_preflight_notice(context, code))
+                self._set_screen("lending")
                 return
             self._set_screen("send")
             return
@@ -3927,6 +3945,11 @@ class WalletController(QObject):
             self._transfer_error = message
             self.transferChanged.emit()
 
+    def _set_lending_notice(self, message: str) -> None:
+        if message != self._lending_notice:
+            self._lending_notice = message
+            self.lendingNoticeChanged.emit()
+
     def _selected_network_ids(self) -> tuple[str, ...]:
         if self._selected_network == "all":
             return tuple(spec.network_id for spec in NETWORKS)
@@ -4217,6 +4240,19 @@ class WalletController(QObject):
             self.currentScreenChanged.emit()
             if screen == "main" and self._state.active_profile is not None:
                 self.refreshPublicData()
+
+
+def _lending_preflight_notice(context: Mapping[str, object] | None, code: str) -> str:
+    profile_labels = {
+        "aave-v3-base-usdc": "Aave V3",
+        "compound-v3-base-usdc": "Compound III",
+        "morpho-v1-gauntlet-usdc-prime": "Morpho V1",
+    }
+    value = context or {}
+    profile = profile_labels.get(str(value.get("protocol_profile_id")), "Lending")
+    action = "Withdraw" if value.get("action") == "withdraw" else "Supply"
+    amount = " all" if value.get("amount_mode") == "all" else ""
+    return f"{action}{amount} from {profile} was not prepared ({code}). Nothing was signed or sent."
 
 
 def _recovery_value(

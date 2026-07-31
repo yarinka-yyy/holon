@@ -444,6 +444,42 @@ def test_lending_preflight_failure_returns_to_recovery_not_generic_send(tmp_path
     assert item.transferAction == {}
 
 
+def test_lending_preflight_failure_returns_to_lending_not_send(tmp_path) -> None:
+    item = controller(tmp_path, StubPolicyControl())
+    secret = password()
+    item.beginCreate()
+    assert item.submitPassword(secret, secret)
+    assert item.finishBackup()
+    responses: list[dict[str, object]] = []
+    item._external_transfer = {
+        "kind": "prepare_lending_action",
+        "flow_id": "11111111-1111-4111-8111-111111111111",
+        "action_id": "act-33333333-3333-4333-8333-333333333333",
+        "protocol_profile_id": "compound-v3-base-usdc",
+        "action": "withdraw",
+        "amount_mode": "all",
+    }
+    item._external_completion = responses.append
+    item._transfer_preparing = True
+    item._transfer_network = "base"
+    item._transfer_asset = "usdc"
+    item._transfer_recipient = "Compound III"
+    item._transfer_amount_input = "All current position"
+    item._transfer_generation = 5
+
+    item._accept_transfer_preflight(5, LendingPreflightError("SIMULATION_FAILED"))
+
+    assert responses[-1]["code"] == "SIMULATION_FAILED"
+    assert item.currentScreen == "lending"
+    assert item.lendingNotice == (
+        "Withdraw all from Compound III was not prepared (SIMULATION_FAILED). "
+        "Nothing was signed or sent."
+    )
+    assert item.transferAction == {}
+    assert item.transferRecipient == ""
+    assert item.transferAmountInput == ""
+
+
 def test_trusted_recipients_draft_review_password_restart_and_cancel(tmp_path) -> None:
     item = controller(tmp_path)
     secret = password()
