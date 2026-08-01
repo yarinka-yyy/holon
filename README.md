@@ -1,31 +1,60 @@
 # Holon
 
-Holon is a Windows crypto layer for Hermes that keeps Wallet secrets and signing authority outside the chat model. Hermes interprets intent and presents safe public results; a separate local Wallet handles secret input, exact review, confirmation, signing, and broadcast.
+Holon helps you use crypto through a personal AI agent. Today it works with Hermes.
 
-> **Alpha status.** Holon is pre-release software for controlled personal use and technical review. It is not a production consumer wallet. No public installer, GitHub Release, signed binary, or checksum is available yet. Release assets require separate final verification and approval.
+You can ask Hermes to check balances, compare lending rates, or prepare a supported transfer. Holon turns that request into a clear, supported flow. When an action needs a signature, the separate Holon Wallet shows exactly what will happen and only you can approve it.
 
-## What it does
+Your seed phrase, private keys, and Wallet password stay in Wallet. Hermes and the AI model cannot read them, sign on your behalf, or take control of the final decision.
 
-- Integrates with compatible Hermes Desktop (`>=0.18.2,<0.19.0`) through a standard plugin.
-- Provides a separate local Wallet for profile creation/import, public balances, local history, approvals, and supported ETH/USDC flows on Ethereum Mainnet and Base.
-- Enforces exact-action review, fresh local Wallet-password authentication, one active protected flow, replay protection, and one broadcast attempt.
-- Compares public Base native-USDC rates and positions for Aave V3, Compound III, and the selected Morpho V1 vault without unlocking the Wallet.
-- Supports bounded Base-USDC supply and withdrawal only for those integrity-pinned profiles; protocol selection, approval, and every signable phase remain explicit local Wallet actions.
+> **Alpha status.** Holon is alpha software for controlled personal use and technical review. It is not a production consumer wallet.
 
-## Security model
+## How Holon works
 
-Chat confirmation is not a signing decision in Holon.
+```mermaid
+flowchart LR
+    H["Hermes Desktop"] --> P["Holon plugin"]
+    P -->|"safe request or status"| G["Local Guard"]
+    G -->|"validated request"| W["Holon Wallet"]
+    W --> V["Encrypted local vault"]
+    W -->|"public reads or confirmed transaction"| N["Ethereum / Base RPC"]
+    P -->|"public results"| H
+    G -->|"safe status"| P
+```
 
-- Seed phrases, private keys, Wallet passwords, decrypted vault content, and raw signed bytes stay inside the local Wallet. They must never be copied into Hermes, logs, diagnostics, or public screenshots.
-- Hermes receives only public data, safe status/error/refusal information, and public transaction identifiers.
-- The local Guard validates protected-flow state, compatibility, integrity, and policy. Missing or uncertain authority state fails closed while ordinary Hermes work remains available.
-- Any material change, expiry, replay, interruption, or uncertain broadcast result invalidates authority. Financial actions are never automatically retried.
+1. You tell Hermes what you want to do.
+2. The Holon plugin and Local Guard check whether the request is supported and safe.
+3. For any action that needs approval, Holon opens the separate Wallet.
+4. You review the exact action, enter the Wallet password locally, and choose whether to sign it.
 
-See [the architecture overview](docs/ARCHITECTURE.md) for component and data-flow detail.
+The Wallet vault has no data path to Hermes. Read the [architecture overview](docs/ARCHITECTURE.md) for component boundaries and data flow.
 
-## Install and run
+## What you can do today
 
-The end-user Setup is not public yet. When an approved alpha Setup is available, it installs per Windows user, detects a compatible Hermes installation, and requires no administrator privileges or developer tooling. Detailed prerequisites, install, uninstall, and source-build steps are in [packaging/INSTALL.md](packaging/INSTALL.md).
+- Open a Wallet from Hermes and view public ETH and USDC balances on Ethereum Mainnet and Base.
+- Create or import a Wallet profile inside the local Wallet application.
+- View local Wallet history and supported token approvals.
+- Compare Base native-USDC rates and positions for Aave V3, Compound III, and the selected Morpho V1 vault.
+- Prepare supported ETH or USDC transfers and supported Base-USDC lending supply or withdrawal actions.
+
+Every signable action still needs a new local Wallet review, fresh password entry, and explicit confirmation.
+
+## Control and safety
+
+- A message in Hermes never authorizes a signature.
+- Holon signs only the exact action shown in Wallet. A changed, expired, interrupted, or uncertain action cannot be reused.
+- Public results keep `LIVE`, `CACHED`, `STALE`, `UNAVAILABLE`, pending, and unknown states distinct. Missing data is not a zero balance, and an uncertain transaction is not confirmed.
+- Never copy recovery material, private keys, Wallet passwords, decrypted vault content, raw signed bytes, or secret-bearing screenshots into Hermes, logs, diagnostics, or public material.
+- A real-fund demonstration needs a separate human-approved low-value flow. Holon never retries a financial action automatically.
+
+## Current scope
+
+The alpha focuses on Windows 11, Hermes `>=0.18.2,<0.19.0`, Ethereum Mainnet, Base, ETH, and native USDC. Lending is limited to Base native USDC and the three pinned Aave, Compound, and Morpho profiles.
+
+Future networks, broader token support, hardware wallets, automatic trading, and automatic rebalancing are not part of this alpha.
+
+## Installation
+
+See [the installation guide](packaging/INSTALL.md) for Windows requirements, data-preserving maintenance, and source builds.
 
 ## Repository layout
 
@@ -34,25 +63,10 @@ The end-user Setup is not public yet. When an approved alpha Setup is available,
 | `src/` | Wallet, Guard, Hermes plugin, shared contracts, and Lending code |
 | `skills/` | Hermes instructions for the `holon` and `holon-lending` capabilities |
 | `tests/` | Deterministic and component-level verification |
-| `packaging/` | Windows installer and verified package-build support |
+| `packaging/` | Windows installer and package-build support |
 | `docs/` | Public architecture material |
 
 Generated `build/`, `dist/`, virtual environments, Wallet data, diagnostics, and release archives are ignored by Git and are not source artifacts.
-
-## Supported scope and limits
-
-- Windows 11 and one compatible Hermes installation are the supported environment.
-- Public Wallet reads cover Ethereum Mainnet and Base; the required token allowlist is native USDC on those networks.
-- Lending is Base Mainnet native USDC only: Aave V3, Compound III, and one selected Morpho V1 vault. Rates can be `LIVE`, `STALE`, or `UNAVAILABLE`; unavailable data is never shown as zero or fabricated.
-- Holon is not a general wallet, portfolio indexer, hardware-wallet client, arbitrary smart-contract caller, borrowing tool, or autonomous trading/rebalancing system.
-- MVP1 does not claim protection from a compromised operating system, hostile same-user software, deliberate secret sharing in chat, or unsigned-release supply-chain compromise.
-
-## Public review safety
-
-- Never record or publish a Wallet screen that contains recovery material, a private key, a Wallet password, decrypted vault content, or raw signed bytes.
-- Keep `LIVE`, `CACHED`, `STALE`, `UNAVAILABLE`, pending, and unknown results distinct. Missing data is not a zero balance, and an uncertain transaction is not confirmed.
-- Any real-fund demonstration requires a separate human-approved low-value flow with current checks and exact local Wallet confirmation.
-- Never retry a refused, failed, interrupted, expired, or uncertain financial action automatically.
 
 ## Development verification
 
@@ -65,7 +79,7 @@ uv sync --locked --all-groups
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-Building a local unsigned Setup additionally requires the official Inno Setup compiler. This is a source-build procedure, not an end-user installation path; see [packaging/INSTALL.md](packaging/INSTALL.md#developer-build).
+Building a local unsigned Setup additionally requires the official Inno Setup compiler. This is a source-build procedure, not an end-user installation path. See [the developer build guide](packaging/INSTALL.md#developer-build).
 
 ## License
 
