@@ -12,7 +12,7 @@ from holon_lending import (
 from holon_lending.preflight import MAX_UINT256
 from holon_policy import LendingRule, Policy
 from holon_wallet.broadcast import (
-    ALCHEMY_BASE_RPC_URL, BASE_RPC_ENV, DEFAULT_BASE_RPC_URL,
+    AAVE_SUPPLY_EVENT_TOPIC, ALCHEMY_BASE_RPC_URL, BASE_RPC_ENV, DEFAULT_BASE_RPC_URL,
     BroadcastReceiptTracker, MainnetBroadcastPolicy, MainnetTransferCode,
     MainnetTransferExecutor, ReceiptTrackingCode, _final_protocol_revalidation,
 )
@@ -539,10 +539,22 @@ def test_lending_receipt_tracker_fetches_transaction_and_confirms(
             return 8453
 
         def transaction_receipt(self, _transaction_hash):
+            logs = []
+            if action_type == "lending_supply":
+                logs = [{
+                    "address": profile.pool,
+                    "topics": [
+                        AAVE_SUPPLY_EVENT_TOPIC,
+                        "0x" + profile.asset[2:].lower().rjust(64, "0"),
+                        "0x" + SENDER[2:].rjust(64, "0"),
+                        "0x" + "0".rjust(64, "0"),
+                    ],
+                    "data": "0x" + SENDER[2:].rjust(64, "0") + f"{1_000_000:064x}",
+                }]
             return {
                 "transactionHash": transaction_hash, "from": SENDER, "to": target,
                 "status": 1, "gasUsed": 100, "effectiveGasPrice": 2,
-                "l1Fee": "0x3", "logs": [], "blockNumber": 100,
+                "l1Fee": "0x3", "logs": logs, "blockNumber": 100,
             }
 
         def transaction(self, _transaction_hash):
@@ -558,7 +570,7 @@ def test_lending_receipt_tracker_fetches_transaction_and_confirms(
 
         def lending_token_balance(self, token, owner, block):
             del token, owner, block
-            return 1_000_000
+            return 999_998 if action_type == "lending_supply" else 1_000_000
 
     rpc = ReceiptRpc()
     result = BroadcastReceiptTracker(
@@ -570,6 +582,56 @@ def test_lending_receipt_tracker_fetches_transaction_and_confirms(
     assert rpc.transaction_calls == 1
     assert history.load()[0].status is HistoryStatus.CONFIRMED
     assert history.load()[0].actual_fee_wei == "203"
+
+
+def test_aave_rounded_supply_requires_exact_pool_event(tmp_path) -> None:
+    state = ActionProfilesState.load()
+    assert state.profile is not None
+    profile = state.profile
+    transaction_hash = "0x" + "8a" * 32
+    history = HistoryStore(WalletPaths(tmp_path))
+    history.append(WalletHistoryRecord(
+        "act-aave-rounded", "profile", "lending_supply", "base", 8453,
+        SENDER, profile.pool, profile.pool, "USDC", "1000000", 6,
+        transaction_hash, HistoryStatus.UNKNOWN, "2026-08-01T00:00:00Z",
+        "2026-08-01T00:00:00Z", False, "100000000000000",
+        position_before_atomic="0",
+    ))
+
+    class ReceiptRpc:
+        def chain_id(self): return 8453
+        def transaction_receipt(self, _transaction_hash):
+            return {
+                "transactionHash": transaction_hash, "from": SENDER, "to": profile.pool,
+                "status": 1, "gasUsed": 100, "effectiveGasPrice": 2, "l1Fee": "0x3",
+                "blockNumber": 100, "logs": [{
+                    "address": profile.pool,
+                    "topics": [
+                        AAVE_SUPPLY_EVENT_TOPIC,
+                        "0x" + profile.asset[2:].lower().rjust(64, "0"),
+                        "0x" + SENDER[2:].rjust(64, "0"),
+                        "0x" + "0".rjust(64, "0"),
+                    ],
+                    "data": "0x" + SENDER[2:].rjust(64, "0") + f"{999_999:064x}",
+                }],
+            }
+        def transaction(self, _transaction_hash):
+            return {
+                "hash": transaction_hash, "from": SENDER, "to": profile.pool,
+                "value": 0, "input": encode_supply(profile.asset, 1_000_000, SENDER),
+                "chainId": 8453,
+            }
+        def lending_allowance(self, *_args): return 0
+        def lending_token_balance(self, *_args): return 999_998
+
+    result = BroadcastReceiptTracker(
+        history, lambda _endpoint: ReceiptRpc(), {BASE_RPC_ENV: "fixture://base"},
+        timeout_seconds=0,
+    ).check_once("act-aave-rounded")
+
+    assert result.status is HistoryStatus.UNKNOWN
+    assert result.code is ReceiptTrackingCode.VALIDATION_FAILED
+    assert history.load()[0].position_verified is False
 
 
 def test_morpho_approval_fallback_keeps_receipt_tx_and_poststate_together(

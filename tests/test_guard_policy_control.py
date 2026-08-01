@@ -10,6 +10,7 @@ from holon_lending import ACTION_PROFILES_DIGEST
 from holon_policy import LendingRule, Policy, PolicyRevisionStore, policy_digest
 from holon_policy.baseline import BASELINE_POLICY_DIGEST
 from holon_wallet.storage import WalletPaths
+from holon_wallet_control.lending_operation import LendingOperation, LendingOperationSnapshot
 from holon_wallet.trusted_recipients import (
     TrustedPolicyDraft, TrustedPolicyDraftStore, TrustedRecipientDraft,
     TrustedRouteDraft, trusted_draft_digest,
@@ -39,6 +40,16 @@ class Authority:
 
     def replace_policy_snapshot(self, snapshot) -> None:
         self.snapshot = snapshot
+
+
+class LendingLifecycle:
+    def __init__(self, operation: LendingOperation) -> None:
+        self.snapshot = SimpleNamespace(state=GuardState.NORMAL)
+        self.lending_operation_snapshot = LendingOperationSnapshot(operation)
+
+    def _save_lending_operations(self, snapshot: LendingOperationSnapshot) -> bool:
+        self.lending_operation_snapshot = snapshot
+        return True
 
 
 def draft() -> TrustedPolicyDraft:
@@ -122,6 +133,40 @@ def test_guard_restart_keeps_lending_only_authority_available() -> None:
     )
     assert _any_authority_enabled(Policy("3", "2", False, (), True, (rule,)))
     assert not _any_authority_enabled(Policy("2", "1", False, ()))
+
+
+def test_guard_closes_only_a_reconciled_unknown_lending_operation(tmp_path) -> None:
+    baseline = Policy("2", "1", False, ())
+    revision_store = PolicyRevisionStore(tmp_path, baseline)
+    phase_action_id = "act-22222222-2222-4222-8222-222222222222"
+    transaction_hash = "0x" + "a" * 64
+    operation = LendingOperation(
+        "act-11111111-1111-4111-8111-111111111111", "supply", "exact", "1",
+        1_000_000, 44, "3", 1, "1" * 64, "2" * 64, "3" * 64,
+        "resume_or_revoke", phase_action_id, "4" * 64, "2026-08-01T00:00:00Z",
+        "profile", "0x1111111111111111111111111111111111111111", transaction_hash,
+        "unknown", "2026-08-01T00:01:00Z", "aave-v3-base-usdc", "aave-v3",
+    )
+    authority = Authority()
+    authority.lifecycle = LendingLifecycle(operation)
+    control = GuardPolicyControl(
+        revision_store, TrustedPolicyDraftStore(WalletPaths(tmp_path)), authority,
+    )
+    request_value = {
+        "kind": "complete_lending_operation", "request_id": "complete",
+        "operation_id": operation.operation_id, "phase_action_id": phase_action_id,
+        "transaction_hash": transaction_hash, "receipt_state": "confirmed",
+    }
+
+    refused = control.handle({**request_value, "transaction_hash": "0x" + "b" * 64})
+    assert refused["code"] == "LENDING_OPERATION_MISMATCH"
+    result = control.handle(request_value)
+
+    assert result["kind"] == "lending_operation_completed"
+    assert authority.lifecycle.lending_operation_snapshot.current is None
+    completed = authority.lifecycle.lending_operation_snapshot.terminal[-1]
+    assert completed.phase == "completed"
+    assert completed.receipt_state == "confirmed"
 
 
 def test_guard_refuses_changed_stale_and_active_flow_without_replacing(tmp_path) -> None:

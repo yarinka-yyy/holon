@@ -74,6 +74,18 @@ def initialize_request(pid: int = 44) -> dict[str, object]:
     }
 
 
+def completion_request(pid: int = 44) -> dict[str, object]:
+    return {
+        "policy_control_version": POLICY_CONTROL_VERSION,
+        "kind": "complete_lending_operation",
+        "request_id": str(uuid.uuid4()), "wallet_pid": pid,
+        "operation_id": "act-11111111-1111-4111-8111-111111111111",
+        "phase_action_id": "act-22222222-2222-4222-8222-222222222222",
+        "transaction_hash": "0x" + "a" * 64,
+        "receipt_state": "confirmed",
+    }
+
+
 def response(request_id: str, kind: str = "policy_applied") -> dict[str, object]:
     return {
         "policy_control_version": POLICY_CONTROL_VERSION,
@@ -113,6 +125,20 @@ def test_initialization_schema_is_strict_and_contains_no_secret_or_policy() -> N
         dict(request, password="secret"),
         dict(request, policy={}),
         dict(request, capability="lending"),
+    ):
+        with pytest.raises(ControlProtocolError):
+            validate_request(changed)
+
+
+def test_lending_completion_schema_is_strict_and_contains_only_public_receipt_data() -> None:
+    request = completion_request()
+    assert validate_request(request) == request
+    raw = _encode(request)
+    assert b"password" not in raw and b"signed" not in raw
+    for changed in (
+        dict(request, receipt_state="unknown"),
+        dict(request, transaction_hash="0x" + "x" * 64),
+        dict(request, phase="supply"),
     ):
         with pytest.raises(ControlProtocolError):
             validate_request(changed)

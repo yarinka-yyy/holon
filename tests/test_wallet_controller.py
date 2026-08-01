@@ -10,7 +10,7 @@ from holon_policy import (
 )
 from holon_policy.baseline import BASELINE_POLICY_DIGEST
 from holon_policy.baseline import load_baseline_policy
-from holon_lending import ACTION_PROFILES_DIGEST, LendingPreflightError
+from holon_lending import ACTION_PROFILES_DIGEST, ActionProfilesState, LendingPreflightError
 
 from holon_wallet.broadcast import (
     TRANSFER_EVENT_TOPIC,
@@ -22,7 +22,7 @@ from holon_wallet.broadcast import (
     ReceiptTrackingResult,
 )
 from holon_wallet.controller import WalletController, _display_local_time
-from holon_wallet.history import HistoryStatus, HistoryStore
+from holon_wallet.history import HistoryStatus, HistoryStore, WalletHistoryRecord
 from holon_wallet.signer import OfflineSigningPolicy
 from holon_wallet.storage import StorageError, WalletPaths
 from holon_wallet.transfer import (
@@ -152,6 +152,7 @@ class StubPolicyControl:
         self.authority_state = "READY"
         self.initializations = []
         self.operation_resumes = []
+        self.operation_completions = []
         self.operation_cancels = []
 
     def status(self):
@@ -226,6 +227,17 @@ class StubPolicyControl:
         return {
             "kind": "lending_operation_cancelled",
             "code": "LENDING_OPERATION_CANCELLED",
+        }
+
+    def complete_lending_operation(
+        self, operation_id, phase_action_id, transaction_hash,
+    ):
+        self.operation_completions.append((
+            operation_id, phase_action_id, transaction_hash,
+        ))
+        return {
+            "kind": "lending_operation_completed",
+            "code": "LENDING_OPERATION_COMPLETED",
         }
 
 
@@ -376,6 +388,79 @@ def test_lending_resume_rechecks_approve_not_stale_supply_draft(
     assert policy_control.operation_resumes == [(
         operation.operation_id, operation.phase_action_id, operation.transaction_hash,
     )]
+    assert restarted.currentScreen == "main"
+
+
+def test_lending_unknown_supply_reconciles_without_creating_another_supply(
+    tmp_path, monkeypatch,
+) -> None:
+    policy_control = StubPolicyControl()
+    item = controller(tmp_path, policy_control)
+    secret = password()
+    item.beginCreate()
+    assert item.submitPassword(secret, secret)
+    assert item.finishBackup()
+    active = item.activeProfile
+    transaction_hash = "0x" + "5" * 64
+    phase_action_id = "act-22222222-2222-4222-8222-222222222222"
+    operation = LendingOperation(
+        operation_id="act-11111111-1111-4111-8111-111111111111",
+        requested_action="supply", amount_mode="exact", amount="1",
+        resolved_amount_atomic=1_000_000, owner_pid=42, policy_version="3",
+        policy_revision=7, policy_digest="1" * 64,
+        action_profile_digest="2" * 64, safety_digest="3" * 64,
+        phase="resume_or_revoke", phase_action_id=phase_action_id,
+        phase_fingerprint="4" * 64, created_at="2026-08-01T00:00:00Z",
+        account_profile_id=active["id"], account_address=active["address"],
+        transaction_hash=transaction_hash, receipt_state="unknown",
+        updated_at="2026-08-01T00:01:00Z",
+    )
+    LendingOperationStore(tmp_path / "lending-operation-state.json").save(
+        LendingOperationSnapshot(operation),
+    )
+    profiles = ActionProfilesState.load()
+    assert profiles.profile is not None
+    HistoryStore(WalletPaths(tmp_path)).append(WalletHistoryRecord(
+        action_id=phase_action_id,
+        profile_id=active["id"],
+        action_type="lending_supply",
+        network="base",
+        chain_id=8453,
+        sender=active["address"],
+        recipient=profiles.profile.pool,
+        contract=profiles.profile.pool,
+        token="USDC",
+        amount_atomic="1000000",
+        decimals=6,
+        transaction_hash=transaction_hash,
+        status=HistoryStatus.UNKNOWN,
+        created_at="2026-08-01T00:00:00Z",
+        updated_at="2026-08-01T00:01:00Z",
+        simulated=False,
+        max_total_fee_wei="100000000000000",
+        operation_id=operation.operation_id,
+        position_before_atomic="0",
+        protocol_id="aave-v3",
+    ))
+    restarted = controller(tmp_path, policy_control)
+    assert restarted.lendingRecovery["isSupplyReceipt"] is True
+    checks: list[tuple[str, bool]] = []
+    monkeypatch.setattr(
+        restarted, "_start_receipt_check",
+        lambda action_id, track: checks.append((action_id, track)) or True,
+    )
+
+    assert restarted.resumeLendingOperation()
+    assert checks == [(phase_action_id, False)]
+    restarted._finish_lending_resume_check(ReceiptTrackingResult(
+        phase_action_id, transaction_hash, HistoryStatus.CONFIRMED,
+        "2026-08-01T00:02:00Z", True, ReceiptTrackingCode.CONFIRMED, "official",
+    ))
+
+    assert policy_control.operation_completions == [(
+        operation.operation_id, phase_action_id, transaction_hash,
+    )]
+    assert policy_control.operation_resumes == []
     assert restarted.currentScreen == "main"
 
 

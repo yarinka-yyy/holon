@@ -44,7 +44,8 @@ class GuardPolicyControl:
         if request["kind"] == "initialize_authority_state":
             return self._initialize_authority_state(request)
         if request["kind"] in {
-            "resume_lending_operation", "cancel_lending_operation",
+            "resume_lending_operation", "complete_lending_operation",
+            "cancel_lending_operation",
         }:
             return self._lending_operation(request)
         return self._set_capability(request)
@@ -56,6 +57,33 @@ class GuardPolicyControl:
         operation = lifecycle.lending_operation_snapshot.current
         if operation is None or operation.operation_id != request["operation_id"]:
             return self._refusal(request, "LENDING_OPERATION_NOT_FOUND")
+        if request["kind"] == "complete_lending_operation":
+            if (
+                operation.phase != "resume_or_revoke"
+                or operation.phase_action_id != request["phase_action_id"]
+                or operation.transaction_hash != request["transaction_hash"]
+                or operation.receipt_state not in {"pending", "unknown"}
+            ):
+                return self._refusal(request, "LENDING_OPERATION_MISMATCH")
+            if lifecycle.snapshot.state is GuardState.RECOVERY_REQUIRED:
+                recovered = lifecycle.recover_flow(operation.phase_action_id)
+                if not recovered.ok:
+                    return self._refusal(request, recovered.code)
+            elif lifecycle.snapshot.state is not GuardState.NORMAL:
+                return self._refusal(request, "POLICY_FLOW_ACTIVE")
+            completed = operation.with_receipt(
+                str(request["transaction_hash"]), "confirmed", operation.updated_at,
+            ).with_phase("completed")
+            operation_snapshot_type = type(lifecycle.lending_operation_snapshot)
+            if not lifecycle._save_lending_operations(operation_snapshot_type(
+                None, lifecycle.lending_operation_snapshot.terminal + (completed,),
+            )):
+                return self._refusal(request, "LENDING_OPERATION_STATE_INVALID")
+            snapshot = self.revision_store.load()
+            return self._response(
+                request, "lending_operation_completed", "LENDING_OPERATION_COMPLETED",
+                snapshot,
+            )
         if request["kind"] == "resume_lending_operation":
             if (
                 operation.phase != "resume_or_revoke"

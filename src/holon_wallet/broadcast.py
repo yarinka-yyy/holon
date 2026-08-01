@@ -87,6 +87,9 @@ TRANSFER_EVENT_TOPIC = Web3.to_hex(
 APPROVAL_EVENT_TOPIC = Web3.to_hex(
     Web3.keccak(text="Approval(address,address,uint256)"),
 )
+AAVE_SUPPLY_EVENT_TOPIC = Web3.to_hex(
+    Web3.keccak(text="Supply(address,address,address,uint256,uint16)"),
+)
 PreparedTransactionAction = PreparedTransferAction | PreparedRevokeAction
 
 
@@ -953,6 +956,7 @@ class MainnetTransferExecutor:
 
 def _lending_post_state(
     rpc: MainnetRpc, record: WalletHistoryRecord, block: int,
+    receipt: Mapping[str, object],
 ) -> tuple[int, int, bool] | None:
     profile = next(
         (
@@ -995,7 +999,16 @@ def _lending_post_state(
     if record.action_type == "lending_approve":
         verified = allowance == amount
     elif record.action_type in {"lending_supply", "lending_deposit"}:
-        verified = allowance == 0 and position >= before + amount - 1
+        if profile.protocol_id == "aave-v3":
+            # Aave aToken balanceOf derives from scaled shares and may floor
+            # below the supplied USDC amount in the receipt block.
+            verified = (
+                allowance == 0
+                and position >= before
+                and _matching_aave_supply_log(receipt, record, profile)
+            )
+        else:
+            verified = allowance == 0 and position >= before + amount - 1
     elif record.action_type in {"lending_withdraw_all", "lending_redeem"}:
         verified = allowance == 0 and (
             shares == 0 if record.action_type == "lending_redeem" else position <= 1
@@ -1180,7 +1193,7 @@ class BroadcastReceiptTracker:
                     HistoryStatus.UNKNOWN, ReceiptTrackingCode.VALIDATION_FAILED,
                     endpoint_class, None, None, None, None,
                 )
-            post_state = _lending_post_state(rpc, record, block)
+            post_state = _lending_post_state(rpc, record, block, receipt)
             if post_state is None:
                 return (
                     HistoryStatus.UNKNOWN, ReceiptTrackingCode.VALIDATION_FAILED,
@@ -1769,6 +1782,45 @@ def _matching_approval_log(value: object, record: WalletHistoryRecord) -> bool:
         )
     except (KeyError, TypeError, ValueError):
         return False
+
+
+def _matching_aave_supply_log(
+    receipt: Mapping[str, object], record: WalletHistoryRecord, profile: object,
+) -> bool:
+    """Match Aave's exact Supply event without trusting scaled aToken rounding."""
+    try:
+        target = str(getattr(profile, "target"))
+        asset = str(getattr(profile, "asset"))
+        logs = receipt["logs"]
+        if not isinstance(logs, (list, tuple)):
+            return False
+        asset_topic = "0x" + asset[2:].lower().rjust(64, "0")
+        account_topic = "0x" + record.sender[2:].lower().rjust(64, "0")
+        referral_topic = "0x" + "0".rjust(64, "0")
+        for value in logs:
+            if not isinstance(value, Mapping) or str(value["address"]).lower() != target.lower():
+                continue
+            topics = value["topics"]
+            if not isinstance(topics, (list, tuple)) or len(topics) != 4:
+                continue
+            rendered = [_hex_value(topic).lower() for topic in topics]
+            data = HexBytes(value["data"])
+            if len(data) != 64:
+                continue
+            user = "0x" + data[:32].hex()
+            amount = int.from_bytes(data[32:], "big")
+            if (
+                rendered[0] == AAVE_SUPPLY_EVENT_TOPIC.lower()
+                and rendered[1] == asset_topic
+                and rendered[2] == account_topic
+                and rendered[3] == referral_topic
+                and user == account_topic
+                and amount == int(record.amount_atomic)
+            ):
+                return True
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return False
+    return False
 
 
 def _receipt_fee_wei(receipt: Mapping[str, object]) -> str | None:

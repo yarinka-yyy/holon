@@ -2963,6 +2963,15 @@ class WalletController(QObject):
         ):
             self.lendingRecoveryChanged.emit()
             return False
+        phase_record = next(
+            (item for item in self._history_records if item.action_id == operation.phase_action_id),
+            None,
+        )
+        is_supply_receipt = bool(
+            phase_record is not None
+            and phase_record.action_type in {"lending_supply", "lending_deposit"}
+            and phase_record.transaction_hash == operation.transaction_hash
+        )
         self._lending_recovery = {
             "operationId": operation.operation_id,
             "phaseActionId": operation.phase_action_id,
@@ -2972,12 +2981,17 @@ class WalletController(QObject):
             "transactionHash": operation.transaction_hash or "",
             "protocolProfileId": operation.protocol_profile_id,
             "protocolId": operation.protocol_id,
+            "isSupplyReceipt": is_supply_receipt,
             "status": (
                 "Approval confirmed · resume with a fresh live preflight"
                 if operation.receipt_state == "confirmed"
                 else "Approval status must be checked before supply can resume"
             ),
         }
+        if is_supply_receipt:
+            self._lending_recovery["status"] = (
+                "Submitted Supply must be checked before this operation can close"
+            )
         recovery_profile = self._lending_action_profiles.select(operation.protocol_profile_id)
         if recovery_profile is None:
             self._lending_recovery = {}
@@ -2995,14 +3009,20 @@ class WalletController(QObject):
             or self._receipt_checking
         ):
             return False
-        # The phase action can be an interrupted, unsigned Supply review.  The
-        # operation ID is the original approve action and is the only record
-        # whose receipt may safely authorize the next fresh Supply review.
-        approval_action_id = str(self._lending_recovery["operationId"])
-        self._lending_resume_action_id = approval_action_id
+        # An interrupted approval must be reconciled before it can authorize a
+        # fresh Supply review. A submitted Supply instead reconciles its own
+        # receipt and can only close the existing operation.
+        is_supply_receipt = bool(self._lending_recovery.get("isSupplyReceipt"))
+        receipt_action_id = str(
+            self._lending_recovery["phaseActionId"]
+            if is_supply_receipt else self._lending_recovery["operationId"]
+        )
+        self._lending_resume_action_id = receipt_action_id
         self._lending_recovery["status"] = "Checking confirmed approval receipt…"
+        if is_supply_receipt:
+            self._lending_recovery["status"] = "Checking submitted Supply receipt…"
         self.lendingRecoveryChanged.emit()
-        if not self._start_receipt_check(approval_action_id, track=False):
+        if not self._start_receipt_check(receipt_action_id, track=False):
             self._finish_lending_resume_check_unavailable()
             return False
         return True
@@ -3012,12 +3032,17 @@ class WalletController(QObject):
         if not self._lending_recovery:
             return
         self._lending_recovery["status"] = (
-            "Approval receipt could not be checked · no rebroadcast will occur"
+            "Supply receipt could not be checked · no rebroadcast will occur"
+            if self._lending_recovery.get("isSupplyReceipt")
+            else "Approval receipt could not be checked · no rebroadcast will occur"
         )
         self.lendingRecoveryChanged.emit()
 
     def _finish_lending_resume_check(self, result: ReceiptTrackingResult) -> None:
         self._lending_resume_action_id = ""
+        if bool(self._lending_recovery.get("isSupplyReceipt")):
+            self._finish_lending_supply_check(result)
+            return
         if result.status is not HistoryStatus.CONFIRMED:
             self._lending_recovery["status"] = (
                 "Approval failed · revoke or cancel the operation"
@@ -3042,6 +3067,38 @@ class WalletController(QObject):
             return
         if response.get("kind") != "lending_operation_resumed":
             self._lending_recovery["status"] = "Guard refused to resume this operation"
+            self.lendingRecoveryChanged.emit()
+            return
+        self._lending_recovery = {}
+        self.lendingRecoveryChanged.emit()
+        self._set_screen("main")
+
+    def _finish_lending_supply_check(self, result: ReceiptTrackingResult) -> None:
+        if result.status is not HistoryStatus.CONFIRMED:
+            self._lending_recovery["status"] = (
+                "Supply reverted · no retry was created"
+                if result.status is HistoryStatus.FAILED
+                else "Supply is not confirmed · check again without rebroadcast"
+            )
+            self.lendingRecoveryChanged.emit()
+            return
+        if self._policy_control_client is None:
+            self._lending_recovery["status"] = (
+                "Guard could not close this confirmed Supply"
+            )
+            self.lendingRecoveryChanged.emit()
+            return
+        try:
+            response = self._policy_control_client.complete_lending_operation(
+                str(self._lending_recovery["operationId"]),
+                str(self._lending_recovery["phaseActionId"]), result.transaction_hash,
+            )
+        except (ControlProtocolError, ControlUnavailable):
+            self._lending_recovery["status"] = "Guard could not close this confirmed Supply"
+            self.lendingRecoveryChanged.emit()
+            return
+        if response.get("kind") != "lending_operation_completed":
+            self._lending_recovery["status"] = "Guard refused to close this confirmed Supply"
             self.lendingRecoveryChanged.emit()
             return
         self._lending_recovery = {}

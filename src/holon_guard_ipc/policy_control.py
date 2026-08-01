@@ -159,7 +159,9 @@ def validate_request(value: Mapping[str, object]) -> dict[str, object]:
         APPLY_FIELDS if kind == "apply_draft"
         else CAPABILITY_FIELDS if kind in {"activate_capability", "deactivate_capability"}
         else INITIALIZE_FIELDS if kind == "initialize_authority_state"
-        else RESUME_OPERATION_FIELDS if kind == "resume_lending_operation"
+        else RESUME_OPERATION_FIELDS if kind in {
+            "resume_lending_operation", "complete_lending_operation",
+        }
         else OPERATION_FIELDS if kind == "cancel_lending_operation"
         else STATUS_FIELDS
     )
@@ -169,19 +171,23 @@ def validate_request(value: Mapping[str, object]) -> dict[str, object]:
         or kind not in {
             "policy_status", "apply_draft", "activate_capability", "deactivate_capability",
             "initialize_authority_state",
-            "resume_lending_operation", "cancel_lending_operation",
+            "resume_lending_operation", "complete_lending_operation",
+            "cancel_lending_operation",
         }
     ):
         raise ControlProtocolError("Invalid policy control request")
     _uuid(value.get("request_id"))
     if type(value.get("wallet_pid")) is not int or value["wallet_pid"] <= 0:
         raise ControlProtocolError("Invalid Wallet process")
-    if kind in {"resume_lending_operation", "cancel_lending_operation"}:
+    if kind in {
+        "resume_lending_operation", "complete_lending_operation",
+        "cancel_lending_operation",
+    }:
         operation_id = value.get("operation_id")
         if not isinstance(operation_id, str) or not operation_id.startswith("act-"):
             raise ControlProtocolError("Invalid lending operation")
         _uuid(operation_id[4:])
-        if kind == "resume_lending_operation":
+        if kind in {"resume_lending_operation", "complete_lending_operation"}:
             phase_action_id = value.get("phase_action_id")
             transaction_hash = value.get("transaction_hash")
             if (
@@ -222,7 +228,8 @@ def validate_response(
             "policy_status", "policy_applied", "policy_activated",
             "policy_deactivated", "policy_refused",
             "authority_initialized",
-            "lending_operation_resumed", "lending_operation_cancelled",
+            "lending_operation_resumed", "lending_operation_completed",
+            "lending_operation_cancelled",
         }
         or value.get("request_id") != request_id
         or not isinstance(value.get("code"), str)
@@ -337,6 +344,19 @@ class PolicyControlClient:
             "operation_id": operation_id,
         }, timeout)
 
+    def complete_lending_operation(
+        self, operation_id: str, phase_action_id: str,
+        transaction_hash: str, timeout: float = 3.0,
+    ) -> dict[str, object]:
+        return self._exchange({
+            "policy_control_version": POLICY_CONTROL_VERSION,
+            "kind": "complete_lending_operation",
+            "request_id": str(uuid.uuid4()), "wallet_pid": self._wallet_pid(),
+            "operation_id": operation_id, "phase_action_id": phase_action_id,
+            "transaction_hash": transaction_hash.lower(),
+            "receipt_state": "confirmed",
+        }, timeout)
+
     def _exchange(self, request: Mapping[str, object], timeout: float) -> dict[str, object]:
         checked = validate_request(request)
         self._waiter(self.pipe_name, timeout)
@@ -368,7 +388,8 @@ class PolicyControlClient:
             else {
                 "policy_applied", "policy_activated", "policy_deactivated",
                 "authority_initialized", "policy_refused",
-                "lending_operation_resumed", "lending_operation_cancelled",
+                "lending_operation_resumed", "lending_operation_completed",
+                "lending_operation_cancelled",
             }
         )
         if result["kind"] not in allowed:

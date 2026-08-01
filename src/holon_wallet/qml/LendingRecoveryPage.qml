@@ -4,14 +4,17 @@ import "."
 PageState {
     id: root
     property var recovery: walletController.lendingRecovery
+    readonly property bool supplyReceipt: Boolean(root.recovery.isSupplyReceipt)
 
     Text {
-        x: 28; y: 54; text: "Lending supply recovery"; color: Design.text
+        x: 28; y: 54; text: root.supplyReceipt ? "Lending supply status" : "Lending supply recovery"; color: Design.text
         font.family: Design.fontFamily; font.pixelSize: 24; font.weight: Font.DemiBold
     }
     Text {
         x: 28; y: 90; width: 458; wrapMode: Text.Wrap
-        text: "A previous approve phase may have left a visible USDC allowance. Nothing resumes or signs automatically."
+        text: root.supplyReceipt
+            ? "A submitted Supply is being reconciled. Nothing signs, retries, or broadcasts automatically."
+            : "A previous approve phase may have left a visible USDC allowance. Nothing resumes or signs automatically."
         color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 13
     }
     SurfaceCard {
@@ -46,13 +49,13 @@ PageState {
         }
         Text {
             x: 46; y: 211; visible: walletController.lendingRecoveryChecking
-            text: "Checking approval receipt…"; color: Design.textMuted
+            text: root.supplyReceipt ? "Checking Supply receipt…" : "Checking approval receipt…"; color: Design.textMuted
             font.family: Design.fontFamily; font.pixelSize: 11
         }
     }
     FormButton {
         objectName: "resumeLendingButton"; x: 28; y: 452; width: 458; height: 56
-        label: walletController.lendingRecoveryChecking ? "Checking status…" : "Resume supply"
+        label: walletController.lendingRecoveryChecking ? "Checking status…" : (root.supplyReceipt ? "Check Supply status" : "Resume supply")
         controlEnabled: !walletController.lendingRecoveryChecking
         onTriggered: walletController.resumeLendingOperation()
     }
