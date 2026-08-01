@@ -16,6 +16,8 @@ $pythonVersion = & $PythonPath -c "import platform; print(platform.python_versio
 if ($LASTEXITCODE -ne 0 -or $pythonVersion -ne "3.13.14") {
     throw "Installer build requires CPython 3.13.14; found $pythonVersion"
 }
+& $PythonPath (Join-Path $PSScriptRoot "generate_third_party_licenses.py") --check
+if ($LASTEXITCODE -ne 0) { throw "Third-party license verification failed" }
 
 $buildRoot = [System.IO.Path]::GetFullPath((Join-Path $projectRoot "build\installer"))
 $packageRoot = [System.IO.Path]::GetFullPath((Join-Path $buildRoot "package"))
@@ -74,6 +76,7 @@ New-Item -ItemType Directory -Force -Path $distRoot | Out-Null
     "/DPACKAGE_ROOT=$packageRoot" `
     "/DOUTPUT_DIR=$distRoot" `
     "/DLICENSE_FILE=$(Join-Path $projectRoot 'LICENSE')" `
+    "/DNOTICE_FILE=$(Join-Path $projectRoot 'NOTICE')" `
     "/DSETUP_ICON=$iconPath" `
     (Join-Path $PSScriptRoot "installer.iss")
 if ($LASTEXITCODE -ne 0) { throw "Inno Setup compilation failed" }

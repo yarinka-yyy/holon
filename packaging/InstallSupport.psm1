@@ -31,6 +31,13 @@ function Test-HolLayout($File) {
         $path.StartsWith("payload/skills/crypto/holon-lending/")) { $component = "skills" }
     elseif ($path.StartsWith("payload/initial-data/")) { $component = "initial-data" }
     elseif ($path -in @(
+        "payload/app/licenses/LICENSE",
+        "payload/app/licenses/NOTICE",
+        "payload/app/licenses/THIRD_PARTY_LICENSES.txt"
+    )) {
+        $component = "installer"
+    }
+    elseif ($path -in @(
         "install.ps1", "uninstall.ps1", "detect-hermes.ps1", "InstallSupport.psm1", "INSTALL.md"
     )) {
         $component = "installer"

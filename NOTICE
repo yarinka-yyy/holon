@@ -1,0 +1,21 @@
+Holon third-party software notice
+
+Holon source code is licensed under the Apache License 2.0. The full
+project license is provided in LICENSE.
+
+The Windows distribution contains CPython, PyInstaller-built bootloaders,
+Python packages, and native libraries provided by third parties. Their
+copyright notices and license texts are collected in
+THIRD_PARTY_LICENSES.txt and installed with Holon.
+
+Holon Wallet uses Qt 6.11.1 through PySide6 and Shiboken6 6.11.1 under
+the GNU Lesser General Public License version 3. Holon does not modify
+those libraries. Users may replace or rebuild them, and may reverse
+engineer Holon only as needed to debug such library modifications.
+
+The corresponding Qt and PySide6 source archives are attached to the
+v0.1.0-alpha GitHub Release. Rebuild instructions are provided in
+packaging/INSTALL.md.
+
+Microsoft Visual C++ runtime files included by the upstream PySide6 wheel
+remain subject to Microsoft's applicable redistribution terms.

@@ -13,6 +13,11 @@ ROOT_FILES = frozenset({
     "install.ps1", "uninstall.ps1", "detect-hermes.ps1",
     "InstallSupport.psm1", "INSTALL.md",
 })
+LICENSE_FILES = frozenset({
+    "payload/app/licenses/LICENSE",
+    "payload/app/licenses/NOTICE",
+    "payload/app/licenses/THIRD_PARTY_LICENSES.txt",
+})
 
 
 def validate_relative_path(value: str) -> str:
@@ -46,6 +51,8 @@ def expected_component(value: str) -> str:
         return "skills"
     if value.startswith("payload/initial-data/"):
         return "initial-data"
+    if value in LICENSE_FILES:
+        return "installer"
     if value in ROOT_FILES:
         return "installer"
     raise ManifestError("Release path is outside the fixed layout")

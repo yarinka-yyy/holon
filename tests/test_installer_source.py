@@ -23,6 +23,15 @@ def test_installer_has_fixed_per_user_bilingual_contract() -> None:
     assert "Holon-0.1.0-alpha-Setup" in source
     assert "VersionInfoVersion=0.1.0.0" in source
     assert "SignTool=" not in source
+    assert "InfoBeforeFile={#NOTICE_FILE}" in source
+    assert "#error NOTICE_FILE is required" in source
+
+
+def test_installer_support_accepts_only_the_fixed_license_bundle() -> None:
+    support = (ROOT / "packaging" / "InstallSupport.psm1").read_text(encoding="utf-8")
+    assert "payload/app/licenses/LICENSE" in support
+    assert "payload/app/licenses/NOTICE" in support
+    assert "payload/app/licenses/THIRD_PARTY_LICENSES.txt" in support
 
 
 def test_installer_requires_safe_hermes_and_uses_transactional_backend() -> None:

@@ -7,6 +7,9 @@
 #ifndef LICENSE_FILE
   #error LICENSE_FILE is required
 #endif
+#ifndef NOTICE_FILE
+  #error NOTICE_FILE is required
+#endif
 #ifndef SETUP_ICON
   #error SETUP_ICON is required
 #endif
@@ -34,6 +37,7 @@ RedirectionGuard=no
 MinVersion=10.0.22000
 WizardStyle=modern dynamic
 LicenseFile={#LICENSE_FILE}
+InfoBeforeFile={#NOTICE_FILE}
 SetupIconFile={#SETUP_ICON}
 UninstallDisplayIcon={localappdata}\Holon\app\HolonWallet.exe
 OutputDir={#OUTPUT_DIR}

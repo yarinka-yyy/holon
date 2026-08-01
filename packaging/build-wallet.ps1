@@ -20,6 +20,7 @@ $resourceRoot = Join-Path $sourceRoot "holon_wallet\resources"
 $lendingReadProfile = Join-Path $sourceRoot "holon_lending\read-profiles.json"
 $lendingActionProfile = Join-Path $sourceRoot "holon_lending\action-profiles.json"
 $baselinePolicy = Join-Path $sourceRoot "holon_policy\baseline-policy.json"
+$versionFile = Join-Path $PSScriptRoot "windows-version.txt"
 New-Item -ItemType Directory -Force -Path $buildRoot | Out-Null
 $iconPath = Join-Path $buildRoot "holon-wallet.ico"
 $previousPythonPath = $env:PYTHONPATH
@@ -40,6 +41,7 @@ try {
         --windowed `
         --noupx `
         --name HolonWallet `
+        --version-file $versionFile `
         --icon $iconPath `
         --paths $sourceRoot `
         --add-data "$qmlRoot;holon_wallet/qml" `

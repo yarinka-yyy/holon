@@ -130,6 +130,15 @@ class PackageBuilder:
                 root / "payload" / "skills" / "crypto" / name / "SKILL.md",
             )
 
+    def _copy_licenses(self, root: Path) -> None:
+        licenses = root / "payload" / "app" / "licenses"
+        for source_name, target_name in (
+            ("LICENSE", "LICENSE"),
+            ("NOTICE", "NOTICE"),
+            ("THIRD_PARTY_LICENSES.txt", "THIRD_PARTY_LICENSES.txt"),
+        ):
+            self._copy_file(self.source_root / source_name, licenses / target_name)
+
     def _initial_data(self, root: Path) -> None:
         data = root / "payload" / "initial-data"
         data.mkdir(parents=True, exist_ok=True)
@@ -171,6 +180,7 @@ class PackageBuilder:
             self.source_root / "src" / "holon_policy" / "baseline-policy.json",
             destination / "payload" / "app" / "holon_policy" / "baseline-policy.json",
         )
+        self._copy_licenses(destination)
         self._copy_plugin(destination)
         self._copy_skills(destination)
         self._initial_data(destination)

@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "qt_version": "6.11.1",
+  "pyside_version": "6.11.1",
+  "assets": [
+    {
+      "bytes": 50648500,
+      "covers": ["qtbase"],
+      "name": "qtbase-everywhere-src-6.11.1.tar.xz",
+      "sha256": "d9594a31228aa23ad6b531719a29b45f0f3989fe6c136d45767ea179f233c1ac",
+      "url": "https://download.qt.io/official_releases/qt/6.11/6.11.1/submodules/qtbase-everywhere-src-6.11.1.tar.xz"
+    },
+    {
+      "bytes": 38744644,
+      "covers": ["qtdeclarative"],
+      "name": "qtdeclarative-everywhere-src-6.11.1.tar.xz",
+      "sha256": "52e670f670b0304f534b24f98c47ceb8a41bb710464414ebc9527ec71cc86aa4",
+      "url": "https://download.qt.io/official_releases/qt/6.11/6.11.1/submodules/qtdeclarative-everywhere-src-6.11.1.tar.xz"
+    },
+    {
+      "bytes": 2336944,
+      "covers": ["qtsvg"],
+      "name": "qtsvg-everywhere-src-6.11.1.tar.xz",
+      "sha256": "7f3cf02f4824bf03c2c5859ea6db173bf1482a1daf24e6cdf7bc78cfa26a8a94",
+      "url": "https://download.qt.io/official_releases/qt/6.11/6.11.1/submodules/qtsvg-everywhere-src-6.11.1.tar.xz"
+    },
+    {
+      "bytes": 2032792,
+      "covers": ["qtimageformats"],
+      "name": "qtimageformats-everywhere-src-6.11.1.tar.xz",
+      "sha256": "b2bf6c6845ac175ed7f819145483ba4676f617aaa6a5012c8efee63c8bbac413",
+      "url": "https://download.qt.io/official_releases/qt/6.11/6.11.1/submodules/qtimageformats-everywhere-src-6.11.1.tar.xz"
+    },
+    {
+      "bytes": 97268,
+      "covers": ["qtquicktimeline"],
+      "name": "qtquicktimeline-everywhere-src-6.11.1.tar.xz",
+      "sha256": "af53f643fd9e4045e1b9ba919998e5c048ca877452c08036c9c8c5ee07ea8c27",
+      "url": "https://download.qt.io/official_releases/qt/6.11/6.11.1/submodules/qtquicktimeline-everywhere-src-6.11.1.tar.xz"
+    },
+    {
+      "bytes": 17963432,
+      "covers": ["pyside6", "shiboken6"],
+      "name": "pyside-setup-everywhere-src-6.11.1.tar.xz",
+      "sha256": "6ffd9835bb0dd2c56f061d62f1616bb1707cfc0202b80e3165d6be087f3965e2",
+      "url": "https://download.qt.io/official_releases/QtForPython/pyside6/PySide6-6.11.1-src/pyside-setup-everywhere-src-6.11.1.tar.xz"
+    }
+  ]
+}

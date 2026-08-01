@@ -54,7 +54,24 @@ Future networks, broader token support, hardware wallets, automatic trading, and
 
 ## Installation
 
-See [the installation guide](packaging/INSTALL.md) for Windows requirements, data-preserving maintenance, and source builds.
+Download the Windows installer from the
+[v0.1.0-alpha pre-release](https://github.com/yarinka-yyy/holon/releases/tag/v0.1.0-alpha):
+
+- [Holon-0.1.0-alpha-Setup.exe](https://github.com/yarinka-yyy/holon/releases/download/v0.1.0-alpha/Holon-0.1.0-alpha-Setup.exe)
+- [SHA256SUMS.txt](https://github.com/yarinka-yyy/holon/releases/download/v0.1.0-alpha/SHA256SUMS.txt)
+
+This alpha installer is unsigned. Verify the downloaded file before running it:
+
+```powershell
+Get-FileHash .\Holon-0.1.0-alpha-Setup.exe -Algorithm SHA256
+```
+
+Compare the result with `SHA256SUMS.txt`. A checksum detects a damaged or
+different download, but it does not authenticate the publisher as a code
+signature would.
+
+See [the installation guide](packaging/INSTALL.md) for Windows requirements,
+data-preserving maintenance, troubleshooting, and source builds.
 
 ## Repository layout
 
@@ -83,4 +100,6 @@ Building a local unsigned Setup additionally requires the official Inno Setup co
 
 ## License
 
-Holon is licensed under the [Apache License 2.0](LICENSE).
+Holon is licensed under the [Apache License 2.0](LICENSE). Bundled third-party
+software keeps its own licenses, listed in [NOTICE](NOTICE) and
+[THIRD_PARTY_LICENSES.txt](THIRD_PARTY_LICENSES.txt).

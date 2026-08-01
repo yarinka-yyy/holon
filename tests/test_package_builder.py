@@ -17,6 +17,13 @@ def test_builder_creates_fixed_layout_and_valid_initial_state(tmp_path: Path) ->
     package, _ = build_fixture(tmp_path)
     assert (package / "payload" / "app" / "HolonGuard.exe").is_file()
     assert (package / "payload" / "app" / "HolonWallet.exe").is_file()
+    licenses = package / "payload" / "app" / "licenses"
+    assert {path.name for path in licenses.iterdir()} == {
+        "LICENSE", "NOTICE", "THIRD_PARTY_LICENSES.txt",
+    }
+    assert "GNU LESSER GENERAL PUBLIC LICENSE" in (
+        licenses / "THIRD_PARTY_LICENSES.txt"
+    ).read_text(encoding="utf-8")
     plugin = package / "payload" / "plugin"
     assert (plugin / "plugin.yaml").is_file()
     assert (plugin / "holon_contracts" / "__init__.py").is_file()
