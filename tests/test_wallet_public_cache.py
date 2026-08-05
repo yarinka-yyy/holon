@@ -5,8 +5,15 @@ from dataclasses import replace
 
 import pytest
 
+from decimal import Decimal
+
+from holon_contracts.registry import load_registry
+
 from holon_wallet.controller import WalletController
-from holon_wallet.prices import AssetPrice, PriceSnapshot, PriceStatus
+from holon_wallet.prices import (
+    AssetPrice, MarketPrice, MarketPriceSnapshot, MarketPriceStatus,
+    PriceSnapshot, PriceStatus,
+)
 from holon_wallet.public_cache import PublicCacheStore
 from holon_wallet.public_data import AssetBalance, AssetReadError, PublicDataStatus
 from holon_wallet.storage import StorageError, WalletPaths, atomic_write_json
@@ -25,6 +32,28 @@ def prices() -> PriceSnapshot:
         (
             AssetPrice("eth", "ETH", PriceStatus.LIVE, 250_000_000_000, 8, 10),
             AssetPrice("usdc", "USDC", PriceStatus.LIVE, 100_000_000, 8, 10),
+        ),
+        10,
+    )
+
+
+def market_prices(
+    value: str = "1", unavailable: frozenset[str] = frozenset(),
+) -> MarketPriceSnapshot:
+    return MarketPriceSnapshot(
+        tuple(
+            MarketPrice(
+                item.market_price_id,
+                item.coingecko_id,
+                (
+                    MarketPriceStatus.UNAVAILABLE
+                    if item.market_price_id in unavailable else MarketPriceStatus.LIVE
+                ),
+                None if item.market_price_id in unavailable else Decimal(value),
+                None if item.market_price_id in unavailable else 10,
+                "PRICE_UNAVAILABLE" if item.market_price_id in unavailable else None,
+            )
+            for item in load_registry().market_prices
         ),
         10,
     )
@@ -200,7 +229,7 @@ def test_v1_cache_is_read_without_rewrite_then_migrated_after_fresh_balance(tmp_
     assert json.loads(store.path.read_text(encoding="utf-8"))["schema_version"] == 1
 
     store.save("profile-1", address, {"base": public_snapshot("base")}, prices())
-    assert json.loads(store.path.read_text(encoding="utf-8"))["schema_version"] == 2
+    assert json.loads(store.path.read_text(encoding="utf-8"))["schema_version"] == 3
 
 
 def test_partial_asset_refresh_keeps_only_failed_asset_from_cache(tmp_path) -> None:
@@ -234,3 +263,77 @@ def test_partial_asset_refresh_keeps_only_failed_asset_from_cache(tmp_path) -> N
     assert assets["dai"].atomic_units == 9 * 10**18
     assert assets["usdc"].updated_at == "2026-07-21T12:00:00Z"
     assert assets["dai"].updated_at == "2026-07-20T12:00:00Z"
+
+
+def test_v3_cache_updates_prices_per_item_even_when_all_balances_are_offline(tmp_path) -> None:
+    store = PublicCacheStore(WalletPaths(tmp_path))
+    address = "0x" + "11" * 20
+    store.save(
+        "profile-1", address, {"base": public_snapshot("base")}, market_prices(),
+    )
+    failed = frozenset(
+        item.market_price_id for item in load_registry().market_prices
+        if item.market_price_id != "eth-usd"
+    )
+    store.save("profile-1", address, {}, market_prices("2", failed))
+
+    cached = store.load("profile-1", address)
+    assert cached is not None
+    assert cached.market_prices.by_market["eth-usd"].value_usd == Decimal("2")
+    assert cached.market_prices.by_market["eth-usd"].status is MarketPriceStatus.LIVE
+    assert cached.market_prices.by_market["usdc-usd"].value_usd == Decimal("1")
+    assert cached.market_prices.by_market["usdc-usd"].status is MarketPriceStatus.CACHED
+    assert json.loads(store.path.read_text(encoding="utf-8"))["schema_version"] == 3
+
+
+def test_v2_cache_is_read_without_rewrite_then_saved_as_v3(tmp_path) -> None:
+    store = PublicCacheStore(WalletPaths(tmp_path))
+    address = "0x" + "11" * 20
+    atomic_write_json(store.path, {
+        "schema_version": 2,
+        "profiles": [{
+            "profile_id": "profile-1",
+            "address": address,
+            "saved_at": "2026-07-20T12:00:00Z",
+            "balances": {"networks": [{
+                "network_id": "base",
+                "chain_id": 8453,
+                "block_number": 123,
+                "assets": [
+                    {
+                        "asset_id": "eth", "atomic": str(10**18),
+                        "updated_at": "2026-07-20T12:00:00Z",
+                    },
+                    {
+                        "asset_id": "usdc", "atomic": "2500000",
+                        "updated_at": "2026-07-20T12:00:00Z",
+                    },
+                ],
+            }]},
+            "prices": {
+                "chain_id": 8453,
+                "status": "LIVE",
+                "observed_at": 10,
+                "error_code": None,
+                "assets": [
+                    {
+                        "asset_id": "eth", "symbol": "ETH", "status": "LIVE",
+                        "answer": 250_000_000_000, "decimals": 8,
+                        "updated_at": 10, "error_code": None,
+                    },
+                    {
+                        "asset_id": "usdc", "symbol": "USDC", "status": "LIVE",
+                        "answer": 100_000_000, "decimals": 8,
+                        "updated_at": 10, "error_code": None,
+                    },
+                ],
+            },
+        }],
+    })
+
+    cached = store.load("profile-1", address)
+    assert cached is not None
+    assert cached.market_prices.by_market["eth-usd"].value_usd == Decimal("2500")
+    assert json.loads(store.path.read_text(encoding="utf-8"))["schema_version"] == 2
+    store.save("profile-1", address, {"base": public_snapshot("base")}, market_prices())
+    assert json.loads(store.path.read_text(encoding="utf-8"))["schema_version"] == 3

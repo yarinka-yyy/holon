@@ -9,35 +9,47 @@ PageState {
         onBackRequested: walletController.showMain()
     }
     Row {
-        x: 157; y: 148; spacing: 8
+        x: 105; y: 148; spacing: 8
         NetworkCard {
             objectName: "receiveEthereum"; width: 44; height: 44; iconOnly: true
-            label: "Ethereum"; iconSource: "assets/ethereum.svg"
+            label: "Ethereum"; iconSource: "assets/ethereum.svg"; iconVisualSize: 22
             selected: walletController.receiveNetwork === "ethereum"
             onTriggered: walletController.selectReceiveNetwork("ethereum")
         }
         NetworkCard {
             objectName: "receiveBase"; width: 44; height: 44; iconOnly: true
-            label: "Base"; iconSource: "assets/base.png"
+            label: "Base"; iconSource: "assets/base.png"; iconVisualSize: 21
             selected: walletController.receiveNetwork === "base"
             onTriggered: walletController.selectReceiveNetwork("base")
         }
         NetworkCard {
             objectName: "receiveArbitrum"; width: 44; height: 44; iconOnly: true
-            label: "Arbitrum One"; iconSource: "assets/arbitrum.svg"
+            label: "Arbitrum One"; iconSource: "assets/arbitrum.png"; iconVisualSize: 26
             selected: walletController.receiveNetwork === "arbitrum"
             onTriggered: walletController.selectReceiveNetwork("arbitrum")
         }
         NetworkCard {
             objectName: "receiveOptimism"; width: 44; height: 44; iconOnly: true
-            label: "OP Mainnet"; iconSource: "assets/optimism.svg"
+            label: "OP Mainnet"; iconSource: "assets/op.png"; iconVisualSize: 24
             selected: walletController.receiveNetwork === "optimism"
             onTriggered: walletController.selectReceiveNetwork("optimism")
+        }
+        NetworkCard {
+            objectName: "receivePolygon"; width: 44; height: 44; iconOnly: true
+            label: "Polygon"; iconSource: "assets/polygon.svg"; iconVisualSize: 24
+            selected: walletController.receiveNetwork === "polygon"
+            onTriggered: walletController.selectReceiveNetwork("polygon")
+        }
+        NetworkCard {
+            objectName: "receiveBsc"; width: 44; height: 44; iconOnly: true
+            label: "BNB Smart Chain"; iconSource: "assets/bnb.png"; iconVisualSize: 24
+            selected: walletController.receiveNetwork === "bsc"
+            onTriggered: walletController.selectReceiveNetwork("bsc")
         }
     }
     Text {
         x: 56; y: 202; width: 402; horizontalAlignment: Text.AlignHCenter
-        text: ({"ethereum": "Ethereum", "base": "Base", "arbitrum": "Arbitrum One", "optimism": "OP Mainnet"})[walletController.receiveNetwork] || "EVM network"
+        text: ({"ethereum": "Ethereum", "base": "Base", "arbitrum": "Arbitrum One", "optimism": "OP Mainnet", "polygon": "Polygon", "bsc": "BNB Smart Chain"})[walletController.receiveNetwork] || "EVM network"
         color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 13
     }
     SurfaceCard {

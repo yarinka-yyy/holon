@@ -73,6 +73,8 @@ class StubPublicDataService:
             "base": PublicDataStatus.LIVE,
             "arbitrum": PublicDataStatus.LIVE,
             "optimism": PublicDataStatus.LIVE,
+            "polygon": PublicDataStatus.LIVE,
+            "bsc": PublicDataStatus.LIVE,
         }
         self.statuses.update(statuses or {})
         self.calls: list[tuple[str, str, tuple[str, ...]]] = []
@@ -290,7 +292,8 @@ def public_snapshot(
     assets = tuple(
         AssetBalance(
             item.symbol,
-            eth if item.asset_id == "eth" else usdc if item.asset_id == "usdc" else 0,
+            eth if item.asset_id == "eth"
+            else usdc if item.asset_id == "usdc" else 0,
             item.decimals,
             item.asset_id,
         )

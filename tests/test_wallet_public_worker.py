@@ -40,11 +40,11 @@ def test_live_worker_read_uses_public_header_without_authentication(tmp_path: Pa
     assert result["authority_available"] is False
     assert result["account"] == {"label": "Main Account", "address": profile.address}
     assert [item["network"] for item in result["networks"]] == [
-        "ethereum", "base", "arbitrum", "optimism",
+        "ethereum", "base", "arbitrum", "optimism", "polygon", "bsc",
     ]
     assert all(item["status"] == "LIVE" for item in result["networks"])
     assert sorted(call[2][0] for call in service.calls) == [
-        "arbitrum", "base", "ethereum", "optimism",
+        "arbitrum", "base", "bsc", "ethereum", "optimism", "polygon",
     ]
 
 
@@ -56,7 +56,8 @@ def test_network_failures_are_independent_and_never_zero_fallback(tmp_path: Path
     })
     result = read_active_balances(repository, settings, service)
     validate_wallet_balances(result)
-    ethereum, base, _arbitrum, _optimism = result["networks"]
+    by_network = {item["network"]: item for item in result["networks"]}
+    ethereum, base = by_network["ethereum"], by_network["base"]
     assert result["status"] == "PARTIAL"
     assert all(item["status"] == "UNAVAILABLE" for item in ethereum["balances"])
     assert ethereum["error_code"] == "RPC_UNAVAILABLE"
@@ -138,7 +139,8 @@ def test_overall_deadline_marks_only_unfinished_networks_unavailable(
         result = read_active_balances(repository, settings, SlowService())
     validate_wallet_balances(result)
     release.set()
-    ethereum, base, _arbitrum, _optimism = result["networks"]
+    by_network = {item["network"]: item for item in result["networks"]}
+    ethereum, base = by_network["ethereum"], by_network["base"]
     assert result["status"] == "PARTIAL"
     assert ethereum["status"] == "UNAVAILABLE"
     assert ethereum["error_code"] == "RPC_TIMEOUT"

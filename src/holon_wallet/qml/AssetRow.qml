@@ -16,11 +16,17 @@ Item {
     readonly property bool isLendingPosition: protocolBadgeIcon.toString().length > 0
     height: 74 + (expanded ? 54 : 0)
 
-    Image {
+    Rectangle {
         visible: !root.isLendingPosition
         x: 14; y: 17; width: 40; height: 40
-        source: root.iconSource; sourceSize: Qt.size(80, 80)
-        fillMode: Image.PreserveAspectFit
+        radius: 20; color: "transparent"; clip: true
+        Image {
+            anchors.centerIn: parent
+            width: Math.min(40, Number(root.asset.iconVisualSize || 40)); height: width
+            source: root.iconSource; sourceSize: Qt.size(160, 160)
+            fillMode: Image.PreserveAspectFit
+            smooth: true; mipmap: true
+        }
     }
     Rectangle {
         visible: root.isLendingPosition
@@ -30,8 +36,9 @@ Item {
         Image {
             visible: root.protocolBadgeIcon !== ""
             anchors.centerIn: parent; width: 30; height: 30
-            source: root.protocolBadgeIcon; sourceSize: Qt.size(60, 60)
+            source: root.protocolBadgeIcon; sourceSize: Qt.size(120, 120)
             fillMode: Image.PreserveAspectFit
+            smooth: true; mipmap: true
         }
     }
     Text {

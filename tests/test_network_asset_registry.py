@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import json
-import base64
 import hashlib
-import re
 from copy import deepcopy
 from pathlib import Path
 
@@ -29,11 +27,12 @@ def _reject(tmp_path: Path, value: dict) -> None:
 def test_project_registry_is_ordered_strict_and_complete() -> None:
     value = load_registry()
     assert [item.network_id for item in value.networks] == [
-        "ethereum", "base", "arbitrum", "optimism",
+        "ethereum", "base", "arbitrum", "optimism", "polygon", "bsc",
     ]
-    assert [item.chain_id for item in value.networks] == [1, 8453, 42161, 10]
-    assert len(value.assets) == 10
-    assert len(value.deployments) == 26
+    assert [item.chain_id for item in value.networks] == [1, 8453, 42161, 10, 137, 56]
+    assert len(value.assets) == 22
+    assert len(value.deployments) == 43
+    assert len(value.market_prices) == 17
     assert all(
         (Path("src/holon_wallet") / item.icon_path).is_file()
         for item in (*value.networks, *value.assets)
@@ -43,6 +42,7 @@ def test_project_registry_is_ordered_strict_and_complete() -> None:
 @pytest.mark.parametrize("mutation", [
     "duplicate_network", "duplicate_chain", "bad_address", "duplicate_address",
     "unknown_capability", "missing_provenance", "bad_metadata", "bad_native",
+    "bad_market_id", "duplicate_market", "bad_visual_size", "bad_icon_hash",
 ])
 def test_registry_rejects_identity_metadata_capability_and_provenance_errors(
     tmp_path: Path, mutation: str,
@@ -64,6 +64,14 @@ def test_registry_rejects_identity_metadata_capability_and_provenance_errors(
         value["assets"][0]["display_symbol"] = ""
     elif mutation == "bad_native":
         value["networks"][0]["native_asset_id"] = "weth"
+    elif mutation == "bad_market_id":
+        value["market_prices"][0]["coingecko_id"] = "Ethereum Mainnet"
+    elif mutation == "duplicate_market":
+        value["market_prices"][1]["coingecko_id"] = value["market_prices"][0]["coingecko_id"]
+    elif mutation == "bad_visual_size":
+        value["networks"][0]["icon"]["visual_size"] = 41
+    elif mutation == "bad_icon_hash":
+        value["assets"][0]["icon"]["source_sha256"] = "0" * 64
     _reject(tmp_path, value)
 
 
@@ -90,17 +98,8 @@ def test_new_networks_are_receive_only_and_do_not_expand_authority_routes() -> N
     assert lending_routes == {"base:usdc"}
 
 
-def test_official_png_wrappers_preserve_source_bytes_exactly() -> None:
+def test_official_icon_files_match_pinned_sha256() -> None:
     raw = _raw()
-    expected = {
-        item["icon"]["path"].rsplit("/", 1)[-1].removesuffix(".svg"): item["icon"]["source_sha256"]
-        for item in (*raw["networks"], *raw["assets"])
-        if item["icon"]["path"].rsplit("/", 1)[-1] in {
-            "arbitrum.svg", "weth.svg", "op.svg", "cbbtc.svg",
-        }
-    }
-    for name, digest in expected.items():
-        text = Path(f"src/holon_wallet/qml/assets/{name}.svg").read_text(encoding="utf-8")
-        encoded = re.search(r"base64,([^\"]+)", text)
-        assert encoded is not None
-        assert hashlib.sha256(base64.b64decode(encoded.group(1))).hexdigest() == digest
+    for item in (*raw["networks"], *raw["assets"]):
+        path = Path("src/holon_wallet") / item["icon"]["path"]
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == item["icon"]["source_sha256"]

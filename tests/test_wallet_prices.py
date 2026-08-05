@@ -4,10 +4,19 @@ from dataclasses import replace
 from datetime import datetime
 from decimal import Decimal
 
+from requests import exceptions as request_errors
+
+from holon_contracts.registry import load_registry
+
 from holon_wallet.prices import (
     PRICE_FEEDS,
     SEQUENCER_FEED,
     AssetPrice,
+    COINGECKO_SIMPLE_PRICE_URL,
+    MarketPrice,
+    MarketPriceSnapshot,
+    MarketPriceStatus,
+    PortfolioMarketPriceService,
     PriceService,
     PriceSnapshot,
     PriceStatus,
@@ -25,6 +34,38 @@ from wallet_public_support import public_snapshot
 
 
 NOW = 2_000_000_000
+
+
+class FakeMarketResponse:
+    def __init__(self, status_code: int, body: object) -> None:
+        self.status_code = status_code
+        self.body = body
+
+    def json(self) -> object:
+        return self.body
+
+
+def market_body() -> dict[str, dict[str, object]]:
+    return {
+        item.coingecko_id: {"usd": "1.25", "last_updated_at": NOW - 10}
+        for item in load_registry().market_prices
+    }
+
+
+def market_snapshot(**values: str) -> MarketPriceSnapshot:
+    return MarketPriceSnapshot(
+        tuple(
+            MarketPrice(
+                item.market_price_id,
+                item.coingecko_id,
+                MarketPriceStatus.LIVE,
+                Decimal(values.get(item.market_price_id, "1")),
+                NOW - 10,
+            )
+            for item in load_registry().market_prices
+        ),
+        NOW,
+    )
 
 
 class FakeChainlinkRpc:
@@ -110,6 +151,92 @@ def test_retry_happens_once_without_exposing_endpoint() -> None:
     assert "private-token" not in repr(snapshot)
 
 
+def test_market_prices_use_one_privacy_safe_request_for_every_pinned_asset() -> None:
+    calls: list[tuple[str, dict[str, str], float]] = []
+
+    def get(url: str, *, params: dict[str, str], timeout: float):
+        calls.append((url, params, timeout))
+        return FakeMarketResponse(200, market_body())
+
+    snapshot = PortfolioMarketPriceService(get, lambda: NOW).refresh()
+
+    assert len(calls) == 1
+    assert calls[0][0] == COINGECKO_SIMPLE_PRICE_URL
+    assert calls[0][2] == 5.0
+    assert set(calls[0][1]) == {
+        "ids", "vs_currencies", "include_last_updated_at",
+    }
+    request_text = repr(calls[0]).lower()
+    assert all(word not in request_text for word in (
+        "address", "profile", "balance", "rpc", "wallet",
+    ))
+    assert snapshot.has_live
+    assert all(item.status is MarketPriceStatus.LIVE for item in snapshot.prices)
+
+
+def test_market_prices_keep_valid_partial_response_and_reject_stale_or_malformed_items() -> None:
+    body = market_body()
+    body.pop("optimism")
+    body["arbitrum"]["last_updated_at"] = NOW - 301
+    body["dai"]["usd"] = "not-a-price"
+
+    snapshot = PortfolioMarketPriceService(
+        lambda *_args, **_kwargs: FakeMarketResponse(200, body),
+        lambda: NOW,
+    ).refresh()
+
+    assert snapshot.by_market["eth-usd"].status is MarketPriceStatus.LIVE
+    assert snapshot.by_market["op-usd"].error_code == "PRICE_UNAVAILABLE"
+    assert snapshot.by_market["arb-usd"].error_code == "PRICE_INVALID"
+    assert snapshot.by_market["dai-usd"].error_code == "PRICE_INVALID"
+
+
+def test_market_prices_retry_once_for_timeout_and_rate_limit() -> None:
+    for first in (request_errors.Timeout(), FakeMarketResponse(429, {})):
+        responses = iter((first, FakeMarketResponse(200, market_body())))
+        calls = 0
+
+        def get(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            value = next(responses)
+            if isinstance(value, BaseException):
+                raise value
+            return value
+
+        snapshot = PortfolioMarketPriceService(get, lambda: NOW).refresh()
+        assert calls == 2
+        assert snapshot.has_live
+
+
+def test_network_sort_keeps_gas_first_but_all_networks_uses_dollar_value() -> None:
+    snapshot = public_snapshot("polygon", usdc=1_000_000_000)
+    assets = tuple(
+        replace(item, atomic_units={
+            "pol": 10**18,
+            "wbtc": 2_000_000,
+        }.get(item.asset_id, item.atomic_units))
+        for item in snapshot.assets
+    )
+    snapshot = replace(snapshot, assets=assets)
+    prices = market_snapshot(
+        **{
+            "usdc-usd": "1",
+            "pol-usd": "0.5",
+            "wbtc-polygon-usd": "25000",
+        }
+    )
+
+    polygon = portfolio_to_map({"polygon": snapshot}, prices, "polygon")
+    assert [item["assetId"] for item in polygon["assets"][:3]] == [
+        "pol", "usdc", "wbtc",
+    ]
+    combined = portfolio_to_map({"polygon": snapshot}, prices, "all")
+    assert [item["assetId"] for item in combined["assets"][:3]] == [
+        "usdc", "wbtc", "pol",
+    ]
+
+
 def test_portfolio_totals_and_breakdown_are_exact_and_fail_closed() -> None:
     prices = PriceSnapshot(
         8453,
@@ -164,7 +291,7 @@ def test_decimal_format_and_fee_estimate_do_not_use_float() -> None:
     assert is_unusually_high_base_fee(20_000_000_000_000, unavailable)
 
 
-def test_four_network_aggregation_keeps_zero_unpriced_assets_but_fails_closed_for_nonzero() -> None:
+def test_six_network_aggregation_keeps_zero_unpriced_assets_but_fails_closed_for_nonzero() -> None:
     prices = PriceSnapshot(
         8453, PriceStatus.LIVE,
         (
@@ -174,12 +301,12 @@ def test_four_network_aggregation_keeps_zero_unpriced_assets_but_fails_closed_fo
     )
     snapshots = {
         network_id: public_snapshot(network_id)
-        for network_id in ("ethereum", "base", "arbitrum", "optimism")
+        for network_id in ("ethereum", "base", "arbitrum", "optimism", "polygon", "bsc")
     }
     zero = portfolio_to_map(snapshots, prices, "all")
     assert zero["totalAvailable"] is True
     assert next(item for item in zero["assets"] if item["assetId"] == "eth")["amount"] == "4 ETH"
-    assert next(item for item in zero["assets"] if item["assetId"] == "op")["usd"] == "No price data"
+    assert next(item for item in zero["assets"] if item["assetId"] == "op")["usd"] == "$0.00"
 
     optimism = snapshots["optimism"]
     assets = tuple(
@@ -214,7 +341,7 @@ def test_lending_positions_extend_all_and_base_without_double_counting() -> None
     combined = portfolio_to_map(snapshots, prices, "all", lending)
     assert combined["totalUsd"] == "$7,535.00"
     assert [item["assetId"] for item in combined["assets"][:6]] == [
-        "eth", "usdc", "weth", "dai", "cbbtc", "usdt",
+        "eth", "usdc", "usdt", "weth", "dai", "cbbtc",
     ]
     assert {item["assetId"] for item in combined["assets"][6:]} == {
         "aave-v3", "compound-v3",
@@ -227,7 +354,7 @@ def test_lending_positions_extend_all_and_base_without_double_counting() -> None
     ethereum = portfolio_to_map(snapshots, prices, "ethereum", lending)
     assert ethereum["totalUsd"] == "$2,502.00"
     assert [item["assetId"] for item in ethereum["assets"]] == [
-        "eth", "usdc", "weth", "dai", "cbbtc", "usdt",
+        "eth", "usdc", "usdt", "weth", "dai", "cbbtc",
     ]
 
     lending[1]["position_atomic"] = None

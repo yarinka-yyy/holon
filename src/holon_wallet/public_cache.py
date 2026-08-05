@@ -1,19 +1,31 @@
-"""Strict public-only v2 cache with safe v1 balance migration."""
+"""Strict public-only v3 cache with safe v1/v2 migration."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Mapping
 
-from .prices import AssetPrice, PriceSnapshot, PriceStatus
+from holon_contracts.registry import load_registry
+
+from .prices import (
+    AssetPrice,
+    MarketPrice,
+    MarketPriceSnapshot,
+    MarketPriceStatus,
+    PriceSnapshot,
+    PriceStatus,
+    market_snapshot_from_chainlink,
+    merge_market_price_snapshots,
+)
 from .public_data import (
     NETWORK_BY_ID, AssetBalance, AssetReadError, NetworkSnapshot, PublicDataStatus,
 )
 from .storage import StorageError, WalletPaths, atomic_write_json, read_json
 
 
-CACHE_SCHEMA_VERSION = 2
+CACHE_SCHEMA_VERSION = 3
 MAX_CACHED_PROFILES = 50
 
 
@@ -22,7 +34,7 @@ class CachedPublicBundle:
     profile_id: str
     address: str
     networks: tuple[NetworkSnapshot, ...]
-    prices: PriceSnapshot
+    market_prices: MarketPriceSnapshot
     saved_at: str
 
 
@@ -40,12 +52,13 @@ class PublicCacheStore:
                 if item.get("profile_id") == profile_id and item.get("address") == address
             )
             return _bundle_from_dict(value)
-        except (StopIteration, StorageError, TypeError, ValueError):
+        except (StopIteration, StorageError, TypeError, ValueError, ArithmeticError):
             return None
 
     def save(
         self, profile_id: str, address: str,
-        networks: Mapping[str, NetworkSnapshot], prices: PriceSnapshot,
+        networks: Mapping[str, NetworkSnapshot],
+        prices: MarketPriceSnapshot | PriceSnapshot,
     ) -> None:
         fresh = tuple(
             item for network_id in NETWORK_BY_ID
@@ -53,11 +66,9 @@ class PublicCacheStore:
             and item.status in {PublicDataStatus.LIVE, PublicDataStatus.PARTIAL}
             and item.assets
         )
-        if not fresh:
-            return
         try:
             profiles, _schema = self._load_profiles()
-        except (StorageError, TypeError, ValueError):
+        except (StorageError, TypeError, ValueError, ArithmeticError):
             profiles = []
         previous_value = next((
             item for item in profiles
@@ -66,12 +77,18 @@ class PublicCacheStore:
         previous = None
         try:
             previous = _bundle_from_dict(previous_value) if previous_value else None
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, ArithmeticError):
             previous = None
+        if not fresh and previous is None:
+            return
         merged = _merge_networks(previous.networks if previous else (), fresh)
-        cached_prices = (
-            prices if prices.status is PriceStatus.LIVE
-            else previous.prices if previous is not None else prices
+        market_prices = (
+            market_snapshot_from_chainlink(prices)
+            if isinstance(prices, PriceSnapshot) else prices
+        )
+        cached_prices = merge_market_price_snapshots(
+            previous.market_prices if previous is not None else None,
+            market_prices,
         )
         saved_at = _utc_now()
         candidate = _bundle_to_dict(CachedPublicBundle(
@@ -92,7 +109,7 @@ class PublicCacheStore:
         value = read_json(self.path)
         if (
             not isinstance(value, dict) or set(value) != {"schema_version", "profiles"}
-            or value.get("schema_version") not in {1, 2}
+            or value.get("schema_version") not in {1, 2, 3}
             or not isinstance(value.get("profiles"), list)
             or len(value["profiles"]) > MAX_CACHED_PROFILES
             or any(not isinstance(item, dict) for item in value["profiles"])
@@ -100,7 +117,14 @@ class PublicCacheStore:
             raise ValueError("Public cache is invalid")
         schema = int(value["schema_version"])
         profiles = list(value["profiles"])
-        return ([_migrate_v1_profile(item) for item in profiles], schema) if schema == 1 else (profiles, schema)
+        if schema == 1:
+            return (
+                [_migrate_v2_profile(_migrate_v1_profile(item)) for item in profiles],
+                schema,
+            )
+        if schema == 2:
+            return ([_migrate_v2_profile(item) for item in profiles], schema)
+        return profiles, schema
 
 
 def _merge_networks(
@@ -162,13 +186,13 @@ def _bundle_to_dict(bundle: CachedPublicBundle) -> dict[str, object]:
                 for item in bundle.networks if item.block_number is not None and item.updated_at
             ]
         },
-        "prices": _prices_to_dict(bundle.prices),
+        "market_prices": _market_prices_to_dict(bundle.market_prices),
     }
 
 
 def _bundle_from_dict(value: object) -> CachedPublicBundle:
     if not isinstance(value, dict) or set(value) != {
-        "profile_id", "address", "saved_at", "balances", "prices",
+        "profile_id", "address", "saved_at", "balances", "market_prices",
     }:
         raise ValueError("Public cache profile is invalid")
     profile_id, address, saved_at = value["profile_id"], value["address"], value["saved_at"]
@@ -182,7 +206,8 @@ def _bundle_from_dict(value: object) -> CachedPublicBundle:
     if not networks or len(networks) > len(NETWORK_BY_ID) or len({item.network_id for item in networks}) != len(networks):
         raise ValueError("Public cache networks are invalid")
     return CachedPublicBundle(
-        profile_id, address, networks, _prices_from_dict(value["prices"]), saved_at,
+        profile_id, address, networks,
+        _market_prices_from_dict(value["market_prices"]), saved_at,
     )
 
 
@@ -225,6 +250,90 @@ def _network_from_dict(value: object) -> NetworkSnapshot:
         PublicDataStatus.PARTIAL if missing else PublicDataStatus.LIVE,
         block, None, None, max(timestamps),
         "ASSET_DATA_UNAVAILABLE" if missing else None, ordered, missing,
+    )
+
+
+def _market_prices_to_dict(value: MarketPriceSnapshot) -> dict[str, object]:
+    return {
+        "observed_at": value.observed_at,
+        "error_code": value.error_code,
+        "assets": [
+            {
+                "market_price_id": item.market_price_id,
+                "coingecko_id": item.coingecko_id,
+                "status": item.status.value,
+                "value_usd": (
+                    format(item.value_usd, "f")
+                    if item.value_usd is not None else None
+                ),
+                "updated_at": item.updated_at,
+                "error_code": item.error_code,
+            }
+            for item in value.prices
+        ],
+    }
+
+
+def _market_prices_from_dict(value: object) -> MarketPriceSnapshot:
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"observed_at", "error_code", "assets"}
+    ):
+        raise ValueError("Public cache market prices are invalid")
+    observed_at = _positive_int(value["observed_at"])
+    if value["error_code"] is not None and not isinstance(value["error_code"], str):
+        raise ValueError("Public cache market price error is invalid")
+    assets = value["assets"]
+    registry = load_registry()
+    if not isinstance(assets, list) or len(assets) != len(registry.market_prices):
+        raise ValueError("Public cache market price assets are invalid")
+    parsed = tuple(_market_price_from_dict(item) for item in assets)
+    if tuple(item.market_price_id for item in parsed) != tuple(
+        item.market_price_id for item in registry.market_prices
+    ):
+        raise ValueError("Public cache market price order is invalid")
+    return MarketPriceSnapshot(parsed, observed_at, value["error_code"])
+
+
+def _market_price_from_dict(value: object) -> MarketPrice:
+    if not isinstance(value, dict) or set(value) != {
+        "market_price_id", "coingecko_id", "status", "value_usd",
+        "updated_at", "error_code",
+    }:
+        raise ValueError("Public cache market price is invalid")
+    registry = load_registry()
+    market_price_id = value["market_price_id"]
+    if market_price_id not in registry.market_price_by_id:
+        raise ValueError("Public cache market price identity is invalid")
+    spec = registry.market_price_by_id[market_price_id]
+    if (
+        value["coingecko_id"] != spec.coingecko_id
+        or value["status"] not in {item.value for item in MarketPriceStatus}
+    ):
+        raise ValueError("Public cache market price identity is invalid")
+    status = MarketPriceStatus(value["status"])
+    if value["error_code"] is not None and not isinstance(value["error_code"], str):
+        raise ValueError("Public cache market price error is invalid")
+    if status is MarketPriceStatus.UNAVAILABLE:
+        if (
+            value["value_usd"] is not None
+            or value["updated_at"] is not None
+            or not isinstance(value["error_code"], str)
+        ):
+            raise ValueError("Public cache unavailable market price is invalid")
+        return MarketPrice(
+            spec.market_price_id, spec.coingecko_id, status,
+            None, None, value["error_code"],
+        )
+    raw_value = value["value_usd"]
+    if not isinstance(raw_value, str):
+        raise ValueError("Public cache market price value is invalid")
+    amount = Decimal(raw_value)
+    if not amount.is_finite() or amount <= 0:
+        raise ValueError("Public cache market price value is invalid")
+    return MarketPrice(
+        spec.market_price_id, spec.coingecko_id, status, amount,
+        _positive_int(value["updated_at"]), value["error_code"],
     )
 
 
@@ -313,6 +422,23 @@ def _migrate_v1_profile(value: dict[str, object]) -> dict[str, object]:
         "profile_id": value["profile_id"], "address": value["address"],
         "saved_at": value["saved_at"], "balances": {"networks": migrated},
         "prices": prices,
+    }
+
+
+def _migrate_v2_profile(value: dict[str, object]) -> dict[str, object]:
+    if set(value) != {
+        "profile_id", "address", "saved_at", "balances", "prices",
+    }:
+        raise ValueError("Public cache v2 profile is invalid")
+    legacy = _prices_from_dict(value["prices"])
+    return {
+        "profile_id": value["profile_id"],
+        "address": value["address"],
+        "saved_at": value["saved_at"],
+        "balances": value["balances"],
+        "market_prices": _market_prices_to_dict(
+            market_snapshot_from_chainlink(legacy),
+        ),
     }
 
 

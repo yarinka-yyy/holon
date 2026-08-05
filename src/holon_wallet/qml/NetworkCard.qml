@@ -8,6 +8,7 @@ Item {
     property bool selected: false
     property bool controlEnabled: true
     property bool iconOnly: false
+    property int iconVisualSize: iconOnly ? 24 : 20
     signal triggered()
     enabled: controlEnabled
     activeFocusOnTab: controlEnabled
@@ -24,9 +25,10 @@ Item {
     Row {
         anchors.centerIn: parent; spacing: 8
         Image {
-            width: root.iconOnly ? 24 : 20; height: width
-            source: root.iconSource; sourceSize: Qt.size(48, 48)
+            width: root.iconVisualSize; height: width
+            source: root.iconSource; sourceSize: Qt.size(160, 160)
             fillMode: Image.PreserveAspectFit
+            smooth: true; mipmap: true
         }
         Text {
             visible: !root.iconOnly

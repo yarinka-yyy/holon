@@ -13,6 +13,7 @@ from typing import Callable, Mapping
 
 from PySide6.QtCore import Property, QLocale, QObject, QTime, QTimer, Signal, Slot
 from PySide6.QtGui import QGuiApplication
+from holon_contracts.registry import load_registry
 from holon_wallet_control import AUTHORITY_VERSION
 from holon_guard_ipc.policy_control import ControlProtocolError, ControlUnavailable
 from holon_wallet_control.lending_operation import LendingOperationStateError, LendingOperationStore
@@ -71,12 +72,16 @@ from .public_data import (
 )
 from .public_cache import PublicCacheStore
 from .prices import (
+    MarketPriceSnapshot,
+    PortfolioMarketPriceService,
     PriceService,
     PriceSnapshot,
     PriceStatus,
     estimate_asset_usd,
     estimate_wei_usd,
     is_unusually_high_base_fee,
+    market_snapshot_from_chainlink,
+    merge_market_price_snapshots,
     portfolio_to_map,
     price_snapshot_to_map,
 )
@@ -207,6 +212,7 @@ class WalletController(QObject):
         receipt_tracker: BroadcastReceiptTracker | None = None,
         receipt_executor: Executor | None = None,
         price_service: PriceService | None = None,
+        market_price_service: PortfolioMarketPriceService | None = None,
         allowance_service: AllowanceReadService | None = None,
         revoke_preflight_service: RevokePreflightService | None = None,
         transfer_policy: MainnetBroadcastPolicy | None = None,
@@ -222,6 +228,11 @@ class WalletController(QObject):
         self._policy_control_client = policy_control_client
         self._public_data_service = public_data_service or PublicDataService()
         self._price_service = price_service or PriceService()
+        self._market_price_service = (
+            market_price_service
+            if market_price_service is not None
+            else PortfolioMarketPriceService() if price_service is None else None
+        )
         self._history_store = history_store or HistoryStore(self._repository.paths)
         self._public_cache_store = (
             public_cache_store or PublicCacheStore(self._repository.paths)
@@ -323,8 +334,11 @@ class WalletController(QObject):
         self._cached_network_ids: set[str] = set()
         self._unavailable_network_ids: set[str] = set()
         self._unavailable_assets: set[tuple[str, str]] = set()
-        self._price_cached = False
+        self._market_price_cached = False
         self._price_snapshot = PriceSnapshot.unavailable(
+            int(datetime.now(UTC).timestamp()), "NOT_REFRESHED",
+        )
+        self._market_price_snapshot = MarketPriceSnapshot.unavailable(
             int(datetime.now(UTC).timestamp()), "NOT_REFRESHED",
         )
         self._lending_portfolio = LendingPortfolioService.unavailable(None)
@@ -666,10 +680,10 @@ class WalletController(QObject):
         if self._public_data_refreshing:
             return (
                 "LOCAL WALLET  ·  CACHED DATA  ·  UPDATING"
-                if self._cached_network_ids or self._price_cached
+                if self._cached_network_ids or self._market_price_cached
                 else "LOCAL WALLET  ·  REFRESHING PUBLIC DATA"
             )
-        if self._cached_network_ids or self._price_cached:
+        if self._cached_network_ids or self._market_price_cached:
             failed = self._unavailable_network_ids & set(self._selected_network_ids())
             if failed == set(NETWORK_BY_ID):
                 return "Unable to update balances · Check your internet connection"
@@ -735,7 +749,7 @@ class WalletController(QObject):
     def portfolioData(self) -> dict[str, object]:
         return portfolio_to_map(
             self._network_snapshots,
-            self._price_snapshot,
+            self._market_price_snapshot,
             self._selected_network,
             self._lending_portfolio.get("protocols"),
         )
@@ -1689,7 +1703,7 @@ class WalletController(QObject):
         self._public_data_refreshing = True
         self._public_data_updated_text = (
             "Cached · updating…"
-            if self._cached_network_ids or self._price_cached
+            if self._cached_network_ids or self._market_price_cached
             else "Refreshing…"
         )
         self.publicDataChanged.emit()
@@ -4079,22 +4093,32 @@ class WalletController(QObject):
         address: str,
         network_ids: tuple[str, ...],
         operations: list[dict[str, object]] | None,
-    ) -> tuple[PortfolioSnapshot, PriceSnapshot, dict[str, object]]:
-        with ThreadPoolExecutor(max_workers=3, thread_name_prefix="holon-wallet-portfolio") as pool:
+    ) -> tuple[
+        PortfolioSnapshot, PriceSnapshot, MarketPriceSnapshot, dict[str, object],
+    ]:
+        with ThreadPoolExecutor(max_workers=4, thread_name_prefix="holon-wallet-portfolio") as pool:
             wallet_future = pool.submit(
                 self._public_data_service.refresh,
                 profile_id, address, network_ids,
             )
             price_future = pool.submit(self._price_service.refresh)
+            market_future = (
+                pool.submit(self._market_price_service.refresh)
+                if self._market_price_service is not None else None
+            )
             lending_future = pool.submit(
                 self._lending_portfolio_service.read,
                 {"label": label, "address": address},
                 operations,
                 history_period="none",
             )
-            return (
-                wallet_future.result(), price_future.result(), lending_future.result(),
+            chainlink = price_future.result()
+            market = (
+                market_future.result()
+                if market_future is not None
+                else market_snapshot_from_chainlink(chainlink)
             )
+            return wallet_future.result(), chainlink, market, lending_future.result()
 
     @Slot(int, object)
     def _accept_public_data(
@@ -4106,15 +4130,17 @@ class WalletController(QObject):
         requested = self._selected_network_ids()
         snapshot: PortfolioSnapshot | None = None
         prices: PriceSnapshot | None = None
+        market_prices: MarketPriceSnapshot | None = None
         lending: dict[str, object] | None = None
         if (
             isinstance(result, tuple)
-            and len(result) == 3
+            and len(result) == 4
             and isinstance(result[0], PortfolioSnapshot)
             and isinstance(result[1], PriceSnapshot)
-            and isinstance(result[2], dict)
+            and isinstance(result[2], MarketPriceSnapshot)
+            and isinstance(result[3], dict)
         ):
-            snapshot, prices, lending = result
+            snapshot, prices, market_prices, lending = result
         elif isinstance(result, PortfolioSnapshot):
             snapshot = result
         valid_bundle = (
@@ -4134,6 +4160,10 @@ class WalletController(QObject):
             else:
                 for item in snapshot.networks:
                     if item.status in {PublicDataStatus.LIVE, PublicDataStatus.PARTIAL, PublicDataStatus.SIMULATED}:
+                        if item.status is PublicDataStatus.PARTIAL:
+                            item = _merge_partial_network(
+                                self._network_snapshots.get(item.network_id), item,
+                            )
                         self._network_snapshots[item.network_id] = item
                         self._cached_network_ids.discard(item.network_id)
                         if item.status in {PublicDataStatus.LIVE, PublicDataStatus.PARTIAL}:
@@ -4153,9 +4183,30 @@ class WalletController(QObject):
                     and prices.status is PriceStatus.LIVE
                 ):
                     self._price_snapshot = prices
-                    self._price_cached = False
                 else:
                     self._preserve_price_or_unavailable("DATA_INVALID")
+                registry = load_registry()
+                expected_market_ids = tuple(
+                    item.market_price_id for item in registry.market_prices
+                )
+                if (
+                    market_prices is not None
+                    and tuple(
+                        item.market_price_id for item in market_prices.prices
+                    ) == expected_market_ids
+                ):
+                    self._market_price_snapshot = merge_market_price_snapshots(
+                        self._market_price_snapshot, market_prices,
+                    )
+                    self._market_price_cached = self._market_price_snapshot.has_cached
+                else:
+                    self._market_price_snapshot = merge_market_price_snapshots(
+                        self._market_price_snapshot,
+                        MarketPriceSnapshot.unavailable(
+                            int(datetime.now(UTC).timestamp()), "DATA_INVALID",
+                        ),
+                    )
+                    self._market_price_cached = self._market_price_snapshot.has_cached
         self._public_data_refreshing = False
         if (
             lending is not None and active is not None
@@ -4167,12 +4218,14 @@ class WalletController(QObject):
             item.updated_at for item in self._network_snapshots.values()
             if item.updated_at
         ]
-        cached = bool(self._cached_network_ids or self._price_cached)
+        cached = bool(self._cached_network_ids or self._market_price_cached)
         self._public_data_updated_text = (
             f"{'Cached · updated' if cached else 'Updated'} {_display_local_time(max(timestamps))}"
             if timestamps else "Refresh unavailable"
         )
-        if fresh_network_ids:
+        if active is not None and (
+            fresh_network_ids or self._market_price_snapshot.has_live
+        ):
             try:
                 self._public_cache_store.save(
                     active.profile_id, active.address,
@@ -4180,7 +4233,7 @@ class WalletController(QObject):
                         network_id: self._network_snapshots[network_id]
                         for network_id in fresh_network_ids
                     },
-                    self._price_snapshot,
+                    self._market_price_snapshot,
                 )
             except StorageError:
                 pass
@@ -4215,8 +4268,11 @@ class WalletController(QObject):
         self._price_snapshot = PriceSnapshot.unavailable(
             int(datetime.now(UTC).timestamp()), "NOT_REFRESHED",
         )
+        self._market_price_snapshot = MarketPriceSnapshot.unavailable(
+            int(datetime.now(UTC).timestamp()), "NOT_REFRESHED",
+        )
         self._cached_network_ids.clear()
-        self._price_cached = False
+        self._market_price_cached = False
         active = self._state.active_profile
         if active is None:
             self._lending_portfolio = LendingPortfolioService.unavailable(None)
@@ -4235,8 +4291,13 @@ class WalletController(QObject):
         for item in bundle.networks:
             self._network_snapshots[item.network_id] = item
             self._cached_network_ids.add(item.network_id)
-        self._price_snapshot = bundle.prices
-        self._price_cached = True
+        self._market_price_snapshot = merge_market_price_snapshots(
+            bundle.market_prices,
+            MarketPriceSnapshot.unavailable(
+                int(datetime.now(UTC).timestamp()), "NOT_REFRESHED",
+            ),
+        )
+        self._market_price_cached = self._market_price_snapshot.has_cached
         timestamps = [item.updated_at for item in bundle.networks if item.updated_at]
         self._public_data_updated_text = (
             f"Cached · updated {_display_local_time(max(timestamps))}"
@@ -4270,9 +4331,7 @@ class WalletController(QObject):
                 )
 
     def _preserve_price_or_unavailable(self, code: str) -> None:
-        if self._price_snapshot.status is PriceStatus.LIVE:
-            self._price_cached = True
-        else:
+        if self._price_snapshot.status is not PriceStatus.LIVE:
             self._price_snapshot = PriceSnapshot.unavailable(
                 int(datetime.now(UTC).timestamp()), code,
             )
@@ -4404,6 +4463,34 @@ def _policy_apply_error(code: str) -> str:
         "AUTHORITY_STATE_BASELINE_REQUIRED": "Baseline revision 0 is required",
         "AUTHORITY_STATE_INITIALIZATION_FAILED": "Authority state initialization failed closed",
     }.get(code, "Policy application was refused")
+
+
+def _merge_partial_network(
+    previous: NetworkSnapshot | None,
+    fresh: NetworkSnapshot,
+) -> NetworkSnapshot:
+    """Keep last known token values while preserving fresh partial-error state."""
+    if previous is None or not previous.assets or not fresh.asset_errors:
+        return fresh
+    spec = NETWORK_BY_ID[fresh.network_id]
+    by_id = dict(previous.assets_by_id)
+    by_id.update(fresh.assets_by_id)
+    ordered = tuple(
+        by_id[item.asset_id] for item in spec.assets if item.asset_id in by_id
+    )
+    return NetworkSnapshot(
+        fresh.network_id,
+        fresh.label,
+        fresh.chain_id,
+        PublicDataStatus.PARTIAL,
+        fresh.block_number,
+        None,
+        None,
+        fresh.updated_at,
+        fresh.error_code or "ASSET_DATA_UNAVAILABLE",
+        ordered,
+        fresh.asset_errors,
+    )
 
 def _display_local_time(timestamp: str) -> str:
     parsed = datetime.fromisoformat(timestamp.removesuffix("Z") + "+00:00")

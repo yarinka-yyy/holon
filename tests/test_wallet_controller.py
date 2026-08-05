@@ -1813,7 +1813,9 @@ def test_public_refresh_filter_and_stale_result_are_safe(tmp_path) -> None:
     assert item.submitPassword(secret, secret)
     assert item.finishBackup()
 
-    assert service.calls[-1][2] == ("ethereum", "base", "arbitrum", "optimism")
+    assert service.calls[-1][2] == (
+        "ethereum", "base", "arbitrum", "optimism", "polygon", "bsc",
+    )
     assert item.publicDataBanner == "LOCAL WALLET  ·  LIVE PUBLIC DATA"
     assert item.ethereumData["ethValue"] == "1 ETH"
     assert item.baseData["usdcValue"] == "2.5 USDC"
@@ -1878,7 +1880,9 @@ def test_public_startup_and_refresh_never_authenticate_or_decrypt_vault(
         ),
     )
     assert item.currentScreen == "main"
-    assert service.calls[-1][2] == ("ethereum", "base", "arbitrum", "optimism")
+    assert service.calls[-1][2] == (
+        "ethereum", "base", "arbitrum", "optimism", "polygon", "bsc",
+    )
     assert item.refreshPublicData()
     assert service.calls[-1][0] == item.activeProfileId
 
@@ -1902,7 +1906,7 @@ def test_v2_routes_visibility_and_public_details_are_memory_only(tmp_path) -> No
     assert item.finishBackup()
 
     assert item.portfolioData["totalAvailable"] is True
-    assert item.portfolioData["totalUsd"] == "$10,010.00"
+    assert item.portfolioData["totalUsd"] == "$10,012.50"
     assert item.balancesVisible
     item.toggleBalancesVisibility()
     assert not item.balancesVisible
@@ -1915,6 +1919,11 @@ def test_v2_routes_visibility_and_public_details_are_memory_only(tmp_path) -> No
     assert item.selectReceiveNetwork("arbitrum")
     assert item.receiveNetwork == "arbitrum"
     assert item.selectReceiveNetwork("optimism")
+    assert item.receiveNetwork == "optimism"
+    assert item.selectReceiveNetwork("polygon")
+    assert item.receiveNetwork == "polygon"
+    assert item.selectReceiveNetwork("bsc")
+    assert item.receiveNetwork == "bsc"
 
     item.showSettings()
     assert item.currentScreen == "settings"

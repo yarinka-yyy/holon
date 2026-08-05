@@ -14,6 +14,8 @@ ALLOWED_IMPORT_ROOTS = {
     "dataclasses",
     "datetime",
     "enum",
+    "functools",
+    "hashlib",
     "importlib",
     "holon_contracts",
     "holon_guard_ipc",

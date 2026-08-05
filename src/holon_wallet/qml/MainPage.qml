@@ -129,27 +129,39 @@ PageState {
                 }
                 NetworkCard {
                     objectName: "ethereumNetworkCard"; width: 40; height: 40; iconOnly: true
-                    label: "Ethereum"; iconSource: "assets/ethereum.svg"
+                    label: "Ethereum"; iconSource: "assets/ethereum.svg"; iconVisualSize: 22
                     selected: walletController.selectedNetwork === "ethereum"
                     onTriggered: walletController.selectNetwork("ethereum")
                 }
                 NetworkCard {
                     objectName: "baseNetworkCard"; width: 40; height: 40; iconOnly: true
-                    label: "Base"; iconSource: "assets/base.png"
+                    label: "Base"; iconSource: "assets/base.png"; iconVisualSize: 21
                     selected: walletController.selectedNetwork === "base"
                     onTriggered: walletController.selectNetwork("base")
                 }
                 NetworkCard {
                     objectName: "arbitrumNetworkCard"; width: 40; height: 40; iconOnly: true
-                    label: "Arbitrum One"; iconSource: "assets/arbitrum.svg"
+                    label: "Arbitrum One"; iconSource: "assets/arbitrum.png"; iconVisualSize: 26
                     selected: walletController.selectedNetwork === "arbitrum"
                     onTriggered: walletController.selectNetwork("arbitrum")
                 }
                 NetworkCard {
                     objectName: "optimismNetworkCard"; width: 40; height: 40; iconOnly: true
-                    label: "OP Mainnet"; iconSource: "assets/optimism.svg"
+                    label: "OP Mainnet"; iconSource: "assets/op.png"; iconVisualSize: 24
                     selected: walletController.selectedNetwork === "optimism"
                     onTriggered: walletController.selectNetwork("optimism")
+                }
+                NetworkCard {
+                    objectName: "polygonNetworkCard"; width: 40; height: 40; iconOnly: true
+                    label: "Polygon"; iconSource: "assets/polygon.svg"; iconVisualSize: 24
+                    selected: walletController.selectedNetwork === "polygon"
+                    onTriggered: walletController.selectNetwork("polygon")
+                }
+                NetworkCard {
+                    objectName: "bscNetworkCard"; width: 40; height: 40; iconOnly: true
+                    label: "BNB Smart Chain"; iconSource: "assets/bnb.png"; iconVisualSize: 24
+                    selected: walletController.selectedNetwork === "bsc"
+                    onTriggered: walletController.selectNetwork("bsc")
                 }
             }
 

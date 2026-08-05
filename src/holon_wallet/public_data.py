@@ -57,7 +57,7 @@ class AssetSpec:
     onchain_symbols: tuple[str, ...]
     contract: str | None
     icon_path: str
-    price_asset_id: str | None
+    market_price_id: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +67,7 @@ class NetworkSpec:
     chain_id: int
     endpoint_env: str
     default_endpoint: str
+    native_asset_id: str
     assets: tuple[AssetSpec, ...]
 
     @property
@@ -82,14 +83,14 @@ def _asset_spec(deployment: DeploymentRecord) -> AssetSpec:
     return AssetSpec(
         asset.asset_id, asset.display_symbol, asset.decimals,
         asset.onchain_symbols, deployment.contract_address, asset.icon_path,
-        asset.price_asset_id,
+        asset.market_price_id,
     )
 
 
 NETWORKS = tuple(
     NetworkSpec(
         item.network_id, item.display_name, item.chain_id, item.rpc_env,
-        item.default_rpc,
+        item.default_rpc, item.native_asset_id,
         tuple(_asset_spec(value) for value in _REGISTRY.deployments_by_network[item.network_id]),
     )
     for item in _REGISTRY.networks
@@ -369,15 +370,27 @@ class _RetryableRpcError(Exception):
 def _legacy_balances(
     rpc: PublicRpc, spec: NetworkSpec, address: str,
 ) -> tuple[tuple[AssetBalance, ...], tuple[AssetReadError, ...]]:
-    native = _non_negative(rpc.native_balance(address))
-    usdc_spec = next(item for item in spec.assets if item.asset_id == "usdc")
-    if usdc_spec.contract is None or rpc.token_decimals(usdc_spec.contract) != 6:
-        raise _MetadataMismatch
-    usdc = _non_negative(rpc.token_balance(usdc_spec.contract, address))
-    return (
-        AssetBalance("ETH", native, 18, "eth"),
-        AssetBalance("USDC", usdc, 6, "usdc"),
-    ), ()
+    native_spec = next(item for item in spec.assets if item.asset_id == spec.native_asset_id)
+    balances = [AssetBalance(
+        native_spec.symbol, _non_negative(rpc.native_balance(address)),
+        native_spec.decimals, native_spec.asset_id,
+    )]
+    usdc_spec = next(
+        (item for item in spec.assets if item.asset_id == "usdc"), None,
+    )
+    if usdc_spec is not None:
+        if (
+            usdc_spec.contract is None
+            or rpc.token_decimals(usdc_spec.contract) != usdc_spec.decimals
+        ):
+            raise _MetadataMismatch
+        balances.append(AssetBalance(
+            usdc_spec.symbol,
+            _non_negative(rpc.token_balance(usdc_spec.contract, address)),
+            usdc_spec.decimals,
+            usdc_spec.asset_id,
+        ))
+    return tuple(balances), ()
 
 
 def _with_id(balance: AssetBalance, asset_id: str) -> AssetBalance:

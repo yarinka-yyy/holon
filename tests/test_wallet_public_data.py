@@ -67,6 +67,8 @@ def test_reads_both_allowlisted_networks_and_preserves_real_zero() -> None:
         "base": FakeRpc(8453, native=2 * 10**18, usdc=0),
         "arbitrum": FakeRpc(42161),
         "optimism": FakeRpc(10),
+        "polygon": FakeRpc(137),
+        "bsc": FakeRpc(56),
     }
     endpoints: list[tuple[str, str]] = []
 
@@ -77,7 +79,7 @@ def test_reads_both_allowlisted_networks_and_preserves_real_zero() -> None:
     result = PublicDataService(factory, {}).refresh("profile-1", ADDRESS)
 
     assert result.profile_id == "profile-1"
-    ethereum, base, arbitrum, optimism = result.networks
+    ethereum, base, arbitrum, optimism, polygon, bsc = result.networks
     assert ethereum.status is PublicDataStatus.LIVE
     assert ethereum.eth == AssetBalance("ETH", 0, 18)
     assert ethereum.eth.display_value == "0 ETH"
@@ -87,6 +89,8 @@ def test_reads_both_allowlisted_networks_and_preserves_real_zero() -> None:
     assert base.usdc.display_value == "0 USDC"
     assert arbitrum.status is PublicDataStatus.LIVE
     assert optimism.status is PublicDataStatus.LIVE
+    assert polygon.status is PublicDataStatus.LIVE
+    assert bsc.status is PublicDataStatus.LIVE
     assert clients["ethereum"].contracts == [ETHEREUM_USDC, ETHEREUM_USDC]
     assert clients["base"].contracts == [BASE_USDC, BASE_USDC]
     assert set(endpoints) == {
@@ -94,7 +98,34 @@ def test_reads_both_allowlisted_networks_and_preserves_real_zero() -> None:
         ("base", "https://base-rpc.publicnode.com"),
         ("arbitrum", "https://arb1.arbitrum.io/rpc"),
         ("optimism", "https://mainnet.optimism.io"),
+        ("polygon", "https://polygon-bor-rpc.publicnode.com"),
+        ("bsc", "https://bsc-dataseed.bnbchain.org"),
     }
+
+
+def test_six_network_refresh_keeps_parallelism_bounded_to_four(monkeypatch) -> None:
+    import concurrent.futures
+    import holon_wallet.public_data as module
+
+    observed: list[int] = []
+    real_executor = concurrent.futures.ThreadPoolExecutor
+
+    def executor(*, max_workers: int, thread_name_prefix: str):
+        observed.append(max_workers)
+        return real_executor(
+            max_workers=max_workers, thread_name_prefix=thread_name_prefix,
+        )
+
+    monkeypatch.setattr(module, "ThreadPoolExecutor", executor)
+    clients = {
+        network_id: FakeRpc(spec.chain_id)
+        for network_id, spec in NETWORK_BY_ID.items()
+    }
+    PublicDataService(
+        lambda network_id, _endpoint: clients[network_id], {},
+    ).refresh("profile-1", ADDRESS)
+
+    assert observed == [4]
 
 
 def test_wrong_chain_and_invalid_token_metadata_are_unavailable() -> None:
@@ -158,7 +189,7 @@ def test_formatting_never_turns_small_nonzero_value_into_zero() -> None:
 def test_unknown_network_is_refused_before_provider_use() -> None:
     service = PublicDataService(lambda *_args: (_ for _ in ()).throw(AssertionError()), {})
     try:
-        service.refresh("profile-1", ADDRESS, ("polygon",))
+        service.refresh("profile-1", ADDRESS, ("unknown",))
     except ValueError as error:
         assert str(error) == "Unsupported public-data network"
     else:
