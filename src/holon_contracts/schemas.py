@@ -86,7 +86,10 @@ PAYLOAD_FIELDS = {
         {"guard_state", "authority_available", "wallet_state", "code", "message"}
     ),
     MessageKind.WALLET_BALANCES: frozenset(
-        {"status", "authority_available", "account", "networks", "code", "message"}
+        {
+            "balance_schema_version", "status", "authority_available", "account",
+            "networks", "code", "message",
+        }
     ),
     MessageKind.LENDING_MARKETS: frozenset(
         {

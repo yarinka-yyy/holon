@@ -27,6 +27,7 @@ def test_builder_creates_fixed_layout_and_valid_initial_state(tmp_path: Path) ->
     plugin = package / "payload" / "plugin"
     assert (plugin / "plugin.yaml").is_file()
     assert (plugin / "holon_contracts" / "__init__.py").is_file()
+    assert (plugin / "holon_contracts" / "network-assets.json").is_file()
     assert (plugin / "holon_guard_ipc" / "__init__.py").is_file()
     skills = package / "payload" / "skills" / "crypto"
     assert {path.parent.name for path in skills.glob("*/SKILL.md")} == {

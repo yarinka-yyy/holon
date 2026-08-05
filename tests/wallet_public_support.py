@@ -16,6 +16,7 @@ from holon_wallet.broadcast import (
 from holon_wallet.history import HistoryStore
 from holon_wallet.public_data import (
     AssetBalance,
+    NETWORK_BY_ID,
     NetworkSnapshot,
     PortfolioSnapshot,
     PublicDataStatus,
@@ -67,10 +68,13 @@ class StubPublicDataService:
         self,
         statuses: dict[str, PublicDataStatus] | None = None,
     ) -> None:
-        self.statuses = statuses or {
+        self.statuses = {
             "ethereum": PublicDataStatus.LIVE,
             "base": PublicDataStatus.LIVE,
+            "arbitrum": PublicDataStatus.LIVE,
+            "optimism": PublicDataStatus.LIVE,
         }
+        self.statuses.update(statuses or {})
         self.calls: list[tuple[str, str, tuple[str, ...]]] = []
 
     def refresh(
@@ -276,14 +280,22 @@ def public_snapshot(
     eth: int = 10**18,
     usdc: int = 2_500_000,
 ) -> NetworkSnapshot:
-    label, chain_id = (
-        ("Ethereum", 1) if network_id == "ethereum" else ("Base", 8453)
-    )
+    spec = NETWORK_BY_ID[network_id]
+    label, chain_id = spec.label, spec.chain_id
     if status is PublicDataStatus.UNAVAILABLE:
         return NetworkSnapshot(
             network_id, label, chain_id, status, None, None, None, None,
             "RPC_UNAVAILABLE",
         )
+    assets = tuple(
+        AssetBalance(
+            item.symbol,
+            eth if item.asset_id == "eth" else usdc if item.asset_id == "usdc" else 0,
+            item.decimals,
+            item.asset_id,
+        )
+        for item in spec.assets
+    )
     return NetworkSnapshot(
         network_id,
         label,
@@ -293,4 +305,6 @@ def public_snapshot(
         AssetBalance("ETH", eth, 18),
         AssetBalance("USDC", usdc, 6),
         "2026-07-20T12:00:00Z",
+        None,
+        assets,
     )

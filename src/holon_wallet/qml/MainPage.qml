@@ -128,16 +128,28 @@ PageState {
                     onTriggered: walletController.selectNetwork("all")
                 }
                 NetworkCard {
-                    objectName: "ethereumNetworkCard"; width: 148; height: 40
+                    objectName: "ethereumNetworkCard"; width: 40; height: 40; iconOnly: true
                     label: "Ethereum"; iconSource: "assets/ethereum.svg"
                     selected: walletController.selectedNetwork === "ethereum"
                     onTriggered: walletController.selectNetwork("ethereum")
                 }
                 NetworkCard {
-                    objectName: "baseNetworkCard"; width: 146; height: 40
+                    objectName: "baseNetworkCard"; width: 40; height: 40; iconOnly: true
                     label: "Base"; iconSource: "assets/base.png"
                     selected: walletController.selectedNetwork === "base"
                     onTriggered: walletController.selectNetwork("base")
+                }
+                NetworkCard {
+                    objectName: "arbitrumNetworkCard"; width: 40; height: 40; iconOnly: true
+                    label: "Arbitrum One"; iconSource: "assets/arbitrum.svg"
+                    selected: walletController.selectedNetwork === "arbitrum"
+                    onTriggered: walletController.selectNetwork("arbitrum")
+                }
+                NetworkCard {
+                    objectName: "optimismNetworkCard"; width: 40; height: 40; iconOnly: true
+                    label: "OP Mainnet"; iconSource: "assets/optimism.svg"
+                    selected: walletController.selectedNetwork === "optimism"
+                    onTriggered: walletController.selectNetwork("optimism")
                 }
             }
 

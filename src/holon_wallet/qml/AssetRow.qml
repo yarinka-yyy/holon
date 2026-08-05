@@ -52,7 +52,9 @@ Item {
         }
         Text {
             anchors.right: parent.right
-            text: root.amountsVisible ? (root.asset.amount || "Data unavailable") : "••••••"
+            text: root.amountsVisible
+                ? ((root.asset.amount || "Data unavailable") + (root.asset.incomplete ? " · partial" : ""))
+                : "••••••"
             color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 13
         }
     }

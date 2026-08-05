@@ -136,7 +136,8 @@ def test_portfolio_totals_and_breakdown_are_exact_and_fail_closed() -> None:
     unavailable = portfolio_to_map(snapshots, prices, "all")
     assert unavailable["totalAvailable"] is False
     assert unavailable["totalUsd"] == "$ —"
-    assert unavailable["assets"][0]["amount"] == "Data unavailable"
+    assert unavailable["assets"][0]["amount"] == "1 ETH"
+    assert unavailable["assets"][0]["incomplete"] is True
 
     ethereum = portfolio_to_map(snapshots, prices, "ethereum")
     assert ethereum["totalAvailable"] is True
@@ -163,6 +164,35 @@ def test_decimal_format_and_fee_estimate_do_not_use_float() -> None:
     assert is_unusually_high_base_fee(20_000_000_000_000, unavailable)
 
 
+def test_four_network_aggregation_keeps_zero_unpriced_assets_but_fails_closed_for_nonzero() -> None:
+    prices = PriceSnapshot(
+        8453, PriceStatus.LIVE,
+        (
+            AssetPrice("eth", "ETH", PriceStatus.LIVE, 250_000_000_000, 8, NOW),
+            AssetPrice("usdc", "USDC", PriceStatus.LIVE, 100_000_000, 8, NOW),
+        ), NOW,
+    )
+    snapshots = {
+        network_id: public_snapshot(network_id)
+        for network_id in ("ethereum", "base", "arbitrum", "optimism")
+    }
+    zero = portfolio_to_map(snapshots, prices, "all")
+    assert zero["totalAvailable"] is True
+    assert next(item for item in zero["assets"] if item["assetId"] == "eth")["amount"] == "4 ETH"
+    assert next(item for item in zero["assets"] if item["assetId"] == "op")["usd"] == "No price data"
+
+    optimism = snapshots["optimism"]
+    assets = tuple(
+        replace(item, atomic_units=10**18) if item.asset_id == "op" else item
+        for item in optimism.assets
+    )
+    snapshots["optimism"] = replace(optimism, assets=assets)
+    nonzero = portfolio_to_map(snapshots, prices, "all")
+    assert nonzero["totalAvailable"] is False
+    assert nonzero["totalUsd"] == "$ —"
+    assert next(item for item in nonzero["assets"] if item["assetId"] == "op")["amount"] == "1 OP"
+
+
 def test_lending_positions_extend_all_and_base_without_double_counting() -> None:
     prices = PriceSnapshot(
         8453, PriceStatus.LIVE,
@@ -183,15 +213,22 @@ def test_lending_positions_extend_all_and_base_without_double_counting() -> None
 
     combined = portfolio_to_map(snapshots, prices, "all", lending)
     assert combined["totalUsd"] == "$7,535.00"
-    assert [item["assetId"] for item in combined["assets"]] == [
-        "eth", "compound-v3", "aave-v3", "usdc",
+    assert [item["assetId"] for item in combined["assets"][:6]] == [
+        "eth", "usdc", "weth", "dai", "cbbtc", "usdt",
     ]
+    assert {item["assetId"] for item in combined["assets"][6:]} == {
+        "aave-v3", "compound-v3",
+    }
     assert combined["networks"][1]["totalUsd"] == "$5,033.00"
-    assert combined["assets"][1]["amount"] == "20.00 USDC"
+    assert next(
+        item for item in combined["assets"] if item["assetId"] == "compound-v3"
+    )["amount"] == "20.00 USDC"
 
     ethereum = portfolio_to_map(snapshots, prices, "ethereum", lending)
     assert ethereum["totalUsd"] == "$2,502.00"
-    assert [item["assetId"] for item in ethereum["assets"]] == ["eth", "usdc"]
+    assert [item["assetId"] for item in ethereum["assets"]] == [
+        "eth", "usdc", "weth", "dai", "cbbtc", "usdt",
+    ]
 
     lending[1]["position_atomic"] = None
     incomplete = portfolio_to_map(snapshots, prices, "base", lending)

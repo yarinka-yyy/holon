@@ -26,6 +26,7 @@ ALLOWED_IMPORT_ROOTS = {
     "sys",
     "threading",
     "time",
+    "types",
     "typing",
     "uuid",
 }

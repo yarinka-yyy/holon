@@ -20,6 +20,7 @@ $resourceRoot = Join-Path $sourceRoot "holon_wallet\resources"
 $lendingReadProfile = Join-Path $sourceRoot "holon_lending\read-profiles.json"
 $lendingActionProfile = Join-Path $sourceRoot "holon_lending\action-profiles.json"
 $baselinePolicy = Join-Path $sourceRoot "holon_policy\baseline-policy.json"
+$networkAssets = Join-Path $sourceRoot "holon_contracts\network-assets.json"
 $versionFile = Join-Path $PSScriptRoot "windows-version.txt"
 New-Item -ItemType Directory -Force -Path $buildRoot | Out-Null
 $iconPath = Join-Path $buildRoot "holon-wallet.ico"
@@ -49,6 +50,7 @@ try {
         --add-data "$lendingReadProfile;holon_lending" `
         --add-data "$lendingActionProfile;holon_lending" `
         --add-data "$baselinePolicy;holon_policy" `
+        --add-data "$networkAssets;holon_contracts" `
         --collect-data bip_utils `
         --collect-all coincurve `
         --collect-data web3 `

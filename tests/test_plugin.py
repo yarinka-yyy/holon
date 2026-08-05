@@ -300,12 +300,16 @@ class PluginTests(unittest.TestCase):
         self.assertNotIn("hidden", json.dumps(payload))
         self.assertNotIn("password", json.dumps(payload).lower())
 
-    def test_unavailable_balance_tool_keeps_two_networks_nonzero_ambiguous(self) -> None:
+    def test_unavailable_balance_tool_keeps_four_networks_nonzero_ambiguous(self) -> None:
         payload = json.loads(plugin.PluginRuntime(RaisingConnector()).handle_wallet_balances())
         self.assertEqual(payload["status"], "DEGRADED")
         self.assertEqual(payload["code"], "BALANCES_UNAVAILABLE")
-        self.assertEqual(len(payload["networks"]), 2)
-        self.assertTrue(all(item["balances"] is None for item in payload["networks"]))
+        self.assertEqual(payload["balance_schema_version"], "2")
+        self.assertEqual(len(payload["networks"]), 4)
+        self.assertTrue(all(
+            all(asset["status"] == "UNAVAILABLE" for asset in item["balances"])
+            for item in payload["networks"]
+        ))
 
     def test_lending_tools_return_safe_structured_unavailable(self) -> None:
         runtime = plugin.PluginRuntime(RaisingConnector())

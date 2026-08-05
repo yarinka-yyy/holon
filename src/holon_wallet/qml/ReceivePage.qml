@@ -9,22 +9,39 @@ PageState {
         onBackRequested: walletController.showMain()
     }
     Row {
-        x: 100; y: 148; spacing: 8
+        x: 157; y: 148; spacing: 8
         NetworkCard {
-            objectName: "receiveEthereum"; width: 153; height: 44
+            objectName: "receiveEthereum"; width: 44; height: 44; iconOnly: true
             label: "Ethereum"; iconSource: "assets/ethereum.svg"
             selected: walletController.receiveNetwork === "ethereum"
             onTriggered: walletController.selectReceiveNetwork("ethereum")
         }
         NetworkCard {
-            objectName: "receiveBase"; width: 153; height: 44
+            objectName: "receiveBase"; width: 44; height: 44; iconOnly: true
             label: "Base"; iconSource: "assets/base.png"
             selected: walletController.receiveNetwork === "base"
             onTriggered: walletController.selectReceiveNetwork("base")
         }
+        NetworkCard {
+            objectName: "receiveArbitrum"; width: 44; height: 44; iconOnly: true
+            label: "Arbitrum One"; iconSource: "assets/arbitrum.svg"
+            selected: walletController.receiveNetwork === "arbitrum"
+            onTriggered: walletController.selectReceiveNetwork("arbitrum")
+        }
+        NetworkCard {
+            objectName: "receiveOptimism"; width: 44; height: 44; iconOnly: true
+            label: "OP Mainnet"; iconSource: "assets/optimism.svg"
+            selected: walletController.receiveNetwork === "optimism"
+            onTriggered: walletController.selectReceiveNetwork("optimism")
+        }
+    }
+    Text {
+        x: 56; y: 202; width: 402; horizontalAlignment: Text.AlignHCenter
+        text: ({"ethereum": "Ethereum", "base": "Base", "arbitrum": "Arbitrum One", "optimism": "OP Mainnet"})[walletController.receiveNetwork] || "EVM network"
+        color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 13
     }
     SurfaceCard {
-        x: 96; y: 220; width: 322; height: 322
+        x: 96; y: 236; width: 322; height: 322
         Rectangle {
             anchors.centerIn: parent; width: 270; height: 270; radius: 18
             color: "#F4F7F6"
@@ -36,20 +53,20 @@ PageState {
         }
     }
     Text {
-        x: 56; y: 574; width: 402; horizontalAlignment: Text.AlignHCenter
+        x: 56; y: 590; width: 402; horizontalAlignment: Text.AlignHCenter
         text: walletController.activeProfile.label || "Account"
         color: Design.text; font.family: Design.fontFamily; font.pixelSize: 18
         font.weight: Font.DemiBold
     }
     Text {
-        objectName: "receiveAddress"; x: 56; y: 612; width: 402
+        objectName: "receiveAddress"; x: 56; y: 628; width: 402
         horizontalAlignment: Text.AlignHCenter; wrapMode: Text.WrapAnywhere
         text: walletController.activeProfile.address || ""
         color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 13
     }
     FormButton {
         id: copyReceiveAddress
-        objectName: "copyReceiveAddress"; x: 72; y: 684; width: 370; height: 56
+        objectName: "copyReceiveAddress"; x: 72; y: 700; width: 370; height: 56
         label: "Copy Address"
         onTriggered: {
             if (walletController.copyActiveAddress())
@@ -63,8 +80,8 @@ PageState {
         z: 3
     }
     Text {
-        x: 56; y: 760; width: 402; horizontalAlignment: Text.AlignHCenter
-        text: "Ethereum and Base use the same EVM address"
+        x: 56; y: 774; width: 402; horizontalAlignment: Text.AlignHCenter
+        text: "All supported EVM networks use the same Account address"
         color: Design.textFaint; font.family: Design.fontFamily; font.pixelSize: 11
     }
 }

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import json
+from dataclasses import replace
+
 import pytest
 
 from holon_wallet.controller import WalletController
 from holon_wallet.prices import AssetPrice, PriceSnapshot, PriceStatus
 from holon_wallet.public_cache import PublicCacheStore
-from holon_wallet.public_data import PublicDataStatus
+from holon_wallet.public_data import AssetBalance, AssetReadError, PublicDataStatus
 from holon_wallet.storage import StorageError, WalletPaths, atomic_write_json
 from holon_wallet.vault import VaultRepository
 from holon_wallet.wallet_crypto import generate_mnemonic
@@ -94,7 +97,7 @@ def test_controller_displays_cache_immediately_while_refresh_is_pending(tmp_path
         assert controller.publicDataRefreshing
         assert controller.publicDataUpdatedText == "Cached · updating…"
         assert "CACHED DATA" in controller.publicDataBanner
-        assert controller.portfolioData["totalAvailable"] is True
+        assert controller.portfolioData["totalAvailable"] is False
         assert controller.portfolioData["assets"][1]["amount"] == "9.50 USDC"
         assert controller.maximumTransferAmount(
             "base", "usdc", "0x" + "44" * 20,
@@ -125,7 +128,7 @@ def test_failed_refresh_preserves_last_known_values_and_marks_them_cached(tmp_pa
     )
     try:
         assert not controller.publicDataRefreshing
-        assert "CACHED PUBLIC DATA" in controller.publicDataBanner
+        assert controller.publicDataBanner == "Ethereum, Base unavailable · showing saved data"
         assert controller.portfolioData["totalAvailable"] is True
         assert controller.baseData["usdcValue"] == "2.5 USDC"
     finally:
@@ -158,7 +161,7 @@ def test_partial_refresh_atomically_keeps_old_network_and_saves_live_one(tmp_pat
     try:
         assert controller.ethereumData["ethValue"] == "3 ETH"
         assert controller.baseData["usdcValue"] == "2.5 USDC"
-        assert "CACHED PUBLIC DATA" in controller.publicDataBanner
+        assert controller.publicDataBanner.startswith("Ethereum unavailable · saved ")
     finally:
         controller.shutdown()
 
@@ -167,3 +170,67 @@ def test_partial_refresh_atomically_keeps_old_network_and_saves_live_one(tmp_pat
     by_network = {item.network_id: item for item in saved.networks}
     assert by_network["ethereum"].eth.atomic_units == 3 * 10**18
     assert by_network["base"].usdc.atomic_units == 2_500_000
+
+
+def test_v1_cache_is_read_without_rewrite_then_migrated_after_fresh_balance(tmp_path) -> None:
+    store = PublicCacheStore(WalletPaths(tmp_path))
+    address = "0x" + "11" * 20
+    atomic_write_json(store.path, {
+        "schema_version": 1,
+        "profiles": [{
+            "profile_id": "profile-1", "address": address,
+            "saved_at": "2026-07-20T12:00:00Z",
+            "networks": [{
+                "network_id": "ethereum", "chain_id": 1, "block_number": 123,
+                "updated_at": "2026-07-20T12:00:00Z",
+                "eth_atomic": str(10**18), "usdc_atomic": "2500000",
+            }],
+            "prices": {
+                "chain_id": 8453, "observed_at": 10,
+                "assets": [
+                    {"asset_id": "eth", "symbol": "ETH", "answer": 250_000_000_000, "decimals": 8, "updated_at": 10},
+                    {"asset_id": "usdc", "symbol": "USDC", "answer": 100_000_000, "decimals": 8, "updated_at": 10},
+                ],
+            },
+        }],
+    })
+
+    cached = store.load("profile-1", address)
+    assert cached is not None and cached.networks[0].eth.atomic_units == 10**18
+    assert json.loads(store.path.read_text(encoding="utf-8"))["schema_version"] == 1
+
+    store.save("profile-1", address, {"base": public_snapshot("base")}, prices())
+    assert json.loads(store.path.read_text(encoding="utf-8"))["schema_version"] == 2
+
+
+def test_partial_asset_refresh_keeps_only_failed_asset_from_cache(tmp_path) -> None:
+    store = PublicCacheStore(WalletPaths(tmp_path))
+    address = "0x" + "11" * 20
+    initial = replace(public_snapshot("base"), updated_at="2026-07-20T12:00:00Z")
+    initial_assets = tuple(
+        replace(item, atomic_units=9 * 10**18) if item.asset_id == "dai" else item
+        for item in initial.assets
+    )
+    store.save(
+        "profile-1", address,
+        {"base": replace(initial, assets=initial_assets)}, prices(),
+    )
+    fresh = replace(
+        public_snapshot("base", usdc=8_000_000),
+        updated_at="2026-07-21T12:00:00Z",
+    )
+    fresh_assets = tuple(item for item in fresh.assets if item.asset_id != "dai")
+    partial = replace(
+        fresh, status=PublicDataStatus.PARTIAL, assets=fresh_assets,
+        asset_errors=(AssetReadError("dai", "TOKEN_DATA_UNAVAILABLE"),),
+        error_code="ASSET_DATA_UNAVAILABLE",
+    )
+
+    store.save("profile-1", address, {"base": partial}, prices())
+    cached = store.load("profile-1", address)
+    assert cached is not None
+    assets = cached.networks[0].assets_by_id
+    assert assets["usdc"].atomic_units == 8_000_000
+    assert assets["dai"].atomic_units == 9 * 10**18
+    assert assets["usdc"].updated_at == "2026-07-21T12:00:00Z"
+    assert assets["dai"].updated_at == "2026-07-20T12:00:00Z"

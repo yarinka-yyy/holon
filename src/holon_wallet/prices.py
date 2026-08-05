@@ -12,6 +12,8 @@ from typing import Callable, Mapping, Protocol
 from requests import exceptions as request_errors
 from web3 import Web3
 
+from holon_contracts.registry import load_registry
+
 from .public_data import NetworkSnapshot, PublicDataStatus
 
 
@@ -245,15 +247,26 @@ def portfolio_to_map(
     selected_network: str,
     lending_protocols: object = None,
 ) -> dict[str, object]:
-    if selected_network not in {"all", "ethereum", "base"}:
+    registry = load_registry()
+    network_ids = tuple(item.network_id for item in registry.networks)
+    if selected_network not in {"all", *network_ids}:
         raise ValueError("Unsupported portfolio filter")
     selected_ids = (
-        ("ethereum", "base") if selected_network == "all" else (selected_network,)
+        tuple(item for item in network_ids if item in snapshots)
+        if selected_network == "all" else (selected_network,)
     )
     price_by_asset = prices.by_asset
+    asset_order = (
+        "eth", "usdc", "weth", "dai", "cbbtc",
+        "usdc-bridged", "usdt", "usdt0", "arb", "op",
+    )
     wallet_assets = tuple(
         _asset_model(asset_id, snapshots, price_by_asset, selected_ids)
-        for asset_id in ("eth", "usdc")
+        for asset_id in asset_order
+        if any(
+            deployment.asset_id == asset_id and deployment.network_id in selected_ids
+            for deployment in registry.deployments
+        )
     )
     lending_items = (
         list(lending_protocols) if isinstance(lending_protocols, (list, tuple))
@@ -279,10 +292,7 @@ def portfolio_to_map(
         and item["position_atomic"].isdecimal()
         and int(item["position_atomic"]) > 0
     )
-    asset_models = tuple(sorted(
-        wallet_assets + lending_assets,
-        key=_asset_sort_key,
-    ))
+    asset_models = wallet_assets + lending_assets
     all_lending_total = (
         sum(int(item["position_atomic"]) for item in lending_items)
         if known_lending_complete else None
@@ -292,7 +302,7 @@ def portfolio_to_map(
             network_id, snapshots[network_id], price_by_asset,
             all_lending_total if network_id == "base" and lending_protocols is not None else 0,
         )
-        for network_id in ("ethereum", "base")
+        for network_id in selected_ids
     )
     total_available = (
         lending_complete
@@ -401,57 +411,63 @@ def _asset_model(
     prices: Mapping[str, AssetPrice],
     selected_ids: tuple[str, ...],
 ) -> dict[str, object]:
-    symbol = "ETH" if asset_id == "eth" else "USDC"
-    label = "Ethereum" if asset_id == "eth" else "USD Coin"
-    decimals = 18 if asset_id == "eth" else 6
+    registry = load_registry()
+    meta = registry.asset_by_id[asset_id]
+    symbol, label, decimals = meta.display_symbol, meta.display_name, meta.decimals
     breakdown: list[dict[str, object]] = []
     atomic_total = 0
+    known_balances = 0
     balances_available = True
-    for network_id in ("ethereum", "base"):
-        snapshot = snapshots[network_id]
-        balance = snapshot.eth if asset_id == "eth" else snapshot.usdc
+    deployments = {
+        item.network_id for item in registry.deployments
+        if item.asset_id == asset_id and item.network_id in selected_ids
+    }
+    for network_id in selected_ids:
+        if network_id not in deployments:
+            continue
+        snapshot = snapshots.get(network_id)
+        balance = snapshot.assets_by_id.get(asset_id) if snapshot is not None else None
         available = (
-            snapshot.status in {PublicDataStatus.LIVE, PublicDataStatus.SIMULATED}
+            snapshot is not None
+            and snapshot.status in {
+                PublicDataStatus.LIVE, PublicDataStatus.PARTIAL,
+                PublicDataStatus.SIMULATED,
+            }
             and balance is not None
         )
         atomic = balance.atomic_units if available and balance is not None else None
-        if network_id in selected_ids:
-            balances_available = balances_available and available
-            if atomic is not None:
-                atomic_total += atomic
-        if network_id in selected_ids:
-            breakdown.append(
-                {
-                    "networkId": network_id,
-                    "label": snapshot.label,
-                    "available": available,
-                    "amount": (
-                        _format_token(atomic, decimals, symbol)
-                        if atomic is not None else "Data unavailable"
-                    ),
-                }
-            )
-    price = prices.get(asset_id)
-    usd_available = balances_available and price is not None and price.value is not None
+        balances_available = balances_available and available
+        if atomic is not None:
+            atomic_total += atomic
+            known_balances += 1
+        breakdown.append({
+            "networkId": network_id,
+            "label": snapshot.label if snapshot is not None else registry.network_by_id[network_id].display_name,
+            "available": available,
+            "amount": _format_token(atomic, decimals, symbol) if atomic is not None else "Data unavailable",
+        })
+    price = prices.get(meta.price_asset_id) if meta.price_asset_id else None
+    price_available = price is not None and price.value is not None
+    usd_available = balances_available and price_available
     usd = (
         Decimal(atomic_total).scaleb(-decimals) * price.value
         if usd_available and price is not None and price.value is not None
         else None
     )
+    contribution_available = balances_available and (price_available or atomic_total == 0)
     return {
         "assetId": asset_id,
         "isGasAsset": asset_id == "eth",
         "symbol": symbol,
         "label": label,
         "balanceAvailable": balances_available,
-        "amount": (
-            _format_token(atomic_total, decimals, symbol)
-            if balances_available else "Data unavailable"
-        ),
-        "totalAvailable": usd is not None,
-        "usd": format_usd(usd) if usd is not None else "Data unavailable",
-        "usdRaw": format(usd, "f") if usd is not None else "",
+        "amount": _format_token(atomic_total, decimals, symbol) if known_balances else "Data unavailable",
+        "incomplete": not balances_available,
+        "totalAvailable": contribution_available,
+        "usd": format_usd(usd) if usd is not None else "No price data" if balances_available else "Data unavailable",
+        "usdRaw": format(usd, "f") if usd is not None else "0" if contribution_available else "",
         "breakdown": breakdown,
+        "iconSource": meta.icon_path.removeprefix("qml/"),
     }
 
 
@@ -461,35 +477,37 @@ def _network_model(
     prices: Mapping[str, AssetPrice],
     lending_atomic: int | None = 0,
 ) -> dict[str, object]:
-    available = (
-        snapshot.status in {PublicDataStatus.LIVE, PublicDataStatus.SIMULATED}
-        and snapshot.eth is not None
-        and snapshot.usdc is not None
-    )
-    eth_price = prices.get("eth")
+    registry = load_registry()
+    total = Decimal(0)
+    available = snapshot.status in {
+        PublicDataStatus.LIVE, PublicDataStatus.PARTIAL, PublicDataStatus.SIMULATED,
+    }
+    by_id = snapshot.assets_by_id
+    for deployment in registry.deployments_by_network[network_id]:
+        meta = registry.asset_by_id[deployment.asset_id]
+        balance = by_id.get(deployment.asset_id)
+        if balance is None:
+            available = False
+            continue
+        price = prices.get(meta.price_asset_id) if meta.price_asset_id else None
+        if price is not None and price.value is not None:
+            total += Decimal(balance.atomic_units).scaleb(-meta.decimals) * price.value
+        elif balance.atomic_units:
+            available = False
     usdc_price = prices.get("usdc")
-    total = None
-    if (
-        available
-        and eth_price is not None
-        and eth_price.value is not None
-        and usdc_price is not None
-        and usdc_price.value is not None
-        and snapshot.eth is not None
-        and snapshot.usdc is not None
-        and lending_atomic is not None
-    ):
-        total = (
-            Decimal(snapshot.eth.atomic_units).scaleb(-18) * eth_price.value
-            + Decimal(snapshot.usdc.atomic_units).scaleb(-6) * usdc_price.value
-            + Decimal(lending_atomic).scaleb(-6) * usdc_price.value
-        )
+    if lending_atomic is None:
+        available = False
+    elif lending_atomic:
+        if usdc_price is None or usdc_price.value is None:
+            available = False
+        else:
+            total += Decimal(lending_atomic).scaleb(-6) * usdc_price.value
     return {
         "networkId": network_id,
         "label": snapshot.label,
         "status": snapshot.status.value,
-        "totalAvailable": total is not None,
-        "totalUsd": format_usd(total) if total is not None else "Data unavailable",
+        "totalAvailable": available,
+        "totalUsd": format_usd(total) if available else "Data unavailable",
     }
 
 

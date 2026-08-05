@@ -1813,14 +1813,15 @@ def test_public_refresh_filter_and_stale_result_are_safe(tmp_path) -> None:
     assert item.submitPassword(secret, secret)
     assert item.finishBackup()
 
-    assert service.calls[-1][2] == ("ethereum", "base")
+    assert service.calls[-1][2] == ("ethereum", "base", "arbitrum", "optimism")
     assert item.publicDataBanner == "LOCAL WALLET  ·  LIVE PUBLIC DATA"
     assert item.ethereumData["ethValue"] == "1 ETH"
     assert item.baseData["usdcValue"] == "2.5 USDC"
     assert item.selectNetwork("base")
     assert service.calls[-1][2] == ("base",)
     assert item.selectedNetwork == "base"
-    assert not item.selectNetwork("arbitrum")
+    assert item.selectNetwork("arbitrum")
+    assert service.calls[-1][2] == ("arbitrum",)
 
     current = dict(item.baseData)
     stale = public_snapshot("base", eth=99 * 10**18)
@@ -1877,7 +1878,7 @@ def test_public_startup_and_refresh_never_authenticate_or_decrypt_vault(
         ),
     )
     assert item.currentScreen == "main"
-    assert service.calls[-1][2] == ("ethereum", "base")
+    assert service.calls[-1][2] == ("ethereum", "base", "arbitrum", "optimism")
     assert item.refreshPublicData()
     assert service.calls[-1][0] == item.activeProfileId
 
@@ -1901,7 +1902,7 @@ def test_v2_routes_visibility_and_public_details_are_memory_only(tmp_path) -> No
     assert item.finishBackup()
 
     assert item.portfolioData["totalAvailable"] is True
-    assert item.portfolioData["totalUsd"] == "$5,005.00"
+    assert item.portfolioData["totalUsd"] == "$10,010.00"
     assert item.balancesVisible
     item.toggleBalancesVisibility()
     assert not item.balancesVisible
@@ -1911,7 +1912,9 @@ def test_v2_routes_visibility_and_public_details_are_memory_only(tmp_path) -> No
     assert item.receiveQrSource.endswith(item.activeProfile["address"])
     assert item.selectReceiveNetwork("ethereum")
     assert item.receiveNetwork == "ethereum"
-    assert not item.selectReceiveNetwork("arbitrum")
+    assert item.selectReceiveNetwork("arbitrum")
+    assert item.receiveNetwork == "arbitrum"
+    assert item.selectReceiveNetwork("optimism")
 
     item.showSettings()
     assert item.currentScreen == "settings"

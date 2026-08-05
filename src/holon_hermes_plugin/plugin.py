@@ -6,7 +6,9 @@ import json
 from collections import OrderedDict
 from typing import Any, Optional
 
-from holon_contracts import ContractEnvelope, MessageKind, make_envelope, new_action_id
+from holon_contracts import (
+    ContractEnvelope, MessageKind, load_registry, make_envelope, new_action_id,
+)
 
 from .guard import (
     PROTECTED_STATES,
@@ -58,19 +60,32 @@ def _validated_fallback(kind: MessageKind, value: dict[str, Any]) -> dict[str, A
 
 def _unavailable_balances() -> dict[str, Any]:
     networks = []
-    for network, chain_id in (("ethereum", 1), ("base", 8453)):
+    registry = load_registry()
+    for spec in registry.networks:
         networks.append(
             {
-                "network": network,
-                "chain_id": chain_id,
+                "network": spec.network_id,
+                "chain_id": spec.chain_id,
                 "status": "UNAVAILABLE",
                 "block_number": None,
                 "updated_at": None,
                 "error_code": "WALLET_UNAVAILABLE",
-                "balances": None,
+                "balances": [
+                    {
+                        "asset_id": deployment.asset_id,
+                        "asset": registry.asset_by_id[deployment.asset_id].display_symbol,
+                        "status": "UNAVAILABLE",
+                        "amount_atomic": None,
+                        "decimals": registry.asset_by_id[deployment.asset_id].decimals,
+                        "display": None,
+                        "error_code": "WALLET_UNAVAILABLE",
+                    }
+                    for deployment in registry.deployments_by_network[spec.network_id]
+                ],
             }
         )
     value = {
+        "balance_schema_version": "2",
         "status": "DEGRADED",
         "authority_available": False,
         "account": None,

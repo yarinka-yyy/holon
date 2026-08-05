@@ -10,6 +10,7 @@ def test_wallet_build_bundles_both_lending_profile_files() -> None:
     assert '--add-data "$lendingReadProfile;holon_lending"' in script
     assert 'holon_lending\\action-profiles.json' in script
     assert '--add-data "$lendingActionProfile;holon_lending"' in script
+    assert '--add-data "$networkAssets;holon_contracts"' in script
 
 
 def test_wallet_build_embeds_the_holon_application_icon() -> None:

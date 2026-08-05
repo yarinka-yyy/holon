@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "revision": "m6.01-2026-08-05",
+  "networks": [
+    {
+      "network_id": "ethereum", "display_name": "Ethereum", "chain_id": 1,
+      "native_asset_id": "eth", "rpc_env": "HOLON_ETHEREUM_RPC_URL",
+      "default_rpc": "https://ethereum-rpc.publicnode.com", "explorer_url": "https://etherscan.io",
+      "icon": {"path": "qml/assets/ethereum.svg", "source_url": "https://ethereum.org/en/assets/", "source_revision": "retrieved-2026-08-05", "source_sha256": "08925fc69488a7f37f922ce095585b1c06fbcf461f46784a741f78dd389d7ac1"},
+      "capabilities": ["balance", "receive", "transfer", "price"]
+    },
+    {
+      "network_id": "base", "display_name": "Base", "chain_id": 8453,
+      "native_asset_id": "eth", "rpc_env": "HOLON_BASE_RPC_URL",
+      "default_rpc": "https://base-rpc.publicnode.com", "explorer_url": "https://basescan.org",
+      "icon": {"path": "qml/assets/base.png", "source_url": "https://www.base.org/brand-kit", "source_revision": "retrieved-2026-08-05", "source_sha256": "9610f60abba4ba6535c47cb2caa0bc9a120bd8cd0de1f4477ab6967dfb2079c9"},
+      "capabilities": ["balance", "receive", "transfer", "price", "lending"]
+    },
+    {
+      "network_id": "arbitrum", "display_name": "Arbitrum One", "chain_id": 42161,
+      "native_asset_id": "eth", "rpc_env": "HOLON_ARBITRUM_RPC_URL",
+      "default_rpc": "https://arb1.arbitrum.io/rpc", "explorer_url": "https://arbiscan.io",
+      "icon": {"path": "qml/assets/arbitrum.svg", "source_url": "https://arbitrum.io/brandkit/1225_Arbitrum_Logomark_FullColor_ClearSpace.png", "source_revision": "1225-retrieved-2026-08-05", "source_sha256": "741ad44b95ee17b29a55637cfdc0cdaaf30c639b317857e58d54cd3b4bff4208"},
+      "capabilities": ["balance", "receive", "price"]
+    },
+    {
+      "network_id": "optimism", "display_name": "OP Mainnet", "chain_id": 10,
+      "native_asset_id": "eth", "rpc_env": "HOLON_OPTIMISM_RPC_URL",
+      "default_rpc": "https://mainnet.optimism.io", "explorer_url": "https://explorer.optimism.io",
+      "icon": {"path": "qml/assets/optimism.svg", "source_url": "https://cdn.sanity.io/images/y6ka751a/production/0619395edc911805bcea3268156418134c1c5b32-2500x1875.svg", "source_revision": "retrieved-2026-08-05", "source_sha256": "96cbddcadd14d6cd3f14b0ce72f0805cb73a9c21dd69105add0b14113de36b82"},
+      "capabilities": ["balance", "receive", "price"]
+    }
+  ],
+  "assets": [
+    {"asset_id": "eth", "display_symbol": "ETH", "onchain_symbols": ["ETH"], "display_name": "Ethereum", "decimals": 18, "icon": {"path": "qml/assets/ethereum.svg", "source_url": "https://ethereum.org/en/assets/", "source_revision": "retrieved-2026-08-05", "source_sha256": "08925fc69488a7f37f922ce095585b1c06fbcf461f46784a741f78dd389d7ac1"}, "price_asset_id": "eth"},
+    {"asset_id": "usdc", "display_symbol": "USDC", "onchain_symbols": ["USDC"], "display_name": "USD Coin", "decimals": 6, "icon": {"path": "qml/assets/usdc.webp", "source_url": "https://www.circle.com/pressroom", "source_revision": "retrieved-2026-08-05", "source_sha256": "647446ca7a4f177ecb01d32c745729d077338dad413789ccd5dd7c0104741bc7"}, "price_asset_id": "usdc"},
+    {"asset_id": "usdc-bridged", "display_symbol": "USDC.e", "onchain_symbols": ["USDC"], "display_name": "Bridged USD Coin", "decimals": 6, "icon": {"path": "qml/assets/usdc.webp", "source_url": "https://www.circle.com/pressroom", "source_revision": "retrieved-2026-08-05", "source_sha256": "647446ca7a4f177ecb01d32c745729d077338dad413789ccd5dd7c0104741bc7"}, "price_asset_id": null},
+    {"asset_id": "usdt", "display_symbol": "USDT", "onchain_symbols": ["USDT"], "display_name": "Tether USD", "decimals": 6, "icon": {"path": "qml/assets/usdt.svg", "source_url": "https://tether.to/images/logoCircle.svg", "source_revision": "retrieved-2026-08-05", "source_sha256": "7c9f13b068996186c4df0f3dcdeeeb86e11cee6d8a9e7597cec19ccee164d7c5"}, "price_asset_id": null},
+    {"asset_id": "usdt0", "display_symbol": "USDT0", "onchain_symbols": ["USD₮0"], "display_name": "USDT0", "decimals": 6, "icon": {"path": "qml/assets/usdt0.svg", "source_url": "https://docs.usdt0.to/downloads/usdt0/Symbol_USDT0_Secondary.svg", "source_revision": "retrieved-2026-08-05", "source_sha256": "b2c377563f8efeefbf5d5ad58b91a95037c37a8f2b28850f4fd5bb694b87b051"}, "price_asset_id": null},
+    {"asset_id": "weth", "display_symbol": "WETH", "onchain_symbols": ["WETH"], "display_name": "Wrapped Ether", "decimals": 18, "icon": {"path": "qml/assets/weth.svg", "source_url": "https://ethereum-optimism.github.io/data/WETH/logo.png", "source_revision": "e326e5ce8da5b6f90239bf1c7bf6203cc26ddfd3", "source_sha256": "0a7fc292596820fe066ce8ce3fd6e2ad9d479c2993f905e410ef74f2062a83ec"}, "price_asset_id": "eth"},
+    {"asset_id": "dai", "display_symbol": "DAI", "onchain_symbols": ["DAI"], "display_name": "Dai Stablecoin", "decimals": 18, "icon": {"path": "qml/assets/dai.svg", "source_url": "https://ethereum-optimism.github.io/data/DAI/logo.svg", "source_revision": "e326e5ce8da5b6f90239bf1c7bf6203cc26ddfd3", "source_sha256": "b5489c4ab0ae1590cac42f95c832c43b17aadc9c4cbafca6ee09b537a654c965"}, "price_asset_id": null},
+    {"asset_id": "cbbtc", "display_symbol": "cbBTC", "onchain_symbols": ["cbBTC"], "display_name": "Coinbase Wrapped BTC", "decimals": 8, "icon": {"path": "qml/assets/cbbtc.svg", "source_url": "https://images.ctfassets.net/sygt3q11s4a9/6R07qw0kh3o7bIzoN7wvmO/f6e9465003d4a5df8c9fe3bb82313d57/unnamed__22_.png", "source_revision": "coinbase-launch-2024-09-12", "source_sha256": "40d65d32f5e8f96198ca0605a2007b47025d61866500986e349b7057c4acf3c2"}, "price_asset_id": null},
+    {"asset_id": "arb", "display_symbol": "ARB", "onchain_symbols": ["ARB"], "display_name": "Arbitrum", "decimals": 18, "icon": {"path": "qml/assets/arbitrum.svg", "source_url": "https://arbitrum.io/brandkit/1225_Arbitrum_Logomark_FullColor_ClearSpace.png", "source_revision": "1225-retrieved-2026-08-05", "source_sha256": "741ad44b95ee17b29a55637cfdc0cdaaf30c639b317857e58d54cd3b4bff4208"}, "price_asset_id": null},
+    {"asset_id": "op", "display_symbol": "OP", "onchain_symbols": ["OP"], "display_name": "Optimism", "decimals": 18, "icon": {"path": "qml/assets/op.svg", "source_url": "https://ethereum-optimism.github.io/data/OP/logo.png", "source_revision": "e326e5ce8da5b6f90239bf1c7bf6203cc26ddfd3", "source_sha256": "d725838cd5521465d11c53c5d2edda37ee12c116bf0137614a0a98100de0ad5b"}, "price_asset_id": null}
+  ],
+  "deployments": [
+    {"network_id":"ethereum","asset_id":"eth","kind":"native","contract_address":null,"capabilities":["balance","receive","transfer","price"],"source_url":"https://ethereum.org/en/developers/docs/networks/","source_revision":"retrieved-2026-08-05","reviewed":true},
+    {"network_id":"ethereum","asset_id":"usdc","kind":"erc20","contract_address":"0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48","capabilities":["balance","receive","transfer","price"],"source_url":"https://developers.circle.com/stablecoins/usdc-contract-addresses","source_revision":"retrieved-2026-08-05","reviewed":true},
+    {"network_id":"ethereum","asset_id":"usdt","kind":"erc20","contract_address":"0xdAC17F958D2ee523a2206206994597C13D831ec7","capabilities":["balance","receive"],"source_url":"https://tether.to/en/supported-protocols/","source_revision":"retrieved-2026-08-05","reviewed":true},
+    {"network_id":"ethereum","asset_id":"weth","kind":"erc20","contract_address":"0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2","capabilities":["balance","receive","price"],"source_url":"https://ethereum-optimism.github.io/optimism.tokenlist.json","source_revision":"e326e5ce8da5b6f90239bf1c7bf6203cc26ddfd3","reviewed":true},
+    {"network_id":"ethereum","asset_id":"dai","kind":"erc20","contract_address":"0x6B175474E89094C44Da98b954EedeAC495271d0F","capabilities":["balance","receive"],"source_url":"https://ethereum-optimism.github.io/optimism.tokenlist.json","source_revision":"e326e5ce8da5b6f90239bf1c7bf6203cc26ddfd3","reviewed":true},
+    {"network_id":"ethereum","asset_id":"cbbtc","kind":"erc20","contract_address":"0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf","capabilities":["balance","receive"],"source_url":"https://www.coinbase.com/en-ca/cbbtc","source_revision":"retrieved-2026-08-05","reviewed":true},
+    {"network_id":"base","asset_id":"eth","kind":"native","contract_address":null,"capabilities":["balance","receive","transfer","price"],"source_url":"https://docs.base.org/base-chain/network-information","source_revision":"retrieved-2026-08-05","reviewed":true},
+    {"network_id":"base","asset_id":"usdc","kind":"erc20","contract_address":"0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913","capabilities":["balance","receive","transfer","price","lending"],"source_url":"https://developers.circle.com/stablecoins/usdc-contract-addresses","source_revision":"retrieved-2026-08-05","reviewed":true},
+    {"network_id":"base","asset_id":"weth","kind":"erc20","contract_address":"0x4200000000000000000000000000000000000006","capabilities":["balance","receive","price"],"source_url":"https://ethereum-optimism.github.io/optimism.tokenlist.json","source_revision":"e326e5ce8da5b6f90239bf1c7bf6203cc26ddfd3","reviewed":true},
+    {"network_id":"base","asset_id":"dai","kind":"erc20","contract_address":"0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb","capabilities":["balance","receive"],"source_url":"https://ethereum-optimism.github.io/optimism.tokenlist.json","source_revision":"e326e5ce8da5b6f90239bf1c7bf6203cc26ddfd3","reviewed":true},
+    {"network_id":"base","asset_id":"cbbtc","kind":"erc20","contract_address":"0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf","capabilities":["balance","receive"],"source_url":"https://www.coinbase.com/en-ca/cbbtc","source_revision":"retrieved-2026-08-05","reviewed":true},
+    {"network_id":"arbitrum","asset_id":"eth","kind":"native","contract_address":null,"capabilities":["balance","receive","price"],"source_url":"https://docs.arbitrum.io/for-devs/dev-tools-and-resources/chain-info","source_revision":"retrieved-2026-08-05","reviewed":true},
+    {"network_id":"arbitrum","asset_id":"usdc","kind":"erc20","contract_address":"0xaf88d065e77c8cC2239327C5EDb3A432268e5831","capabilities":["balance","receive","price"],"source_url":"https://developers.circle.com/stablecoins/usdc-contract-addresses","source_revision":"retrieved-2026-08-05","reviewed":true},
+    {"network_id":"arbitrum","asset_id":"usdc-bridged","kind":"erc20","contract_address":"0xFF970A61A04b1Ca14834A43f5dE4533eBDDB5CC8","capabilities":["balance","receive"],"source_url":"https://developers.circle.com/stablecoins/usdc-contract-addresses","source_revision":"retrieved-2026-08-05","reviewed":true},
+    {"network_id":"arbitrum","asset_id":"usdt0","kind":"erc20","contract_address":"0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9","capabilities":["balance","receive"],"source_url":"https://docs.usdt0.to/technical-documentation/deployments","source_revision":"retrieved-2026-08-05","reviewed":true},
+    {"network_id":"arbitrum","asset_id":"weth","kind":"erc20","contract_address":"0x82aF49447D8a07e3bd95BD0d56f35241523fBab1","capabilities":["balance","receive","price"],"source_url":"https://bridge.arbitrum.io/token-list-42161.json","source_revision":"retrieved-2026-08-05","reviewed":true},
+    {"network_id":"arbitrum","asset_id":"dai","kind":"erc20","contract_address":"0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1","capabilities":["balance","receive"],"source_url":"https://bridge.arbitrum.io/token-list-42161.json","source_revision":"retrieved-2026-08-05","reviewed":true},
+    {"network_id":"arbitrum","asset_id":"cbbtc","kind":"erc20","contract_address":"0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf","capabilities":["balance","receive"],"source_url":"https://www.coinbase.com/en-ca/cbbtc","source_revision":"retrieved-2026-08-05","reviewed":true},
+    {"network_id":"arbitrum","asset_id":"arb","kind":"erc20","contract_address":"0x912CE59144191C1204E64559FE8253a0e49E6548","capabilities":["balance","receive"],"source_url":"https://docs.arbitrum.foundation/arb-token","source_revision":"retrieved-2026-08-05","reviewed":true},
+    {"network_id":"optimism","asset_id":"eth","kind":"native","contract_address":null,"capabilities":["balance","receive","price"],"source_url":"https://docs.optimism.io/op-mainnet/network-information/connecting-to-op","source_revision":"retrieved-2026-08-05","reviewed":true},
+    {"network_id":"optimism","asset_id":"usdc","kind":"erc20","contract_address":"0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85","capabilities":["balance","receive","price"],"source_url":"https://developers.circle.com/stablecoins/usdc-contract-addresses","source_revision":"retrieved-2026-08-05","reviewed":true},
+    {"network_id":"optimism","asset_id":"usdc-bridged","kind":"erc20","contract_address":"0x7F5c764cBc14f9669B88837ca1490cCa17c31607","capabilities":["balance","receive"],"source_url":"https://developers.circle.com/stablecoins/usdc-contract-addresses","source_revision":"retrieved-2026-08-05","reviewed":true},
+    {"network_id":"optimism","asset_id":"usdt","kind":"erc20","contract_address":"0x94b008aA00579c1307B0EF2c499aD98a8ce58e58","capabilities":["balance","receive"],"source_url":"https://ethereum-optimism.github.io/optimism.tokenlist.json","source_revision":"e326e5ce8da5b6f90239bf1c7bf6203cc26ddfd3","reviewed":true},
+    {"network_id":"optimism","asset_id":"weth","kind":"erc20","contract_address":"0x4200000000000000000000000000000000000006","capabilities":["balance","receive","price"],"source_url":"https://ethereum-optimism.github.io/optimism.tokenlist.json","source_revision":"e326e5ce8da5b6f90239bf1c7bf6203cc26ddfd3","reviewed":true},
+    {"network_id":"optimism","asset_id":"dai","kind":"erc20","contract_address":"0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1","capabilities":["balance","receive"],"source_url":"https://ethereum-optimism.github.io/optimism.tokenlist.json","source_revision":"e326e5ce8da5b6f90239bf1c7bf6203cc26ddfd3","reviewed":true},
+    {"network_id":"optimism","asset_id":"op","kind":"erc20","contract_address":"0x4200000000000000000000000000000000000042","capabilities":["balance","receive"],"source_url":"https://ethereum-optimism.github.io/optimism.tokenlist.json","source_revision":"e326e5ce8da5b6f90239bf1c7bf6203cc26ddfd3","reviewed":true}
+  ]
+}

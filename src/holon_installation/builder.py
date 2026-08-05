@@ -114,7 +114,10 @@ class PackageBuilder:
             self._copy_file(source, root / "payload" / "plugin" / source.name)
         for package_name in ("holon_contracts", "holon_guard_ipc"):
             package = self.source_root / "src" / package_name
-            for source in sorted(package.glob("*.py")):
+            sources = sorted(package.glob("*.py"))
+            if package_name == "holon_contracts":
+                sources.append(package / "network-assets.json")
+            for source in sources:
                 self._copy_file(
                     source, root / "payload" / "plugin" / package_name / source.name,
                 )

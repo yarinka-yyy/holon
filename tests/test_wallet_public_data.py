@@ -6,9 +6,12 @@ from holon_wallet.public_data import (
     BASE_USDC,
     ETHEREUM_USDC,
     AssetBalance,
+    AssetReadError,
     NetworkSnapshot,
+    NETWORK_BY_ID,
     PublicDataService,
     PublicDataStatus,
+    Web3PublicRpc,
     format_units,
     snapshot_to_map,
 )
@@ -62,6 +65,8 @@ def test_reads_both_allowlisted_networks_and_preserves_real_zero() -> None:
     clients = {
         "ethereum": FakeRpc(1, native=0, usdc=1_250_000),
         "base": FakeRpc(8453, native=2 * 10**18, usdc=0),
+        "arbitrum": FakeRpc(42161),
+        "optimism": FakeRpc(10),
     }
     endpoints: list[tuple[str, str]] = []
 
@@ -72,7 +77,7 @@ def test_reads_both_allowlisted_networks_and_preserves_real_zero() -> None:
     result = PublicDataService(factory, {}).refresh("profile-1", ADDRESS)
 
     assert result.profile_id == "profile-1"
-    ethereum, base = result.networks
+    ethereum, base, arbitrum, optimism = result.networks
     assert ethereum.status is PublicDataStatus.LIVE
     assert ethereum.eth == AssetBalance("ETH", 0, 18)
     assert ethereum.eth.display_value == "0 ETH"
@@ -80,12 +85,16 @@ def test_reads_both_allowlisted_networks_and_preserves_real_zero() -> None:
     assert base.status is PublicDataStatus.LIVE
     assert base.eth.display_value == "2 ETH"
     assert base.usdc.display_value == "0 USDC"
+    assert arbitrum.status is PublicDataStatus.LIVE
+    assert optimism.status is PublicDataStatus.LIVE
     assert clients["ethereum"].contracts == [ETHEREUM_USDC, ETHEREUM_USDC]
     assert clients["base"].contracts == [BASE_USDC, BASE_USDC]
-    assert endpoints == [
+    assert set(endpoints) == {
         ("ethereum", "https://ethereum-rpc.publicnode.com"),
-        ("base", "https://mainnet.base.org"),
-    ]
+        ("base", "https://base-rpc.publicnode.com"),
+        ("arbitrum", "https://arb1.arbitrum.io/rpc"),
+        ("optimism", "https://mainnet.optimism.io"),
+    }
 
 
 def test_wrong_chain_and_invalid_token_metadata_are_unavailable() -> None:
@@ -95,7 +104,7 @@ def test_wrong_chain_and_invalid_token_metadata_are_unavailable() -> None:
     }
     service = PublicDataService(lambda network, _endpoint: clients[network], {})
 
-    result = service.refresh("profile-1", ADDRESS)
+    result = service.refresh("profile-1", ADDRESS, ("ethereum", "base"))
 
     assert result.networks[0].status is PublicDataStatus.UNAVAILABLE
     assert result.networks[0].error_code == "WRONG_CHAIN"
@@ -118,7 +127,7 @@ def test_timeout_retries_once_and_endpoint_override_is_not_exposed() -> None:
     snapshot = service.refresh("profile-1", ADDRESS, ("ethereum",)).networks[0]
 
     assert calls == 2
-    assert snapshot.error_code == "RPC_UNAVAILABLE"
+    assert snapshot.error_code == "RPC_TIMEOUT"
     assert "token-value" not in repr(snapshot)
     assert "token-value" not in repr(snapshot_to_map(snapshot))
 
@@ -130,7 +139,7 @@ def test_partial_results_and_simulated_label_stay_distinct() -> None:
     }
     result = PublicDataService(
         lambda network, _endpoint: clients[network], {},
-    ).refresh("profile-1", ADDRESS)
+    ).refresh("profile-1", ADDRESS, ("ethereum", "base"))
 
     assert [item.status for item in result.networks] == [
         PublicDataStatus.LIVE,
@@ -149,8 +158,124 @@ def test_formatting_never_turns_small_nonzero_value_into_zero() -> None:
 def test_unknown_network_is_refused_before_provider_use() -> None:
     service = PublicDataService(lambda *_args: (_ for _ in ()).throw(AssertionError()), {})
     try:
-        service.refresh("profile-1", ADDRESS, ("arbitrum",))
+        service.refresh("profile-1", ADDRESS, ("polygon",))
     except ValueError as error:
         assert str(error) == "Unsupported public-data network"
     else:
         raise AssertionError("Unknown network was accepted")
+
+
+def _abi_symbol(value: str) -> str:
+    raw = value.encode("utf-8")
+    padded = raw + b"\0" * ((32 - len(raw) % 32) % 32)
+    return "0x" + (32).to_bytes(32, "big").hex() + len(raw).to_bytes(32, "big").hex() + padded.hex()
+
+
+class _Response:
+    status_code = 200
+
+    def __init__(self, value) -> None:
+        self.value = value
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self):
+        return self.value
+
+
+def test_batch_is_pinned_to_block_and_missing_item_uses_one_fallback(monkeypatch) -> None:
+    spec = NETWORK_BY_ID["optimism"]
+    assets = {item.asset_id: item for item in spec.assets}
+    calls: list[object] = []
+
+    def post(_endpoint, *, json, timeout):
+        assert timeout == 5.0
+        calls.append(json)
+        requests = json if isinstance(json, list) else [json]
+        output = []
+        for request in requests:
+            identity = request["id"]
+            if isinstance(json, list) and identity == "op:symbol":
+                continue
+            asset_id, kind = identity.split(":")
+            if request["method"] in {"eth_call", "eth_getBalance"}:
+                assert request["params"][-1] == "0x7b"
+            value = "0x0"
+            if kind == "decimals":
+                value = hex(assets[asset_id].decimals)
+            elif kind == "symbol":
+                value = _abi_symbol(assets[asset_id].onchain_symbols[0])
+            output.append({"jsonrpc": "2.0", "id": identity, "result": value})
+        return _Response(output if isinstance(json, list) else output[0])
+
+    monkeypatch.setattr("holon_wallet.public_data.requests.post", post)
+    balances, errors = Web3PublicRpc("https://rpc.example").asset_balances(
+        spec, ADDRESS, 123,
+    )
+
+    assert not errors
+    assert [item.asset_id for item in balances] == [item.asset_id for item in spec.assets]
+    assert len(calls) == 2
+    assert isinstance(calls[0], list)
+    assert calls[1]["id"] == "op:symbol"
+
+
+def test_one_token_metadata_error_does_not_discard_other_batch_balances(monkeypatch) -> None:
+    spec = NETWORK_BY_ID["optimism"]
+    assets = {item.asset_id: item for item in spec.assets}
+
+    def post(_endpoint, *, json, timeout):
+        del timeout
+        output = []
+        for request in json:
+            asset_id, kind = request["id"].split(":")
+            value = "0x0"
+            if kind == "decimals":
+                value = hex(assets[asset_id].decimals)
+            elif kind == "symbol":
+                symbol = "BROKEN" if asset_id == "dai" else assets[asset_id].onchain_symbols[0]
+                value = _abi_symbol(symbol)
+            output.append({"jsonrpc": "2.0", "id": request["id"], "result": value})
+        return _Response(output)
+
+    monkeypatch.setattr("holon_wallet.public_data.requests.post", post)
+    balances, errors = Web3PublicRpc("https://rpc.example").asset_balances(
+        spec, ADDRESS, 123,
+    )
+
+    assert "dai" not in {item.asset_id for item in balances}
+    assert errors == (AssetReadError("dai", "TOKEN_METADATA_INVALID"),)
+    assert {item.asset_id for item in balances} == {item.asset_id for item in spec.assets} - {"dai"}
+
+
+def test_json_rpc_rate_limit_retries_whole_network_once(monkeypatch) -> None:
+    posts = 0
+
+    def post(_endpoint, *, json, timeout):
+        nonlocal posts
+        del json, timeout
+        posts += 1
+        return _Response({
+            "jsonrpc": "2.0", "id": None,
+            "error": {"code": -32005, "message": "rate limit exceeded"},
+        })
+
+    class RateLimitedRpc(FakeRpc):
+        def asset_balances(self, spec, address, block):
+            return Web3PublicRpc("https://rpc.example").asset_balances(
+                spec, address, block,
+            )
+
+    monkeypatch.setattr("holon_wallet.public_data.requests.post", post)
+    service = PublicDataService(
+        lambda _network, _endpoint: RateLimitedRpc(10), {},
+    )
+
+    snapshot = service.refresh(
+        "profile-1", ADDRESS, ("optimism",),
+    ).networks[0]
+
+    assert posts == 2
+    assert snapshot.status is PublicDataStatus.UNAVAILABLE
+    assert snapshot.error_code == "RATE_LIMITED"

@@ -8,6 +8,7 @@ from typing import Any, Mapping
 
 from .codes import RefusalCode
 from .model import SCHEMA_VERSION, ActionState, MessageKind
+from .registry import load_registry
 from .schemas import PAYLOAD_FIELDS
 from .violations import ContractViolation
 
@@ -24,7 +25,7 @@ GUARD_STATES = frozenset(
     {"NORMAL", "ENTERING", "ACTIVE", "EXITING", "RECOVERY_REQUIRED", "SIGNING_DISABLED"}
 )
 BALANCE_STATUSES = frozenset({"READY", "PARTIAL", "DEGRADED"})
-NETWORK_STATUSES = frozenset({"LIVE", "UNAVAILABLE"})
+NETWORK_STATUSES = frozenset({"LIVE", "PARTIAL", "UNAVAILABLE"})
 NETWORK_FIELDS = frozenset(
     {
         "network", "chain_id", "status", "block_number", "updated_at",
@@ -32,6 +33,9 @@ NETWORK_FIELDS = frozenset(
     }
 )
 ASSET_FIELDS = frozenset({"asset", "amount_atomic", "decimals", "display"})
+ASSET_V2_FIELDS = frozenset(
+    {"asset_id", "asset", "status", "amount_atomic", "decimals", "display", "error_code"}
+)
 BALANCE_CODES = frozenset(
     {
         "BALANCES_READY",
@@ -55,6 +59,9 @@ BALANCE_ERROR_CODES = frozenset(
         "DATA_UNAVAILABLE",
         "RPC_TIMEOUT",
         "RPC_UNAVAILABLE",
+        "RATE_LIMITED",
+        "ASSET_DATA_UNAVAILABLE",
+        "TOKEN_DATA_UNAVAILABLE",
         "TOKEN_METADATA_INVALID",
         "WALLET_NOT_CREATED",
         "WALLET_UNAVAILABLE",
@@ -307,7 +314,11 @@ def _network(value: object, network: str, chain_id: int) -> None:
 
 
 def validate_wallet_balances(payload: Mapping[str, Any]) -> None:
-    if set(payload) != PAYLOAD_FIELDS[MessageKind.WALLET_BALANCES]:
+    v1_fields = PAYLOAD_FIELDS[MessageKind.WALLET_BALANCES] - {"balance_schema_version"}
+    if "balance_schema_version" not in payload:
+        _validate_wallet_balances_v1(payload, v1_fields)
+        return
+    if set(payload) != PAYLOAD_FIELDS[MessageKind.WALLET_BALANCES] or payload.get("balance_schema_version") != "2":
         raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid balance payload.")
     _safe_text(payload)
     if payload.get("status") not in BALANCE_STATUSES:
@@ -328,14 +339,18 @@ def validate_wallet_balances(payload: Mapping[str, Any]) -> None:
         address = account.get("address")
         if not isinstance(address, str) or ADDRESS_RE.fullmatch(address) is None:
             raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid public Account.")
+    registry = load_registry()
     networks = payload.get("networks")
-    if not isinstance(networks, list) or len(networks) != 2:
+    if not isinstance(networks, list) or len(networks) != len(registry.networks):
         raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid balance networks.")
-    _network(networks[0], "ethereum", 1)
-    _network(networks[1], "base", 8453)
-    live = sum(item["status"] == "LIVE" for item in networks)
-    expected_status = "READY" if live == 2 else "PARTIAL" if live == 1 else "DEGRADED"
-    if payload.get("status") != expected_status or (account is None and live):
+    for value, spec in zip(networks, registry.networks, strict=True):
+        _network_v2(value, spec.network_id, spec.chain_id)
+    available = sum(item["status"] in {"LIVE", "PARTIAL"} for item in networks)
+    expected_status = (
+        "READY" if all(item["status"] == "LIVE" for item in networks)
+        else "PARTIAL" if available else "DEGRADED"
+    )
+    if payload.get("status") != expected_status or (account is None and available):
         raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Inconsistent balance status.")
     expected_code = {
         "READY": "BALANCES_READY",
@@ -343,6 +358,88 @@ def validate_wallet_balances(payload: Mapping[str, Any]) -> None:
     }.get(expected_status)
     if expected_code is not None and payload.get("code") != expected_code:
         raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Inconsistent balance code.")
+
+
+def _validate_wallet_balances_v1(
+    payload: Mapping[str, Any], fields: frozenset[str],
+) -> None:
+    if set(payload) != fields:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid balance payload.")
+    _safe_text(payload)
+    if payload.get("status") not in BALANCE_STATUSES or payload.get("code") not in BALANCE_CODES:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid balance payload.")
+    if payload.get("message") != BALANCE_MESSAGES[payload["code"]] or payload.get("authority_available") is not False:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid balance payload.")
+    account = payload.get("account")
+    if account is not None and (
+        not isinstance(account, Mapping) or set(account) != {"label", "address"}
+        or not isinstance(account.get("label"), str) or not account["label"]
+        or not isinstance(account.get("address"), str) or ADDRESS_RE.fullmatch(account["address"]) is None
+    ):
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid public Account.")
+    networks = payload.get("networks")
+    if not isinstance(networks, list) or len(networks) != 2:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid balance networks.")
+    _network(networks[0], "ethereum", 1)
+    _network(networks[1], "base", 8453)
+    live = sum(item["status"] == "LIVE" for item in networks)
+    expected = "READY" if live == 2 else "PARTIAL" if live == 1 else "DEGRADED"
+    if payload.get("status") != expected or (account is None and live):
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Inconsistent balance status.")
+    expected_code = {
+        "READY": "BALANCES_READY",
+        "PARTIAL": "BALANCES_PARTIAL",
+    }.get(expected)
+    if expected_code is not None and payload.get("code") != expected_code:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Inconsistent balance code.")
+
+
+def _network_v2(value: object, network_id: str, chain_id: int) -> None:
+    if not isinstance(value, Mapping) or set(value) != NETWORK_FIELDS:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid network balance.")
+    if value.get("network") != network_id or value.get("chain_id") != chain_id:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid network balance.")
+    registry = load_registry()
+    deployments = registry.deployments_by_network[network_id]
+    balances = value.get("balances")
+    if not isinstance(balances, list) or len(balances) != len(deployments):
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid balance assets.")
+    for asset, deployment in zip(balances, deployments, strict=True):
+        _asset_v2(asset, deployment.asset_id)
+    status = value.get("status")
+    block, updated, error = value.get("block_number"), value.get("updated_at"), value.get("error_code")
+    if status == "UNAVAILABLE":
+        if block is not None or updated is not None or error not in BALANCE_ERROR_CODES:
+            raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid unavailable balance.")
+        if any(item["status"] != "UNAVAILABLE" for item in balances):
+            raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid unavailable balance.")
+        return
+    if status not in {"LIVE", "PARTIAL"} or not isinstance(block, str) or NON_NEGATIVE_RE.fullmatch(block) is None:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid live balance.")
+    if not isinstance(updated, str) or UTC_TIMESTAMP_RE.fullmatch(updated) is None:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid balance timestamp.")
+    if status == "LIVE" and (error is not None or any(item["status"] != "LIVE" for item in balances)):
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid live balance.")
+    if status == "PARTIAL" and (error != "ASSET_DATA_UNAVAILABLE" or all(item["status"] == "LIVE" for item in balances)):
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid partial balance.")
+
+
+def _asset_v2(value: object, asset_id: str) -> None:
+    if not isinstance(value, Mapping) or set(value) != ASSET_V2_FIELDS or value.get("asset_id") != asset_id:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid balance asset.")
+    registry = load_registry()
+    spec = registry.asset_by_id[asset_id]
+    if value.get("asset") != spec.display_symbol or value.get("decimals") != spec.decimals:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid balance asset.")
+    if value.get("status") == "UNAVAILABLE":
+        if value.get("amount_atomic") is not None or value.get("display") is not None or value.get("error_code") not in BALANCE_ERROR_CODES:
+            raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid unavailable asset.")
+        return
+    atomic = value.get("amount_atomic")
+    if value.get("status") != "LIVE" or value.get("error_code") is not None or not isinstance(atomic, str) or NON_NEGATIVE_RE.fullmatch(atomic) is None:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid balance amount.")
+    if value.get("display") != _display_units(int(atomic), spec.decimals, spec.display_symbol):
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid balance display.")
 
 
 def _lending_identity(payload: Mapping[str, Any]) -> None:

@@ -36,11 +36,16 @@ def test_live_worker_read_uses_public_header_without_authentication(tmp_path: Pa
         result = read_active_balances(repository, settings, service)
     validate_wallet_balances(result)
     assert result["status"] == "READY"
+    assert result["balance_schema_version"] == "2"
     assert result["authority_available"] is False
     assert result["account"] == {"label": "Main Account", "address": profile.address}
-    assert [item["network"] for item in result["networks"]] == ["ethereum", "base"]
+    assert [item["network"] for item in result["networks"]] == [
+        "ethereum", "base", "arbitrum", "optimism",
+    ]
     assert all(item["status"] == "LIVE" for item in result["networks"])
-    assert sorted(call[2][0] for call in service.calls) == ["base", "ethereum"]
+    assert sorted(call[2][0] for call in service.calls) == [
+        "arbitrum", "base", "ethereum", "optimism",
+    ]
 
 
 def test_network_failures_are_independent_and_never_zero_fallback(tmp_path: Path) -> None:
@@ -51,11 +56,12 @@ def test_network_failures_are_independent_and_never_zero_fallback(tmp_path: Path
     })
     result = read_active_balances(repository, settings, service)
     validate_wallet_balances(result)
-    ethereum, base = result["networks"]
+    ethereum, base, _arbitrum, _optimism = result["networks"]
     assert result["status"] == "PARTIAL"
-    assert ethereum["balances"] is None
+    assert all(item["status"] == "UNAVAILABLE" for item in ethereum["balances"])
     assert ethereum["error_code"] == "RPC_UNAVAILABLE"
-    assert base["balances"]["ETH"]["amount_atomic"] == str(10**18)
+    eth = next(item for item in base["balances"] if item["asset_id"] == "eth")
+    assert eth["amount_atomic"] == str(10**18)
 
 
 def test_missing_and_malformed_vault_are_safe(tmp_path: Path) -> None:
@@ -65,7 +71,10 @@ def test_missing_and_malformed_vault_are_safe(tmp_path: Path) -> None:
     )
     assert missing["code"] == "WALLET_NOT_CREATED"
     validate_wallet_balances(missing)
-    assert all(item["balances"] is None for item in missing["networks"])
+    assert all(
+        all(asset["status"] == "UNAVAILABLE" for asset in item["balances"])
+        for item in missing["networks"]
+    )
     paths.data_dir.mkdir(parents=True, exist_ok=True)
     paths.vault.write_text("not json", encoding="utf-8")
     malformed = read_active_balances(
@@ -129,7 +138,7 @@ def test_overall_deadline_marks_only_unfinished_networks_unavailable(
         result = read_active_balances(repository, settings, SlowService())
     validate_wallet_balances(result)
     release.set()
-    ethereum, base = result["networks"]
+    ethereum, base, _arbitrum, _optimism = result["networks"]
     assert result["status"] == "PARTIAL"
     assert ethereum["status"] == "UNAVAILABLE"
     assert ethereum["error_code"] == "RPC_TIMEOUT"

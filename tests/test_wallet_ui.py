@@ -454,6 +454,15 @@ def test_create_ui_persists_after_done_and_enables_wallet_controls(
     assert child(app, "allNetworksCard").property("enabled")
     assert child(app, "ethereumNetworkCard").property("enabled")
     assert child(app, "baseNetworkCard").property("enabled")
+    assert child(app, "arbitrumNetworkCard").property("enabled")
+    assert child(app, "optimismNetworkCard").property("enabled")
+    assert child(app, "allNetworksCard").property("width") == pytest.approx(148)
+    for name in (
+        "ethereumNetworkCard", "baseNetworkCard",
+        "arbitrumNetworkCard", "optimismNetworkCard",
+    ):
+        assert child(app, name).property("width") == pytest.approx(40)
+        assert child(app, name).property("height") == pytest.approx(40)
     assert app.controller.publicDataBanner == "LOCAL WALLET  ·  LIVE PUBLIC DATA"
 
     invoke(child(app, "transactionsAction"), "trigger")
@@ -522,7 +531,7 @@ def test_existing_vault_opens_public_main_and_refreshes_without_password(
     try:
         assert app.controller.currentScreen == "main"
         assert app.controller.activeProfile["address"] == record.summary.address
-        assert service.calls[-1][2] == ("ethereum", "base")
+        assert service.calls[-1][2] == ("ethereum", "base", "arbitrum", "optimism")
         assert child(app, "signingLockedChip").property("visible")
         assert child(app, "signingLockedChipLabel").property("text") == (
             "Signing locked"
@@ -535,7 +544,7 @@ def test_existing_vault_opens_public_main_and_refreshes_without_password(
         assert app.controller.currentScreen == "main"
         assert app.controller.activeProfileId == second.summary.profile_id
         assert service.calls[-1][0] == second.summary.profile_id
-        assert service.calls[-1][2] == ("ethereum", "base")
+        assert service.calls[-1][2] == ("ethereum", "base", "arbitrum", "optimism")
     finally:
         app.close()
 
@@ -1102,6 +1111,10 @@ def test_v2_receive_settings_privacy_and_transaction_details(tmp_path, qt_app) -
         )
         invoke(child(app, "receiveEthereum"), "trigger")
         assert app.controller.receiveNetwork == "ethereum"
+        invoke(child(app, "receiveArbitrum"), "trigger")
+        assert app.controller.receiveNetwork == "arbitrum"
+        invoke(child(app, "receiveOptimism"), "trigger")
+        assert app.controller.receiveNetwork == "optimism"
         invoke(child(app, "copyReceiveAddress"), "trigger")
         QTest.qWait(50)
         assert QGuiApplication.clipboard().text() == app.controller.activeProfile["address"]
@@ -1215,6 +1228,19 @@ def test_compound_logo_uses_original_mark_with_white_wordmark() -> None:
     assert "<circle" not in asset
 
 
+def test_network_icons_are_accessible_but_new_networks_do_not_enter_send() -> None:
+    qml = Path(__file__).parents[1] / "src" / "holon_wallet" / "qml"
+    card = (qml / "NetworkCard.qml").read_text(encoding="utf-8")
+    send = (qml / "SendPage.qml").read_text(encoding="utf-8")
+
+    assert "Accessible.name: label" in card
+    assert "activeFocusOnTab: controlEnabled" in card
+    assert "cardMouse.containsMouse" in card and "tooltipText" in card
+    assert 'subtitle: "Ethereum or Base · ETH or USDC"' in send
+    assert "Arbitrum One" not in send
+    assert "OP Mainnet" not in send
+
+
 def test_terminal_result_icons_are_never_reused_from_the_rotating_spinner() -> None:
     qml = Path(__file__).parents[1] / "src" / "holon_wallet" / "qml"
     for name, spinner, terminal in (
@@ -1277,7 +1303,7 @@ def test_network_filters_refresh_and_history_record_render(tmp_path, qt_app) -> 
     app = make_app(qt_app, repository, service)
     try:
         assert app.controller.selectedNetwork == "all"
-        assert service.calls[-1][2] == ("ethereum", "base")
+        assert service.calls[-1][2] == ("ethereum", "base", "arbitrum", "optimism")
         assert app.controller.ethereumData["ethValue"] == "1 ETH"
         assert app.controller.baseData["usdcValue"] == "2.5 USDC"
 

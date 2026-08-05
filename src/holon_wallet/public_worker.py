@@ -35,23 +35,37 @@ def _active_profile(
     return active
 
 
-def _asset_payload(balance) -> dict[str, object]:
+def _asset_payload(spec, balance, error_code: str | None) -> dict[str, object]:
+    if balance is None:
+        return {
+            "asset_id": spec.asset_id,
+            "asset": spec.symbol,
+            "status": "UNAVAILABLE",
+            "amount_atomic": None,
+            "decimals": spec.decimals,
+            "display": None,
+            "error_code": error_code or "DATA_UNAVAILABLE",
+        }
     return {
+        "asset_id": spec.asset_id,
         "asset": balance.symbol,
+        "status": "LIVE",
         "amount_atomic": str(balance.atomic_units),
         "decimals": balance.decimals,
         "display": balance.display_value,
+        "error_code": None,
     }
 
 
 def _network_payload(snapshot: NetworkSnapshot) -> dict[str, object]:
-    if (
-        snapshot.status is not PublicDataStatus.LIVE
-        or snapshot.eth is None
-        or snapshot.usdc is None
-        or snapshot.block_number is None
-        or snapshot.updated_at is None
-    ):
+    spec = next(item for item in NETWORKS if item.network_id == snapshot.network_id)
+    by_id = snapshot.assets_by_id
+    errors = snapshot.errors_by_id
+    balances = [
+        _asset_payload(asset, by_id.get(asset.asset_id), errors.get(asset.asset_id))
+        for asset in spec.assets
+    ]
+    if snapshot.status is PublicDataStatus.UNAVAILABLE:
         return {
             "network": snapshot.network_id,
             "chain_id": snapshot.chain_id,
@@ -59,19 +73,17 @@ def _network_payload(snapshot: NetworkSnapshot) -> dict[str, object]:
             "block_number": None,
             "updated_at": None,
             "error_code": snapshot.error_code or "DATA_UNAVAILABLE",
-            "balances": None,
+            "balances": balances,
         }
+    partial = any(item["status"] == "UNAVAILABLE" for item in balances)
     return {
         "network": snapshot.network_id,
         "chain_id": snapshot.chain_id,
-        "status": "LIVE",
+        "status": "PARTIAL" if partial else snapshot.status.value,
         "block_number": str(snapshot.block_number),
         "updated_at": snapshot.updated_at,
-        "error_code": None,
-        "balances": {
-            "ETH": _asset_payload(snapshot.eth),
-            "USDC": _asset_payload(snapshot.usdc),
-        },
+        "error_code": "ASSET_DATA_UNAVAILABLE" if partial else snapshot.error_code,
+        "balances": balances,
     }
 
 
@@ -84,6 +96,7 @@ def _empty_networks(error_code: str) -> list[dict[str, object]]:
 
 def _degraded(code: str, message: str, error_code: str) -> dict[str, object]:
     return {
+        "balance_schema_version": "2",
         "status": "DEGRADED",
         "authority_available": False,
         "account": None,
@@ -151,19 +164,21 @@ def read_active_balances(
             "BALANCES_UNAVAILABLE", "Wallet balances are unavailable.",
             "ACCOUNT_CHANGED",
         )
-    live = sum(snapshot.status is PublicDataStatus.LIVE for snapshot in networks)
+    network_payloads = [_network_payload(snapshot) for snapshot in networks]
+    available = sum(item["status"] in {"LIVE", "PARTIAL"} for item in network_payloads)
     status, code, message = (
         ("READY", "BALANCES_READY", "Wallet balances are available.")
-        if live == 2 else
+        if all(item["status"] == "LIVE" for item in network_payloads) else
         ("PARTIAL", "BALANCES_PARTIAL", "Some Wallet balances are unavailable.")
-        if live == 1 else
+        if available else
         ("DEGRADED", "BALANCES_UNAVAILABLE", "Wallet balances are unavailable.")
     )
     return {
+        "balance_schema_version": "2",
         "status": status,
         "authority_available": False,
         "account": {"label": active.label, "address": active.address},
-        "networks": [_network_payload(snapshot) for snapshot in networks],
+        "networks": network_payloads,
         "code": code,
         "message": message,
     }

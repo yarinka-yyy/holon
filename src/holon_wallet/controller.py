@@ -321,6 +321,8 @@ class WalletController(QObject):
         self._public_data_generation = 0
         self._public_data_updated_text = "Not refreshed"
         self._cached_network_ids: set[str] = set()
+        self._unavailable_network_ids: set[str] = set()
+        self._unavailable_assets: set[tuple[str, str]] = set()
         self._price_cached = False
         self._price_snapshot = PriceSnapshot.unavailable(
             int(datetime.now(UTC).timestamp()), "NOT_REFRESHED",
@@ -668,7 +670,39 @@ class WalletController(QObject):
                 else "LOCAL WALLET  ·  REFRESHING PUBLIC DATA"
             )
         if self._cached_network_ids or self._price_cached:
+            failed = self._unavailable_network_ids & set(self._selected_network_ids())
+            if failed == set(NETWORK_BY_ID):
+                return "Unable to update balances · Check your internet connection"
+            if failed:
+                names = ", ".join(NETWORK_BY_ID[item].label for item in NETWORK_BY_ID if item in failed)
+                if len(failed) == 1:
+                    updated = self._network_snapshots[next(iter(failed))].updated_at
+                    if updated:
+                        return f"{names} unavailable · saved {_display_local_time(updated)}"
+                return f"{names} unavailable · showing saved data"
+            asset_failures = [
+                item for item in self._unavailable_assets
+                if item[0] in self._selected_network_ids()
+            ]
+            if asset_failures:
+                network_id, asset_id = sorted(asset_failures)[0]
+                spec = next(item for item in NETWORK_BY_ID[network_id].assets if item.asset_id == asset_id)
+                return f"{spec.symbol} · {NETWORK_BY_ID[network_id].label} · Data unavailable"
             return "LOCAL WALLET  ·  CACHED PUBLIC DATA"
+        failed = self._unavailable_network_ids & set(self._selected_network_ids())
+        if failed == set(NETWORK_BY_ID):
+            return "Unable to update balances · Check your internet connection"
+        if failed:
+            names = ", ".join(NETWORK_BY_ID[item].label for item in NETWORK_BY_ID if item in failed)
+            return f"{names} · Data unavailable"
+        asset_failures = [
+            item for item in self._unavailable_assets
+            if item[0] in self._selected_network_ids()
+        ]
+        if asset_failures:
+            network_id, asset_id = sorted(asset_failures)[0]
+            spec = next(item for item in NETWORK_BY_ID[network_id].assets if item.asset_id == asset_id)
+            return f"{spec.symbol} · {NETWORK_BY_ID[network_id].label} · Data unavailable"
         statuses = [
             self._network_snapshots[network_id].status
             for network_id in self._selected_network_ids()
@@ -677,7 +711,7 @@ class WalletController(QObject):
             return "LOCAL WALLET  ·  LIVE PUBLIC DATA"
         if statuses and all(status is PublicDataStatus.SIMULATED for status in statuses):
             return "LOCAL WALLET  ·  SIMULATED PUBLIC DATA"
-        if any(status in {PublicDataStatus.LIVE, PublicDataStatus.SIMULATED} for status in statuses):
+        if any(status in {PublicDataStatus.LIVE, PublicDataStatus.PARTIAL, PublicDataStatus.SIMULATED} for status in statuses):
             return "LOCAL WALLET  ·  PARTIAL PUBLIC DATA"
         return "LOCAL WALLET  ·  NETWORK DATA UNAVAILABLE"
 
@@ -1456,7 +1490,7 @@ class WalletController(QObject):
 
     @Slot(str, result=bool)
     def selectReceiveNetwork(self, network_id: str) -> bool:
-        if network_id not in {"ethereum", "base"}:
+        if network_id not in NETWORK_BY_ID:
             return False
         if network_id != self._receive_network:
             self._receive_network = network_id
@@ -1646,6 +1680,10 @@ class WalletController(QObject):
         if active is None or self._closed:
             return False
         network_ids = self._selected_network_ids()
+        self._unavailable_network_ids.difference_update(network_ids)
+        self._unavailable_assets = {
+            item for item in self._unavailable_assets if item[0] not in network_ids
+        }
         self._public_data_generation += 1
         generation = self._public_data_generation
         self._public_data_refreshing = True
@@ -1832,7 +1870,7 @@ class WalletController(QObject):
         if self._state.profiles and not self._mainnet_in_progress:
             self._receive_network = (
                 self._selected_network
-                if self._selected_network in {"ethereum", "base"}
+                if self._selected_network in NETWORK_BY_ID
                 else "base"
             )
             self.receiveNetworkChanged.emit()
@@ -4085,7 +4123,7 @@ class WalletController(QObject):
             and snapshot.profile_id == active.profile_id
             and snapshot.address == active.address
         )
-        live_network_received = False
+        fresh_network_ids: set[str] = set()
         if not valid_bundle:
             self._preserve_or_unavailable(requested, "RPC_UNAVAILABLE")
         else:
@@ -4095,10 +4133,15 @@ class WalletController(QObject):
                 self._preserve_or_unavailable(requested, "DATA_INVALID")
             else:
                 for item in snapshot.networks:
-                    if item.status in {PublicDataStatus.LIVE, PublicDataStatus.SIMULATED}:
+                    if item.status in {PublicDataStatus.LIVE, PublicDataStatus.PARTIAL, PublicDataStatus.SIMULATED}:
                         self._network_snapshots[item.network_id] = item
                         self._cached_network_ids.discard(item.network_id)
-                        live_network_received |= item.status is PublicDataStatus.LIVE
+                        if item.status in {PublicDataStatus.LIVE, PublicDataStatus.PARTIAL}:
+                            fresh_network_ids.add(item.network_id)
+                        self._unavailable_assets.update(
+                            (item.network_id, error.asset_id)
+                            for error in item.asset_errors
+                        )
                     else:
                         self._preserve_or_unavailable(
                             (item.network_id,),
@@ -4129,11 +4172,15 @@ class WalletController(QObject):
             f"{'Cached · updated' if cached else 'Updated'} {_display_local_time(max(timestamps))}"
             if timestamps else "Refresh unavailable"
         )
-        if live_network_received:
+        if fresh_network_ids:
             try:
                 self._public_cache_store.save(
                     active.profile_id, active.address,
-                    self._network_snapshots, self._price_snapshot,
+                    {
+                        network_id: self._network_snapshots[network_id]
+                        for network_id in fresh_network_ids
+                    },
+                    self._price_snapshot,
                 )
             except StorageError:
                 pass
@@ -4210,10 +4257,11 @@ class WalletController(QObject):
         self, network_ids: tuple[str, ...], code: str,
     ) -> None:
         for network_id in network_ids:
+            self._unavailable_network_ids.add(network_id)
             current = self._network_snapshots[network_id]
             if (
-                current.status in {PublicDataStatus.LIVE, PublicDataStatus.SIMULATED}
-                and current.eth is not None and current.usdc is not None
+                current.status in {PublicDataStatus.LIVE, PublicDataStatus.PARTIAL, PublicDataStatus.SIMULATED}
+                and bool(current.assets)
             ):
                 self._cached_network_ids.add(network_id)
             else:
