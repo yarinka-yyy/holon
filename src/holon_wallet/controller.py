@@ -73,6 +73,7 @@ from .earn_view import earn_portfolio_to_map
 from .lending_action import prepare_lending_action
 from .model import ProfileSummary, WalletShellState
 from .module_view import module_page_to_map
+from .perpdex_action import PerpDexExecutionResult, PerpDexExecutor
 from .public_data import (
     NETWORKS,
     NETWORK_BY_ID,
@@ -203,6 +204,7 @@ class WalletController(QObject):
     guardNoticeChanged = Signal()
     lendingRecoveryChanged = Signal()
     lendingNoticeChanged = Signal()
+    perpDexChanged = Signal()
     _publicDataReady = Signal(int, object)
     _lendingDataReady = Signal(int, object)
     _transferReady = Signal(int, object)
@@ -212,6 +214,8 @@ class WalletController(QObject):
     _approvalReady = Signal(int, object)
     _revokeReady = Signal(int, object)
     _revokeExecutionReady = Signal(int, object)
+    _perpDexPrepareReady = Signal(int, object)
+    _perpDexExecutionReady = Signal(int, object)
 
     def __init__(
         self,
@@ -235,6 +239,7 @@ class WalletController(QObject):
         lending_portfolio_service: LendingPortfolioService | None = None,
         earn_portfolio_service: EarnPortfolioService | None = None,
         module_registry: CapabilityRegistry | None = None,
+        perpdex_executor: PerpDexExecutor | None = None,
     ) -> None:
         super().__init__()
         self._repository = repository or VaultRepository()
@@ -261,6 +266,30 @@ class WalletController(QObject):
             LendingAnalyticsStore(self._repository.paths.lending_analytics),
         )
         self._module_registry = module_registry or CapabilityRegistry()
+        self._perpdex_adapter = None
+        try:
+            capability = self._module_registry.resolve("holon.perpdex.action.wallet")
+            descriptor = capability.declaration.descriptor
+            candidate = capability.contribution
+            if (
+                capability.declaration.kind == "protected_action_adapter"
+                and descriptor.get("adapter_version") == "1"
+                and descriptor.get("profile_id") == "hyperliquid-mainnet-v1"
+                and getattr(candidate, "adapter_version", None) == "1"
+                and getattr(candidate, "profile_id", None) == "hyperliquid-mainnet-v1"
+            ):
+                configure = getattr(candidate, "configure", None)
+                if callable(configure):
+                    configure(self._repository.paths.data_dir)
+                self._perpdex_adapter = candidate
+        except Exception:
+            self._perpdex_adapter = None
+        self._perpdex_executor = (
+            perpdex_executor
+            if perpdex_executor is not None
+            else PerpDexExecutor(self._repository, self._perpdex_adapter)
+            if self._perpdex_adapter is not None else None
+        )
         if earn_portfolio_service is None:
             earn_registry = EarnProviderRegistry()
             earn_registry.register(LendingEarnProvider(self._lending_portfolio_service))
@@ -342,6 +371,13 @@ class WalletController(QObject):
         self._external_transfer: dict[str, object] | None = None
         self._external_completion: Callable[[dict[str, object]], None] | None = None
         self._external_begin_delivery: Callable[[], bool] | None = None
+        self._perpdex_external: dict[str, object] | None = None
+        self._perpdex_completion: Callable[[dict[str, object]], None] | None = None
+        self._perpdex_begin_delivery: Callable[[], bool] | None = None
+        self._perpdex_bundle = None
+        self._perpdex_result: PerpDexExecutionResult | None = None
+        self._perpdex_in_progress = False
+        self._perpdex_generation = 0
         self._guard_status_sender: Callable[[dict[str, object]], None] | None = None
         self._lending_notice = ""
         self._mainnet_in_progress = False
@@ -439,6 +475,9 @@ class WalletController(QObject):
         self._transfer_expiry_timer = QTimer(self)
         self._transfer_expiry_timer.setSingleShot(True)
         self._transfer_expiry_timer.timeout.connect(self._expire_transfer)
+        self._perpdex_expiry_timer = QTimer(self)
+        self._perpdex_expiry_timer.setSingleShot(True)
+        self._perpdex_expiry_timer.timeout.connect(self._expire_perpdex)
         self._revoke_expiry_timer = QTimer(self)
         self._revoke_expiry_timer.setSingleShot(True)
         self._revoke_expiry_timer.timeout.connect(self._expire_revoke)
@@ -455,6 +494,8 @@ class WalletController(QObject):
         self._approvalReady.connect(self._accept_allowances)
         self._revokeReady.connect(self._accept_revoke_preflight)
         self._revokeExecutionReady.connect(self._accept_revoke_result)
+        self._perpDexPrepareReady.connect(self._accept_perpdex_prepare)
+        self._perpDexExecutionReady.connect(self._accept_perpdex_execution)
         self._initialize()
 
     @Property("QVariantList", notify=profilesChanged)
@@ -488,6 +529,33 @@ class WalletController(QObject):
     @Property("QVariantMap", constant=True)
     def modulePageData(self) -> dict[str, object]:
         return dict(self._module_page)
+
+    @Property("QVariantMap", notify=perpDexChanged)
+    def perpDexAction(self) -> dict[str, object]:
+        bundle = self._perpdex_bundle
+        if bundle is None:
+            return {}
+        return {
+            "operationId": bundle.operation_id,
+            "actionType": bundle.intent.action_type.value,
+            "account": bundle.account,
+            "intent": bundle.intent.to_mapping(),
+            "createdAt": bundle.created_at,
+            "expiresAt": bundle.expires_at,
+            "disclosure": bundle.disclosure or "",
+            "phases": [{
+                "phaseType": phase.phase_type.value,
+                "semantic": dict(phase.semantic),
+            } for phase in bundle.phases],
+        }
+
+    @Property("QVariantMap", notify=perpDexChanged)
+    def perpDexResult(self) -> dict[str, object]:
+        return self._perpdex_result.to_mapping() if self._perpdex_result is not None else {}
+
+    @Property(bool, notify=perpDexChanged)
+    def perpDexExecutionInProgress(self) -> bool:
+        return self._perpdex_in_progress
 
     @Property(str, notify=guardNoticeChanged)
     def guardOpenNotice(self) -> str:
@@ -683,7 +751,7 @@ class WalletController(QObject):
 
     @Property(bool, notify=transferChanged)
     def canCloseWallet(self) -> bool:
-        return not self._mainnet_in_progress
+        return not self._mainnet_in_progress and not self._perpdex_in_progress
 
     @Property(bool, notify=transferChanged)
     def hideForLendingReceipt(self) -> bool:
@@ -1427,7 +1495,49 @@ class WalletController(QObject):
             lambda completed, current=generation: self._transfer_finished(current, completed),
         )
 
+    def prepareExternalModule(
+        self,
+        request: dict[str, object],
+        completion: Callable[[dict[str, object]], None],
+        begin_delivery: Callable[[], bool] | None = None,
+    ) -> None:
+        active = self._state.active_profile
+        if (
+            active is None or self._closed or self._flow != "none"
+            or self._perpdex_adapter is None or self._perpdex_executor is None
+            or self._perpdex_external is not None or self._perpdex_bundle is not None
+            or self._transfer_flow.pending is not None
+            or self._transfer_flow.current is not None
+            or self._mainnet_in_progress or self._perpdex_in_progress
+            or request.get("module_id") != "holon.perpdex"
+            or request.get("capability_id") != "holon.perpdex.action.wallet"
+            or request.get("profile_id") != "hyperliquid-mainnet-v1"
+        ):
+            completion(self._external_refusal(request, "WALLET_BUSY"))
+            return
+        bundle = request.get("bundle")
+        if not isinstance(bundle, Mapping):
+            completion(self._external_refusal(request, "PERPDEX_BUNDLE_INVALID"))
+            return
+        self._perpdex_external = dict(request)
+        self._perpdex_completion = completion
+        self._perpdex_begin_delivery = begin_delivery
+        self._perpdex_generation += 1
+        generation = self._perpdex_generation
+        account = {"address": active.address, "label": active.label}
+        self.perpDexChanged.emit()
+        future = self._transfer_executor.submit(
+            self._perpdex_adapter.verify, dict(bundle), account,
+        )
+        future.add_done_callback(
+            lambda completed, current=generation: self._perpDexPrepareReady.emit(
+                current, completed,
+            ),
+        )
+
     def cancelExternalTransfer(self, request: dict[str, object]) -> dict[str, object]:
+        if self._perpdex_external is not None:
+            return self._cancel_external_perpdex(request)
         context = self._external_transfer
         action = self._transfer_flow.current
         if (
@@ -1454,6 +1564,20 @@ class WalletController(QObject):
         }
 
     def expireExternalRequest(self, request: dict[str, object]) -> bool:
+        if self._perpdex_external is not None:
+            context = self._perpdex_external
+            if (
+                request.get("flow_id") != context.get("flow_id")
+                or request.get("action_id") != context.get("action_id")
+            ):
+                return False
+            operation_id = str(context.get("action_id", ""))
+            try:
+                self._perpdex_adapter.mark_operation(operation_id, "EXPIRED")
+            except Exception:
+                pass
+            self._clear_perpdex_action()
+            return True
         context = self._external_transfer
         if (
             context is None
@@ -1472,7 +1596,12 @@ class WalletController(QObject):
         request: dict[str, object], code: str,
     ) -> dict[str, object]:
         return {
-            "authority_version": AUTHORITY_VERSION, "kind": "transfer_refused",
+            "authority_version": AUTHORITY_VERSION,
+            "kind": (
+                "module_action_refused"
+                if request.get("kind") == "prepare_module_action"
+                else "transfer_refused"
+            ),
             "flow_id": request.get("flow_id"), "action_id": request.get("action_id"),
             "code": code,
         }
@@ -1732,6 +1861,87 @@ class WalletController(QObject):
         self._cancel_transfer_request(clear_recipient=True)
         self._set_screen("main")
 
+    @Slot(result=bool)
+    def beginPerpDexExecution(self) -> bool:
+        active = self._state.active_profile
+        if (
+            self._perpdex_bundle is None or self._perpdex_external is None
+            or self._perpdex_in_progress or self._closed
+            or self._current_screen != "perpdex_review"
+            or active is None
+            or active.address.lower() != self._perpdex_bundle.account.lower()
+        ):
+            return False
+        expires = datetime.fromisoformat(
+            self._perpdex_bundle.expires_at.removesuffix("Z") + "+00:00"
+        )
+        if expires <= datetime.now(UTC):
+            self._expire_perpdex()
+            return False
+        self._set_screen("perpdex_password")
+        return True
+
+    @Slot(str, result=bool)
+    def submitPerpDexExecution(self, password: str) -> bool:
+        active = self._state.active_profile
+        if (
+            len(password) < MIN_PASSWORD_LENGTH or active is None
+            or self._perpdex_bundle is None or self._perpdex_external is None
+            or self._perpdex_executor is None or self._perpdex_in_progress
+            or self._closed or self._current_screen != "perpdex_password"
+            or active.address.lower() != self._perpdex_bundle.account.lower()
+        ):
+            return False
+        self._perpdex_expiry_timer.stop()
+        self._perpdex_in_progress = True
+        self._perpdex_result = None
+        self._perpdex_generation += 1
+        generation = self._perpdex_generation
+        bundle = self._perpdex_bundle.to_mapping()
+        account = {"address": active.address, "label": active.label}
+        self.perpDexChanged.emit()
+        self._set_screen("perpdex_submit")
+        future = self._transfer_executor.submit(
+            self._perpdex_executor.execute,
+            bundle, password, active.profile_id, account,
+        )
+        del password
+        future.add_done_callback(
+            lambda completed, current=generation: self._perpDexExecutionReady.emit(
+                current, completed,
+            ),
+        )
+        return True
+
+    @Slot()
+    def cancelPerpDexAction(self) -> None:
+        if self._perpdex_in_progress or self._perpdex_external is None:
+            return
+        operation_id = str(self._perpdex_external.get("action_id", ""))
+        try:
+            self._perpdex_adapter.mark_operation(operation_id, "REJECTED")
+        except Exception:
+            pass
+        self._notify_perpdex("REJECTED", "ACTION_CANCELLED")
+        self._clear_perpdex_action()
+        self._set_screen("main")
+
+    @Slot()
+    def returnToPerpDexReview(self) -> None:
+        if (
+            not self._perpdex_in_progress
+            and self._perpdex_bundle is not None
+            and self._current_screen == "perpdex_password"
+        ):
+            self._set_screen("perpdex_review")
+
+    @Slot()
+    def finishPerpDexExecution(self) -> None:
+        if self._perpdex_in_progress:
+            return
+        self._clear_perpdex_action()
+        self._set_screen("main")
+
     @Slot(str, result=bool)
     def checkMainnetStatus(self, action_id: str) -> bool:
         if self._closed or self._receipt_checking:
@@ -1901,7 +2111,12 @@ class WalletController(QObject):
 
     @Slot(str, result=bool)
     def selectProfile(self, profile_id: str) -> bool:
-        if self._mainnet_in_progress:
+        if (
+            self._mainnet_in_progress
+            or self._perpdex_external is not None
+            or self._perpdex_bundle is not None
+            or self._perpdex_in_progress
+        ):
             return False
         if not any(profile.profile_id == profile_id for profile in self._state.profiles):
             return False
@@ -2146,6 +2361,9 @@ class WalletController(QObject):
             or self._revoke_flow.current is not None
             or self._recovery_flow.current is not None
             or self._flow != "none"
+            or self._perpdex_external is not None
+            or self._perpdex_bundle is not None
+            or self._perpdex_in_progress
         )
 
     def _refresh_trusted_policy_status(self) -> bool:
@@ -3062,6 +3280,7 @@ class WalletController(QObject):
         self._guard_notice_timer.stop()
         self._clear_guard_notice()
         self._clear_mainnet_result()
+        self._clear_perpdex_action()
         self._cancel_transfer_request(clear_recipient=True)
         self._cancel_revoke_action(clear_snapshots=True)
         self._clear_sensitive()
@@ -3074,6 +3293,7 @@ class WalletController(QObject):
 
     def _initialize(self) -> None:
         self._clear_mainnet_result()
+        self._clear_perpdex_action()
         self._cancel_transfer_request(clear_recipient=True)
         self._cancel_revoke_action(clear_snapshots=True)
         self._clear_sensitive()
@@ -3809,6 +4029,107 @@ class WalletController(QObject):
         self._set_screen("transfer_review")
         self._finish_external_preflight(result, "TRANSFER_PREPARED")
 
+    @Slot(int, object)
+    def _accept_perpdex_prepare(self, generation: int, future: object) -> None:
+        if generation != self._perpdex_generation or self._closed:
+            return
+        context = self._perpdex_external
+        completion = self._perpdex_completion
+        if context is None or completion is None:
+            return
+        begin_delivery = self._perpdex_begin_delivery
+        if begin_delivery is not None and not begin_delivery():
+            self.expireExternalRequest(context)
+            return
+        self._perpdex_begin_delivery = None
+        try:
+            bundle = future.result()
+        except Exception as exc:
+            code = str(getattr(exc, "code", "PERPDEX_LIVE_CHECK_FAILED"))
+            if not code or len(code) > 64:
+                code = "PERPDEX_LIVE_CHECK_FAILED"
+            self._perpdex_completion = None
+            self._perpdex_external = None
+            try:
+                self._perpdex_adapter.mark_operation(
+                    str(context["action_id"]), "FAILED",
+                )
+            except Exception:
+                pass
+            completion(self._external_refusal(context, code))
+            self.perpDexChanged.emit()
+            return
+        prepared_digest = hashlib.sha256(json.dumps({
+            "action_id": context["action_id"],
+            "bundle_digest": bundle.bundle_digest,
+            "flow_id": context["flow_id"],
+            "profile_id": context["profile_id"],
+            "wallet_profile_id": self._state.active_profile_id,
+        }, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode()).hexdigest()
+        context["prepared_digest"] = prepared_digest
+        self._perpdex_bundle = bundle
+        self._perpdex_completion = None
+        try:
+            self._perpdex_adapter.mark_operation(
+                bundle.operation_id, "AWAITING_LOCAL_CONFIRMATION",
+            )
+        except Exception:
+            self._perpdex_external = None
+            completion(self._external_refusal(context, "PERPDEX_OPERATION_STATE_INVALID"))
+            self._perpdex_bundle = None
+            self.perpDexChanged.emit()
+            return
+        expires = datetime.fromisoformat(bundle.expires_at.removesuffix("Z") + "+00:00")
+        remaining_ms = max(
+            1, int((expires - datetime.now(UTC)).total_seconds() * 1000) + 1,
+        )
+        self._perpdex_expiry_timer.start(remaining_ms)
+        self.perpDexChanged.emit()
+        self._set_screen("perpdex_review")
+        completion({
+            "authority_version": AUTHORITY_VERSION,
+            "kind": "module_action_prepared",
+            "flow_id": context["flow_id"],
+            "action_id": context["action_id"],
+            "module_id": context["module_id"],
+            "capability_id": context["capability_id"],
+            "profile_id": context["profile_id"],
+            "action_type": context["action_type"],
+            "bundle_digest": bundle.bundle_digest,
+            "prepared_digest": prepared_digest,
+            "created_at": context["created_at"],
+            "expires_at": context["expires_at"],
+            "code": "MODULE_ACTION_PREPARED",
+        })
+
+    @Slot(int, object)
+    def _accept_perpdex_execution(self, generation: int, future: object) -> None:
+        if generation != self._perpdex_generation or self._closed:
+            return
+        try:
+            result = future.result()
+            if not isinstance(result, PerpDexExecutionResult):
+                raise TypeError
+        except Exception:
+            bundle = self._perpdex_bundle
+            result = PerpDexExecutionResult(
+                bundle.operation_id if bundle is not None else "",
+                bundle.intent.action_type.value if bundle is not None else "",
+                "UNKNOWN", "PERPDEX_EXECUTION_RESULT_UNKNOWN",
+                "Execution outcome is unknown; nothing was retried.", (),
+            )
+        self._perpdex_in_progress = False
+        self._perpdex_result = result
+        if result.status in {"COMPLETED", "PARTIAL"}:
+            self._notify_perpdex(
+                "COMPLETED", result.code,
+                "confirmed" if result.status == "COMPLETED" else "partial",
+            )
+        else:
+            self._notify_perpdex("FAILED", result.code)
+        self.perpDexChanged.emit()
+        self._set_screen("perpdex_result")
+
     def _finish_external_preflight(
         self, action: PreparedTransferAction | None, code: str,
     ) -> None:
@@ -4053,6 +4374,81 @@ class WalletController(QObject):
             sender(update)
         except Exception:
             pass
+
+    def _notify_perpdex(
+        self, event: str, code: str, outcome: str | None = None,
+    ) -> None:
+        context = self._perpdex_external
+        sender = self._guard_status_sender
+        if context is None or "prepared_digest" not in context:
+            return
+        update = {
+            "status_version": "1", "kind": "transfer_status",
+            "flow_id": context["flow_id"], "action_id": context["action_id"],
+            "operation_id": context["action_id"],
+            "phase_action_id": context["action_id"], "phase": "module_bundle",
+            "prepared_digest": context["prepared_digest"], "event": event,
+            "code": code, "outcome": outcome, "transaction_hash": None,
+            "receipt_state": "none",
+        }
+        self._perpdex_external = None
+        self._perpdex_completion = None
+        self._perpdex_begin_delivery = None
+        if sender is not None:
+            try:
+                sender(update)
+            except Exception:
+                pass
+
+    def _cancel_external_perpdex(
+        self, request: dict[str, object],
+    ) -> dict[str, object]:
+        context = self._perpdex_external
+        bundle = self._perpdex_bundle
+        if (
+            context is None or bundle is None or self._perpdex_in_progress
+            or request.get("flow_id") != context.get("flow_id")
+            or request.get("action_id") != context.get("action_id")
+            or request.get("prepared_digest") != context.get("prepared_digest")
+        ):
+            return self._external_refusal(request, "ACTION_MISMATCH")
+        try:
+            self._perpdex_adapter.mark_operation(bundle.operation_id, "REJECTED")
+        except Exception:
+            return self._external_refusal(request, "PERPDEX_OPERATION_STATE_INVALID")
+        response = {
+            "authority_version": AUTHORITY_VERSION, "kind": "action_cancelled",
+            "flow_id": request["flow_id"], "action_id": request["action_id"],
+            "code": "ACTION_CANCELLED",
+        }
+        self._clear_perpdex_action()
+        self._set_screen("main")
+        return response
+
+    def _expire_perpdex(self) -> None:
+        if self._perpdex_in_progress or self._perpdex_bundle is None:
+            return
+        try:
+            self._perpdex_adapter.mark_operation(
+                self._perpdex_bundle.operation_id, "EXPIRED",
+            )
+        except Exception:
+            pass
+        self._notify_perpdex("FAILED", "ACTION_EXPIRED")
+        self._clear_perpdex_action()
+        self._set_screen("main")
+
+    def _clear_perpdex_action(self, *, clear_result: bool = True) -> None:
+        self._perpdex_expiry_timer.stop()
+        self._perpdex_generation += 1
+        self._perpdex_external = None
+        self._perpdex_completion = None
+        self._perpdex_begin_delivery = None
+        self._perpdex_bundle = None
+        self._perpdex_in_progress = False
+        if clear_result:
+            self._perpdex_result = None
+        self.perpDexChanged.emit()
 
     def _expire_revoke(self) -> None:
         self._revoke_expiry_timer.stop()

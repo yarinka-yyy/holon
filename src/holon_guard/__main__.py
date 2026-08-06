@@ -239,6 +239,7 @@ def main(argv: list[str] | None = None) -> int:
                 earn_portfolio=earn_portfolio,
                 lending_history=lending_history,
                 module_registry=module_registry,
+                module_data_dir=data_dir,
             )
             if lifecycle.snapshot.state.value == "SIGNING_DISABLED":
                 authority.audit_system(

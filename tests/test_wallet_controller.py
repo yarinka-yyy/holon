@@ -3,6 +3,7 @@ from __future__ import annotations
 import secrets
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 from PySide6.QtCore import QLocale, QTime
 from holon_policy import (
@@ -22,6 +23,7 @@ from holon_wallet.broadcast import (
     ReceiptTrackingResult,
 )
 from holon_wallet.controller import WalletController, _display_local_time
+from holon_wallet.perpdex_action import PerpDexExecutionResult
 from holon_wallet.history import HistoryStatus, HistoryStore, WalletHistoryRecord
 from holon_wallet.signer import OfflineSigningPolicy
 from holon_wallet.storage import StorageError, WalletPaths
@@ -156,6 +158,119 @@ def controller(tmp_path, policy_control_client=None) -> WalletController:
     )
     item._test_mainnet_rpc = rpc
     return item
+
+
+class _ModuleIntent:
+    action_type = SimpleNamespace(value="HLP_WITHDRAW")
+
+    @staticmethod
+    def to_mapping():
+        return {"amount_mode": "ALL", "amount_usdc": None}
+
+
+class _ModuleBundle:
+    operation_id = "act-22222222-2222-4222-8222-222222222222"
+    account = "0x" + "11" * 20
+    intent = _ModuleIntent()
+    created_at = "2026-08-06T12:00:00.000Z"
+    expires_at = "2099-08-06T12:05:00.000Z"
+    disclosure = None
+    bundle_digest = "b" * 64
+    phases = (
+        SimpleNamespace(
+            phase_type=SimpleNamespace(value="VAULT_TRANSFER"),
+            semantic={
+                "amount_usdc": "10", "available_before_usdc": "10",
+                "equity_before_usdc": "10", "is_deposit": False,
+                "usd_atomic": "10000000", "vault_address": "0x" + "22" * 20,
+            },
+        ),
+    )
+
+    def to_mapping(self):
+        return {
+            "operation_id": self.operation_id, "action_type": "HLP_WITHDRAW",
+            "bundle_digest": self.bundle_digest,
+        }
+
+
+class _ModuleAdapter:
+    def __init__(self) -> None:
+        self.states = []
+
+    def verify(self, bundle, account):
+        del bundle, account
+        return _ModuleBundle()
+
+    def mark_operation(self, operation_id, state):
+        self.states.append((operation_id, state))
+
+
+class _ModuleExecutor:
+    @staticmethod
+    def execute(bundle, password_value, profile_id, account):
+        del bundle, password_value, profile_id, account
+        return PerpDexExecutionResult(
+            _ModuleBundle.operation_id, "HLP_WITHDRAW", "COMPLETED",
+            "PERPDEX_ACTION_COMPLETED", "Completed", ({
+                "phaseId": "phase-one", "phaseType": "VAULT_TRANSFER",
+                "state": "CONFIRMED", "code": "HLP_WITHDRAW_CONFIRMED",
+                "publicId": None,
+            },),
+        )
+
+
+def test_external_perpdex_review_password_and_result_are_one_bundle(tmp_path) -> None:
+    now = datetime.now(UTC)
+    _ModuleBundle.created_at = now.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    _ModuleBundle.expires_at = (now + timedelta(minutes=5)).isoformat(
+        timespec="milliseconds",
+    ).replace("+00:00", "Z")
+    item = controller(tmp_path)
+    secret = password()
+    item.beginCreate()
+    assert item.submitPassword(secret, secret)
+    assert item.finishBackup()
+    _ModuleBundle.account = item.activeProfile["address"]
+    adapter = _ModuleAdapter()
+    item._perpdex_adapter = adapter
+    item._perpdex_executor = _ModuleExecutor()
+    callbacks = []
+    statuses = []
+    item.attach_guard_status_sender(statuses.append)
+    request = {
+        "authority_version": "2", "kind": "prepare_module_action",
+        "flow_id": "11111111-1111-4111-8111-111111111111",
+        "action_id": _ModuleBundle.operation_id,
+        "module_id": "holon.perpdex",
+        "capability_id": "holon.perpdex.action.wallet",
+        "profile_id": "hyperliquid-mainnet-v1", "action_type": "HLP_WITHDRAW",
+        "bundle": _ModuleBundle().to_mapping(),
+        "created_at": _ModuleBundle.created_at, "expires_at": _ModuleBundle.expires_at,
+    }
+    item.prepareExternalModule(request, callbacks.append, lambda: True)
+    assert item.currentScreen == "perpdex_review"
+    assert callbacks[0]["kind"] == "module_action_prepared"
+    assert callbacks[0]["bundle_digest"] == "b" * 64
+    assert item.perpDexAction["phases"][0]["phaseType"] == "VAULT_TRANSFER"
+    assert item.beginPerpDexExecution()
+    assert item.currentScreen == "perpdex_password"
+    assert item.submitPerpDexExecution(secret)
+    assert item.currentScreen == "perpdex_result"
+    assert item.perpDexResult["status"] == "COMPLETED"
+    assert statuses == [{
+        "status_version": "1", "kind": "transfer_status",
+        "flow_id": request["flow_id"], "action_id": request["action_id"],
+        "operation_id": request["action_id"], "phase_action_id": request["action_id"],
+        "phase": "module_bundle", "prepared_digest": callbacks[0]["prepared_digest"],
+        "event": "COMPLETED", "code": "PERPDEX_ACTION_COMPLETED",
+        "outcome": "confirmed", "transaction_hash": None, "receipt_state": "none",
+    }]
+    assert adapter.states == [
+        (_ModuleBundle.operation_id, "AWAITING_LOCAL_CONFIRMATION"),
+    ]
+    item.finishPerpDexExecution()
+    assert item.currentScreen == "main"
 
 
 class StubPolicyControl:

@@ -48,6 +48,10 @@ Item {
         LendingRecoveryPage { objectName: "lendingRecoveryPage"; anchors.fill: parent; active: walletController.currentScreen === "lending_recovery" }
         EarnPage { objectName: "earnPage"; anchors.fill: parent; active: walletController.currentScreen === "earn" }
         ModulePageHost { objectName: "modulePageHost"; anchors.fill: parent; active: walletController.currentScreen === "module" }
+        ProtectedActionReviewPage { objectName: "protectedActionReviewPage"; anchors.fill: parent; active: walletController.currentScreen === "perpdex_review" }
+        ProtectedActionPasswordPage { objectName: "protectedActionPasswordPage"; anchors.fill: parent; active: walletController.currentScreen === "perpdex_password" }
+        ProtectedActionSubmitPage { objectName: "protectedActionSubmitPage"; anchors.fill: parent; active: walletController.currentScreen === "perpdex_submit" }
+        ProtectedActionResultPage { objectName: "protectedActionResultPage"; anchors.fill: parent; active: walletController.currentScreen === "perpdex_result" }
         UnavailablePage { objectName: "unavailablePage"; anchors.fill: parent; active: walletController.currentScreen === "unavailable" }
         Chrome { anchors.fill: parent; window: walletWindow; z: 50 }
 

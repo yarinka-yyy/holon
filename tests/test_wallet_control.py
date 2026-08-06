@@ -330,6 +330,72 @@ def test_lending_authority_protocol_has_only_semantics_and_material_digests() ->
     ) == withdraw_response
 
 
+def test_module_authority_protocol_carries_only_exact_bundle_hashes_and_semantics() -> None:
+    action_id = "act-22222222-2222-4222-8222-222222222222"
+    bundle = {
+        "operation_id": action_id,
+        "profile_id": "hyperliquid-mainnet-v1",
+        "action_type": "OPEN_POSITION",
+        "created_at": "2026-08-06T12:00:00.000Z",
+        "expires_at": "2026-08-06T12:01:30.000Z",
+        "bundle_digest": "b" * 64,
+        "intent": {
+            "leverage": 2, "market": "BTC", "notional_usdc": "25",
+            "side": "LONG",
+        },
+        "phases": [{
+            "phase_type": "PLACE_IOC_ORDER", "nonce": "1786000000000",
+            "wire_digest": "c" * 64,
+        }],
+    }
+    request = {
+        "authority_version": AUTHORITY_VERSION, "kind": "prepare_module_action",
+        "flow_id": "11111111-1111-4111-8111-111111111111",
+        "action_id": action_id, "module_id": "holon.perpdex",
+        "capability_id": "holon.perpdex.action.wallet",
+        "profile_id": "hyperliquid-mainnet-v1", "action_type": "OPEN_POSITION",
+        "bundle": bundle, "created_at": bundle["created_at"],
+        "expires_at": bundle["expires_at"],
+    }
+    checked = validate_authority_request(request)
+    response = {
+        "authority_version": AUTHORITY_VERSION, "kind": "module_action_prepared",
+        "flow_id": request["flow_id"], "action_id": action_id,
+        "wallet_pid": 202, "module_id": request["module_id"],
+        "capability_id": request["capability_id"],
+        "profile_id": request["profile_id"], "action_type": request["action_type"],
+        "bundle_digest": bundle["bundle_digest"], "prepared_digest": "d" * 64,
+        "created_at": request["created_at"], "expires_at": request["expires_at"],
+        "code": "MODULE_ACTION_PREPARED",
+    }
+    assert validate_authority_response(response, checked, 202) == response
+    raw = _authority_encode(request)
+    assert b'"wire_digest"' in raw
+    assert all(token not in raw.lower() for token in (
+        b"password", b"private_key", b"signature", b"signed_payload", b"raw_payload",
+    ))
+    with pytest.raises(ControlProtocolError):
+        validate_authority_request({
+            **request, "bundle": {**bundle, "signature": "forbidden"},
+        })
+    with pytest.raises(ControlProtocolError):
+        validate_authority_response({**response, "bundle_digest": "e" * 64}, checked, 202)
+
+
+def test_wallet_status_accepts_module_bundle_partial_without_transaction_payload() -> None:
+    update = {
+        "status_version": "1", "kind": "transfer_status",
+        "flow_id": "11111111-1111-4111-8111-111111111111",
+        "action_id": "act-22222222-2222-4222-8222-222222222222",
+        "operation_id": "act-22222222-2222-4222-8222-222222222222",
+        "phase_action_id": "act-22222222-2222-4222-8222-222222222222",
+        "phase": "module_bundle", "prepared_digest": "a" * 64,
+        "wallet_pid": 202, "event": "COMPLETED", "code": "IOC_PARTIAL_FILL",
+        "outcome": "partial", "transaction_hash": None, "receipt_state": "none",
+    }
+    assert validate_wallet_status(update) == update
+
+
 @pytest.mark.parametrize("phase", ["deposit", "redeem"])
 def test_wallet_status_accepts_morpho_phases(phase) -> None:
     update = {

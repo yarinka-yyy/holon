@@ -18,12 +18,13 @@ from .protocol import (
 
 AUTHORITY_VERSION = "2"
 AUTHORITY_PIPE_NAME = r"\\.\pipe\Holon.Wallet.Authority.v2"
-MAX_AUTHORITY_BYTES = 8 * 1024
+MAX_AUTHORITY_BYTES = 32 * 1024
 ACTION_RE = re.compile(r"^act-[0-9a-f-]{36}$")
 HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 ADDRESS_RE = re.compile(r"^0x[0-9A-Fa-f]{40}$")
 DECIMAL_RE = re.compile(r"^[1-9][0-9]{0,77}$")
 CODE_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+MODULE_ID_RE = re.compile(r"^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$")
 PREPARE_FIELDS = frozenset({
     "authority_version", "kind", "flow_id", "action_id", "policy_version",
     "policy_revision", "policy_digest",
@@ -35,6 +36,11 @@ LENDING_PREPARE_FIELDS = frozenset({
     "protocol_profile_id", "action",
     "amount_mode", "amount", "resolved_amount_atomic", "operation_id",
     "phase_action_id", "phase", "created_at", "expires_at",
+})
+MODULE_PREPARE_FIELDS = frozenset({
+    "authority_version", "kind", "flow_id", "action_id", "module_id",
+    "capability_id", "profile_id", "action_type", "bundle", "created_at",
+    "expires_at",
 })
 CANCEL_FIELDS = frozenset({
     "authority_version", "kind", "flow_id", "action_id", "prepared_digest",
@@ -54,6 +60,11 @@ LENDING_PREPARED_FIELDS = frozenset({
     "action_profile_digest", "amount_mode",
     "operation_id", "phase_action_id", "phase",
     "selector", "calldata_hash",
+})
+MODULE_PREPARED_FIELDS = frozenset({
+    "authority_version", "kind", "flow_id", "action_id", "wallet_pid",
+    "module_id", "capability_id", "profile_id", "action_type",
+    "bundle_digest", "prepared_digest", "created_at", "expires_at", "code",
 })
 REFUSED_FIELDS = frozenset({
     "authority_version", "kind", "flow_id", "action_id", "wallet_pid", "code",
@@ -101,15 +112,51 @@ def _decode(raw: bytes) -> dict[str, object]:
     return value
 
 
+def _module_value(value: object, *, depth: int = 0) -> None:
+    if depth > 10:
+        raise ControlProtocolError("Invalid module authority data")
+    if value is None or isinstance(value, (bool, int)):
+        return
+    if isinstance(value, float):
+        raise ControlProtocolError("Module authority data cannot use float")
+    if isinstance(value, str):
+        if len(value) > 2048 or any(ord(character) < 32 for character in value):
+            raise ControlProtocolError("Invalid module authority text")
+        return
+    if isinstance(value, list):
+        if len(value) > 64:
+            raise ControlProtocolError("Invalid module authority list")
+        for item in value:
+            _module_value(item, depth=depth + 1)
+        return
+    if isinstance(value, Mapping):
+        if len(value) > 64:
+            raise ControlProtocolError("Invalid module authority object")
+        for key, item in value.items():
+            if (
+                not isinstance(key, str) or not key or len(key) > 64
+                or any(token in key.casefold() for token in (
+                    "credential", "password", "private", "secret", "seed",
+                    "signature", "signed_payload", "raw_payload",
+                ))
+            ):
+                raise ControlProtocolError("Invalid module authority field")
+            _module_value(item, depth=depth + 1)
+        return
+    raise ControlProtocolError("Invalid module authority data")
+
+
 def validate_request(value: Mapping[str, object]) -> dict[str, object]:
     kind = value.get("kind")
     if kind not in {
-        "prepare_transfer", "prepare_lending_action", "cancel_transfer", "cancel_action",
+        "prepare_transfer", "prepare_lending_action", "prepare_module_action",
+        "cancel_transfer", "cancel_action",
     }:
         raise ControlProtocolError("Invalid authority request")
     expected = (
         PREPARE_FIELDS if kind == "prepare_transfer"
         else LENDING_PREPARE_FIELDS if kind == "prepare_lending_action"
+        else MODULE_PREPARE_FIELDS if kind == "prepare_module_action"
         else CANCEL_FIELDS
     )
     legacy_lending = kind == "prepare_lending_action" and set(value) == (
@@ -123,6 +170,38 @@ def validate_request(value: Mapping[str, object]) -> dict[str, object]:
         digest = value.get("prepared_digest")
         if not isinstance(digest, str) or HEX_RE.fullmatch(digest) is None:
             raise ControlProtocolError("Invalid authority request")
+        return dict(value)
+    if kind == "prepare_module_action":
+        for field in ("module_id", "capability_id"):
+            if (
+                not isinstance(value.get(field), str)
+                or len(value[field]) > 64
+                or MODULE_ID_RE.fullmatch(value[field]) is None
+            ):
+                raise ControlProtocolError("Invalid module authority request")
+        if (
+            value.get("profile_id") != "hyperliquid-mainnet-v1"
+            or value.get("action_type") not in {
+                "OPEN_POSITION", "CLOSE_POSITION", "HLP_DEPOSIT", "HLP_WITHDRAW",
+            }
+            or not isinstance(value.get("bundle"), Mapping)
+        ):
+            raise ControlProtocolError("Invalid module authority request")
+        bundle = value["bundle"]
+        _module_value(bundle)
+        if (
+            bundle.get("operation_id") != value.get("action_id")
+            or bundle.get("profile_id") != value.get("profile_id")
+            or bundle.get("action_type") != value.get("action_type")
+            or bundle.get("created_at") != value.get("created_at")
+            or bundle.get("expires_at") != value.get("expires_at")
+            or not isinstance(bundle.get("bundle_digest"), str)
+            or HEX_RE.fullmatch(bundle["bundle_digest"]) is None
+        ):
+            raise ControlProtocolError("Invalid module authority bundle")
+        for field in ("created_at", "expires_at"):
+            if not isinstance(value.get(field), str) or len(value[field]) > 40:
+                raise ControlProtocolError("Invalid module authority request")
         return dict(value)
     if kind == "prepare_lending_action":
         value = {"protocol_profile_id": "aave-v3-base-usdc", **value}
@@ -187,10 +266,12 @@ def validate_response(
     allowed_kinds = {
         "transfer_prepared", "lending_action_prepared", "transfer_refused",
         "lending_action_refused", "transfer_cancelled", "action_cancelled",
+        "module_action_prepared", "module_action_refused",
     }
     expected = (
         PREPARED_FIELDS if kind == "transfer_prepared"
         else LENDING_PREPARED_FIELDS if kind == "lending_action_prepared"
+        else MODULE_PREPARED_FIELDS if kind == "module_action_prepared"
         else REFUSED_FIELDS
     )
     if (
@@ -203,7 +284,23 @@ def validate_response(
         or CODE_RE.fullmatch(value["code"]) is None
     ):
         raise ControlProtocolError("Invalid authority response")
-    if kind not in {"transfer_prepared", "lending_action_prepared"}:
+    if kind not in {"transfer_prepared", "lending_action_prepared", "module_action_prepared"}:
+        return dict(value)
+    if kind == "module_action_prepared":
+        for field in (
+            "module_id", "capability_id", "profile_id", "action_type",
+            "created_at", "expires_at",
+        ):
+            if value.get(field) != request.get(field):
+                raise ControlProtocolError("Module authority response mismatch")
+        bundle = request.get("bundle")
+        if (
+            not isinstance(bundle, Mapping)
+            or value.get("bundle_digest") != bundle.get("bundle_digest")
+            or not isinstance(value.get("prepared_digest"), str)
+            or HEX_RE.fullmatch(value["prepared_digest"]) is None
+        ):
+            raise ControlProtocolError("Invalid module authority response")
         return dict(value)
     if kind == "lending_action_prepared":
         for field in (

@@ -54,6 +54,8 @@ class WalletController(Protocol):
 
     def prepare_lending_action(self, request: dict[str, object]) -> "WalletPreparedResult": ...
 
+    def prepare_module_action(self, request: dict[str, object]) -> "WalletPreparedResult": ...
+
     def preview_lending(
         self, intent: dict[str, object], profile_digest: str,
     ) -> "WalletLendingPreviewResult": ...
@@ -133,6 +135,9 @@ class UnavailableWalletController:
     def prepare_lending_action(self, request: dict[str, object]) -> WalletPreparedResult:
         return self.prepare_transfer(request)
 
+    def prepare_module_action(self, request: dict[str, object]) -> WalletPreparedResult:
+        return self.prepare_transfer(request)
+
     def preview_lending(
         self, intent: dict[str, object], profile_digest: str,
     ) -> WalletLendingPreviewResult:
@@ -191,7 +196,7 @@ class VerifiedWalletController(UnavailableWalletController):
         public_control: WalletPublicClient | None = None,
         public_response_timeout: float = 22.0,
         authority_control: WalletAuthorityClient | None = None,
-        authority_timeout: float = 25.0,
+        authority_timeout: float = 70.0,
         lending_preview_control: WalletLendingPreviewClient | None = None,
         lending_preview_timeout: float = 30.0,
     ) -> None:
@@ -335,7 +340,9 @@ class VerifiedWalletController(UnavailableWalletController):
         if type(pid) is not int:
             return WalletPreparedResult(False, "WALLET_UNAVAILABLE", None, None)
         handle = WindowsProcessReference(pid)
-        if response.get("kind") not in {"transfer_prepared", "lending_action_prepared"}:
+        if response.get("kind") not in {
+            "transfer_prepared", "lending_action_prepared", "module_action_prepared",
+        }:
             return WalletPreparedResult(
                 False, str(response.get("code", "TRANSFER_PREPARATION_FAILED")),
                 response, handle,
@@ -343,6 +350,9 @@ class VerifiedWalletController(UnavailableWalletController):
         return WalletPreparedResult(True, str(response["code"]), response, handle)
 
     def prepare_lending_action(self, request: dict[str, object]) -> WalletPreparedResult:
+        return self.prepare_transfer(request)
+
+    def prepare_module_action(self, request: dict[str, object]) -> WalletPreparedResult:
         return self.prepare_transfer(request)
 
     def preview_lending(

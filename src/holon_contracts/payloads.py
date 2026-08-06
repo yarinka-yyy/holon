@@ -138,6 +138,9 @@ LENDING_ACTION_CODES = frozenset({
 HEX_64_RE = re.compile(r"^[0-9a-f]{64}$")
 MODULE_ID_RE = re.compile(r"^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$")
 MODULE_ACTION_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+ACTION_ID_RE = re.compile(
+    r"^act-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+)
 MODULE_FORBIDDEN_FIELDS = frozenset({
     "credential", "mnemonic", "password", "private", "secret", "seed", "signed",
 })
@@ -1211,7 +1214,12 @@ def validate_module_action_preview(payload: Mapping[str, Any]) -> None:
     }.get(status)
     if expected_code is None or payload.get("code") != expected_code:
         raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid module action status.")
-    if payload.get("authority_available") is not False or payload.get("execution_available") is not False:
+    if (
+        type(payload.get("authority_available")) is not bool
+        or type(payload.get("execution_available")) is not bool
+        or payload.get("authority_available") != payload.get("execution_available")
+        or status != "PREVIEW_READY" and payload.get("authority_available") is not False
+    ):
         raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid module authority status.")
     _module_identifier(payload.get("module_id"), "module id")
     _module_identifier(payload.get("capability_id"), "capability id")
@@ -1263,6 +1271,36 @@ def validate_module_action_preview(payload: Mapping[str, Any]) -> None:
         raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Missing module action refusal reason.")
 
 
+def validate_module_action_status_request(payload: Mapping[str, Any]) -> None:
+    if set(payload) != PAYLOAD_FIELDS[MessageKind.MODULE_ACTION_STATUS_REQUEST]:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid module action status request.")
+    _module_identifier(payload.get("module_id"), "module id")
+    _module_identifier(payload.get("capability_id"), "capability id")
+
+
+def validate_module_action_status(payload: Mapping[str, Any]) -> None:
+    if set(payload) != PAYLOAD_FIELDS[MessageKind.MODULE_ACTION_STATUS]:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid module action status.")
+    _module_identifier(payload.get("module_id"), "module id")
+    _module_identifier(payload.get("capability_id"), "capability id")
+    action_type = payload.get("action_type")
+    if not isinstance(action_type, str) or MODULE_ACTION_RE.fullmatch(action_type) is None:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid module action type.")
+    operation_id = payload.get("operation_id")
+    if not isinstance(operation_id, str) or ACTION_ID_RE.fullmatch(operation_id) is None:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid module operation id.")
+    if payload.get("operation_state") not in {
+        "PREPARED", "AWAITING_LOCAL_CONFIRMATION", "EXECUTING", "COMPLETED",
+        "FAILED", "PARTIAL", "UNKNOWN", "REJECTED", "EXPIRED", "UNAVAILABLE",
+    }:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid module operation state.")
+    phases = payload.get("phases")
+    if not isinstance(phases, list) or len(phases) > 8:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid module phase states.")
+    _module_action_json(phases)
+    _safe_text(payload)
+
+
 def validate_payload(kind: MessageKind, payload: Mapping[str, Any]) -> None:
     if kind is MessageKind.MODULE_READ_REQUEST:
         validate_module_read_request(payload)
@@ -1278,6 +1316,12 @@ def validate_payload(kind: MessageKind, payload: Mapping[str, Any]) -> None:
         return
     if kind is MessageKind.MODULE_ACTION_PREVIEW:
         validate_module_action_preview(payload)
+        return
+    if kind is MessageKind.MODULE_ACTION_STATUS_REQUEST:
+        validate_module_action_status_request(payload)
+        return
+    if kind is MessageKind.MODULE_ACTION_STATUS:
+        validate_module_action_status(payload)
         return
     if kind is MessageKind.READ_LENDING_MARKETS:
         if set(payload) not in (set(), {"force_refresh"}) or (

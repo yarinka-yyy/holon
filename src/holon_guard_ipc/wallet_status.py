@@ -128,6 +128,7 @@ def validate_update(value: Mapping[str, object]) -> dict[str, object]:
         or phase_action != action
         or value.get("phase") not in {
             "transfer", "approve", "supply", "deposit", "withdraw", "redeem",
+            "module_bundle",
         }
     ):
         raise WalletStatusError("Invalid status update")
@@ -145,7 +146,7 @@ def validate_update(value: Mapping[str, object]) -> dict[str, object]:
         raise WalletStatusError("Invalid status update")
     outcome = value.get("outcome")
     if value["event"] in {"COMPLETED", "BROADCASTED"}:
-        if outcome not in {"pending", "confirmed", "unknown"}:
+        if outcome not in {"pending", "confirmed", "partial", "unknown"}:
             raise WalletStatusError("Invalid status update")
     elif outcome is not None:
         raise WalletStatusError("Invalid status update")

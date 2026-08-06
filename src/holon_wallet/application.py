@@ -173,7 +173,7 @@ class _AuthorityBridge(QObject):
     timedOut = Signal(object)
 
     def __init__(
-        self, application: "WalletApplication", response_timeout: float = 24.0,
+        self, application: "WalletApplication", response_timeout: float = 60.0,
     ) -> None:
         super().__init__()
         self._application = application
@@ -217,6 +217,10 @@ class _AuthorityBridge(QObject):
             application.controller.prepareExternalLending(
                 request, complete, gate.begin_delivery,
             )
+        elif request.get("kind") == "prepare_module_action":
+            application.controller.prepareExternalModule(
+                request, complete, gate.begin_delivery,
+            )
         else:
             application.controller.prepareExternalTransfer(
                 request, complete, gate.begin_delivery,
@@ -230,7 +234,9 @@ class _AuthorityBridge(QObject):
             isinstance(request, dict)
             and isinstance(gate, _AuthorityRequestGate)
             and gate.timed_out
-            and request.get("kind") in {"prepare_transfer", "prepare_lending_action"}
+            and request.get("kind") in {
+                "prepare_transfer", "prepare_lending_action", "prepare_module_action",
+            }
         ):
             self._application.controller.expireExternalRequest(request)
 

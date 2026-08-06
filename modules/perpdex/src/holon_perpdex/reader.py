@@ -18,6 +18,7 @@ MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 HTTP_TIMEOUT_SECONDS = 10.0
 _ADDRESS_RE = re.compile(r"^0x[0-9A-Fa-f]{40}$")
 _NUMBER_RE = re.compile(r"^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$")
+_CLOID_RE = re.compile(r"^0x[0-9a-f]{32}$")
 
 
 class ReaderError(RuntimeError):
@@ -284,9 +285,16 @@ class HyperliquidReader:
             raise ReaderError("HYPERLIQUID_ORDER_INVALID", "Invalid order id")
         reduce_only = item.get("reduceOnly", False)
         order_type = item.get("orderType")
-        if type(reduce_only) is not bool or not isinstance(order_type, str) or not order_type:
+        cloid = item.get("cloid")
+        if (
+            type(reduce_only) is not bool
+            or not isinstance(order_type, str) or not order_type
+            or cloid is not None
+            and (not isinstance(cloid, str) or _CLOID_RE.fullmatch(cloid) is None)
+        ):
             raise ReaderError("HYPERLIQUID_ORDER_INVALID", "Invalid order details")
         return {
+            "cloid": cloid,
             "limit_price": _number(item.get("limitPx"), "order limit price", signed=False),
             "market": market,
             "oid": str(oid),

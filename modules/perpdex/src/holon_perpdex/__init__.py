@@ -21,11 +21,14 @@ from .profile import (
     REFERRAL_CODE,
     SUPPORTED_MARKETS,
 )
+from .actions import AdapterError, HyperliquidActionBuilder, phase_action, phase_digest
 
 __all__ = [
     "ACTION_TYPES", "HLP_ADDRESS", "PROFILE_DIGEST", "PROFILE_ID",
     "PROFILE_VERSION", "REFERRAL_CODE", "SUPPORTED_MARKETS", "ActionType",
-    "AmountMode", "ContractError", "PerpDexActionIntent",
+    "AdapterError", "AmountMode", "ContractError", "HyperliquidActionBuilder",
+    "PerpDexActionIntent",
     "PerpDexActionPreview", "PerpDexActionResult", "PhaseType",
     "PositionSide", "ProtectedActionBundle", "ProtectedActionPhase",
+    "phase_action", "phase_digest",
 ]

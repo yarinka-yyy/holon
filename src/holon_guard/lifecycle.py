@@ -27,6 +27,42 @@ from .startup import idle_snapshot
 
 
 class GuardLifecycle(GuardCore):
+    def release_module_recovery_for_exit(self, action_type: str) -> GuardResult:
+        """Release only a terminal old ambiguity for a fresh reducing exit.
+
+        The caller must already have rebuilt the new CLOSE/HLP withdrawal from
+        unambiguous live state. No old signature or phase is resumed here.
+        """
+        with self._lock:
+            if self.snapshot.state is GuardState.NORMAL:
+                return self._result(True, "RECOVERY_NOT_REQUIRED", "Guard is ready.")
+            if (
+                action_type not in {"CLOSE_POSITION", "HLP_WITHDRAW"}
+                or self.snapshot.state is not GuardState.RECOVERY_REQUIRED
+                or self.ledger.snapshot.current is not None
+                or self.snapshot.action_id is None
+            ):
+                return self._result(
+                    False, "RECOVERY_REQUIRED", "Previous flow requires recovery.",
+                )
+            previous = self.ledger.find(self.snapshot.action_id)
+            if (
+                previous is None
+                or previous.state is not ActionState.RECOVERY_REQUIRED
+                or previous.fingerprint != self.snapshot.action_fingerprint
+            ):
+                return self.disable_signing(SecurityCode.ACTION_STATE_INVALID.value)
+            if not self._persist(idle_snapshot(
+                GuardState.NORMAL, "RISK_REDUCING_EXIT_ALLOWED", self.clock(),
+            )):
+                return self._result(
+                    False, "SIGNING_DISABLED", "Wallet authority is disabled.",
+                )
+            return self._result(
+                True, "RISK_REDUCING_EXIT_ALLOWED",
+                "A fresh risk-reducing exit may be reviewed.",
+            )
+
     def advance_lending_operation(self) -> GuardResult | None:
         """Prepare supply only after Wallet reports a confirmed approve receipt."""
         with self._lock:
@@ -262,6 +298,143 @@ class GuardLifecycle(GuardCore):
             self._set_prepared_audit_context(payload, "transfer")
             self.authority_expires_at = expires.timestamp()
             return self._result(True, "AWAITING_LOCAL_CONFIRMATION", "Protected flow started."), payload
+
+    def start_module_intent(
+        self, owner_pid: int, action_id: str, fingerprint: str,
+        module_id: str, capability_id: str, profile_id: str,
+        action_type: str, bundle: dict[str, object],
+    ) -> tuple[GuardResult, dict[str, object] | None]:
+        """Start one exact module bundle already built from verified live state."""
+        with self._lock:
+            try:
+                self.ledger.preflight(action_id, fingerprint)
+            except ActionLedgerFailure as exc:
+                return self._result(False, exc.code, "Action cannot be started."), None
+            if self.snapshot.state is not GuardState.NORMAL:
+                code = (
+                    "SIGNING_DISABLED"
+                    if self.snapshot.state is GuardState.SIGNING_DISABLED
+                    else RefusalCode.ACTION_ALREADY_ACTIVE.value
+                )
+                return self._result(False, code, "Module authority is unavailable."), None
+            if not self.owner_probe.is_alive(owner_pid):
+                return self._result(False, "OWNER_UNAVAILABLE", "Flow owner is unavailable."), None
+            try:
+                self.ledger.begin(action_id, fingerprint)
+            except ActionLedgerFailure:
+                return self.disable_signing(SecurityCode.ACTION_STATE_INVALID.value), None
+            flow_id = self.id_factory()
+            entering = GuardSnapshot(
+                GuardState.ENTERING, flow_id, owner_pid, None, "FLOW_STARTING",
+                self.clock(), action_id, fingerprint,
+            )
+            if not self._persist(entering):
+                return self._fail_started_action("STATE_WRITE_FAILED"), None
+            request = {
+                "authority_version": AUTHORITY_VERSION,
+                "kind": "prepare_module_action",
+                "flow_id": flow_id,
+                "action_id": action_id,
+                "module_id": module_id,
+                "capability_id": capability_id,
+                "profile_id": profile_id,
+                "action_type": action_type,
+                "bundle": dict(bundle),
+                "created_at": bundle.get("created_at"),
+                "expires_at": bundle.get("expires_at"),
+            }
+            try:
+                prepared = self.wallet.prepare_module_action(request)
+            except Exception:
+                return self._recover("WALLET_PREPARATION_FAILED"), None
+            if not prepared.ok or prepared.payload is None or prepared.handle is None:
+                if prepared.code == "WALLET_PREPARATION_AMBIGUOUS":
+                    return self._recover(prepared.code), None
+                try:
+                    self.ledger.terminalize(ActionState.FAILED, prepared.code)
+                except ActionLedgerFailure:
+                    return self.disable_signing(SecurityCode.ACTION_STATE_INVALID.value), None
+                self._persist(idle_snapshot(GuardState.NORMAL, prepared.code, self.clock()))
+                return self._result(False, prepared.code, "Wallet could not prepare the module action."), prepared.payload
+            payload = prepared.payload
+            try:
+                digest = str(payload["prepared_digest"])
+                if (
+                    payload.get("bundle_digest") != bundle.get("bundle_digest")
+                    or payload.get("module_id") != module_id
+                    or payload.get("capability_id") != capability_id
+                    or payload.get("profile_id") != profile_id
+                    or payload.get("action_type") != action_type
+                    or len(digest) != 64
+                ):
+                    raise ValueError
+                expires = datetime.fromisoformat(
+                    str(bundle["expires_at"]).removesuffix("Z") + "+00:00"
+                )
+                if expires.timestamp() <= self.clock():
+                    raise ValueError
+            except (KeyError, TypeError, ValueError):
+                cancel = {
+                    "authority_version": AUTHORITY_VERSION,
+                    "kind": "cancel_action",
+                    "flow_id": flow_id,
+                    "action_id": action_id,
+                    "prepared_digest": str(payload.get("prepared_digest", "")),
+                }
+                if not self.wallet.cancel_transfer(cancel):
+                    self.wallet_handle = prepared.handle
+                    return self._recover("WALLET_CALLBACK_FAILED"), None
+                try:
+                    self.ledger.terminalize(ActionState.FAILED, "MODULE_PREPARATION_MISMATCH")
+                except ActionLedgerFailure:
+                    return self.disable_signing(SecurityCode.ACTION_STATE_INVALID.value), None
+                self._persist(idle_snapshot(GuardState.NORMAL, "MODULE_PREPARATION_MISMATCH", self.clock()))
+                return self._result(False, "MODULE_PREPARATION_MISMATCH", "Wallet module preparation mismatched."), None
+            self.wallet_handle = prepared.handle
+            active = GuardSnapshot(
+                GuardState.ACTIVE, flow_id, owner_pid, prepared.handle.pid,
+                "FLOW_ACTIVE", self.clock(), action_id, fingerprint,
+            )
+            if not self._persist(active):
+                try:
+                    self.wallet.cancel_transfer({
+                        "authority_version": AUTHORITY_VERSION,
+                        "kind": "cancel_action",
+                        "flow_id": flow_id,
+                        "action_id": action_id,
+                        "prepared_digest": digest,
+                    })
+                except Exception:
+                    pass
+                return self._fail_started_action("STATE_WRITE_FAILED"), None
+            try:
+                self.ledger.transition(
+                    ActionState.AWAITING_LOCAL_CONFIRMATION,
+                    "AWAITING_LOCAL_CONFIRMATION",
+                )
+            except ActionLedgerFailure:
+                try:
+                    self.wallet.cancel_transfer({
+                        "authority_version": AUTHORITY_VERSION,
+                        "kind": "cancel_action",
+                        "flow_id": flow_id,
+                        "action_id": action_id,
+                        "prepared_digest": digest,
+                    })
+                except Exception:
+                    pass
+                return self.disable_signing(SecurityCode.ACTION_STATE_INVALID.value), None
+            self.prepared_digest = digest
+            self.prepared_audit_context = {
+                "module_id": module_id,
+                "capability_id": capability_id,
+                "action_type": action_type,
+                "wallet_address": str(bundle.get("account", "")),
+                "bundle_digest": str(bundle.get("bundle_digest", "")),
+                "local_approved_recorded": False,
+            }
+            self.authority_expires_at = expires.timestamp()
+            return self._result(True, "AWAITING_LOCAL_CONFIRMATION", "Protected module flow started."), payload
 
     def start_lending_intent(
         self, owner_pid: int, action_id: str, fingerprint: str,
@@ -564,7 +737,12 @@ class GuardLifecycle(GuardCore):
                     try:
                         self.wallet.cancel_transfer({
                             "authority_version": AUTHORITY_VERSION,
-                            "kind": "cancel_transfer",
+                            "kind": (
+                                "cancel_action"
+                                if self.prepared_audit_context is not None
+                                and self.prepared_audit_context.get("module_id") is not None
+                                else "cancel_transfer"
+                            ),
                             "flow_id": self.snapshot.flow_id,
                             "action_id": self.snapshot.action_id,
                             "prepared_digest": self.prepared_digest,
@@ -584,7 +762,12 @@ class GuardLifecycle(GuardCore):
                 return self._recover("CALLBACK_STATE_INVALID")
             request = {
                 "authority_version": AUTHORITY_VERSION,
-                "kind": "cancel_transfer",
+                "kind": (
+                    "cancel_action"
+                    if self.prepared_audit_context is not None
+                    and self.prepared_audit_context.get("module_id") is not None
+                    else "cancel_transfer"
+                ),
                 "flow_id": self.snapshot.flow_id,
                 "action_id": action_id,
                 "prepared_digest": self.prepared_digest,

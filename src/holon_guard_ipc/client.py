@@ -206,9 +206,13 @@ class PipeGuardClient:
             response_timeout=40.0,
         )
 
-    def module_action_status(self, action_id: str) -> ContractEnvelope:
+    def module_action_status(
+        self, action_id: str, module_id: str = "holon.perpdex",
+        capability_id: str = "holon.perpdex.action.guard",
+    ) -> ContractEnvelope:
         return self.client.request(
-            MessageKind.ACTION_STATUS_REQUEST,
+            MessageKind.MODULE_ACTION_STATUS_REQUEST,
+            {"module_id": module_id, "capability_id": capability_id},
             action_id=action_id,
         )
 

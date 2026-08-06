@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from pathlib import Path
 
 from holon_contracts import ContractEnvelope, MessageKind, SecurityCode
 from holon_guard_ipc import GuardState
@@ -24,6 +25,7 @@ from .authority_audit import AuthorityAudit
 from .authority_prepare import prepare
 from .authority_intent import prepare_intent
 from .lending_authority import prepare_lending_authority
+from .module_authority import prepare_module_authority
 from .authority_responses import REFUSAL_CODES, ResponseMixin
 from .lifecycle import GuardLifecycle
 from .wallet import WALLET_OPEN_FAILURE_MESSAGES, wallet_open_failure
@@ -43,6 +45,7 @@ class AuthorityService(ResponseMixin):
         earn_portfolio: EarnPortfolioService | None = None,
         lending_history=None,
         module_registry: CapabilityRegistry | None = None,
+        module_data_dir: Path | None = None,
     ) -> None:
         self.lifecycle = lifecycle
         self.policy = policy
@@ -58,6 +61,71 @@ class AuthorityService(ResponseMixin):
         self.earn_portfolio = earn_portfolio
         self.lending_history = lending_history
         self.module_registry = module_registry or CapabilityRegistry()
+        if module_data_dir is not None:
+            for capability in self.module_registry.capabilities("protected_action_adapter"):
+                configure = getattr(capability.contribution, "configure", None)
+                if callable(configure):
+                    configure(module_data_dir)
+
+    def module_action_adapter(
+        self, module_id: str, capability_id: str, action_type: str,
+    ):
+        status = self.module_registry.module_status(module_id)
+        capability = self.module_registry.resolve(capability_id)
+        descriptor = capability.declaration.descriptor
+        if (
+            status.state is not ModuleLifecycleState.READY
+            or capability.module_id != module_id
+            or capability.declaration.kind != "protected_action_adapter"
+            or descriptor.get("adapter_version") != "1"
+            or descriptor.get("profile_id") != "hyperliquid-mainnet-v1"
+            or action_type not in descriptor.get("action_types", ())
+            or getattr(capability.contribution, "adapter_version", None) != "1"
+            or getattr(capability.contribution, "profile_id", None) != descriptor["profile_id"]
+            or not isinstance(
+                getattr(capability.contribution, "wallet_capability_id", None), str,
+            )
+            or getattr(capability.contribution, "wallet_capability_id", None)
+            != f"{module_id}.action.wallet"
+        ):
+            raise RuntimeError("Module action adapter is unavailable")
+        return capability, capability.contribution
+
+    @staticmethod
+    def _module_preview_payload(
+        module_id: str, capability_id: str, action_type: str, *,
+        preview=None, status: str = "UNAVAILABLE", caveat: str = "CAPABILITY_UNAVAILABLE",
+        execution_available: bool = False,
+    ) -> dict[str, object]:
+        if preview is None:
+            return {
+                "status": status, "authority_available": False,
+                "execution_available": False, "module_id": module_id,
+                "capability_id": capability_id, "action_type": action_type,
+                "account": None, "preview": {}, "preview_digest": None,
+                "expires_at": None, "checks": [], "caveats": [caveat],
+                "code": (
+                    "MODULE_ACTION_REFUSED" if status == "REFUSED"
+                    else "MODULE_ACTION_UNAVAILABLE"
+                ),
+                "message": "PerpDEX action preview is unavailable.",
+            }
+        return {
+            "status": preview.status,
+            "authority_available": execution_available,
+            "execution_available": execution_available,
+            "module_id": module_id,
+            "capability_id": capability_id,
+            "action_type": preview.action_type.value,
+            "account": dict(preview.account) if preview.account is not None else None,
+            "preview": dict(preview.preview),
+            "preview_digest": preview.preview_digest,
+            "expires_at": preview.expires_at,
+            "checks": list(preview.checks),
+            "caveats": list(preview.caveats),
+            "code": preview.code,
+            "message": preview.message,
+        }
 
     def replace_policy_snapshot(self, snapshot: PolicySnapshot) -> None:
         self.policy_snapshot = snapshot
@@ -151,6 +219,33 @@ class AuthorityService(ResponseMixin):
     def accept_wallet_status(self, update: dict[str, object]) -> bool:
         context = self.lifecycle.prepared_audit_context
         if context is None or not self.lifecycle.accept_wallet_status(update):
+            return False
+        if context.get("module_id") is not None:
+            common = {
+                "action_id": str(update["action_id"]),
+                "flow_id": str(update["flow_id"]),
+                "action_type": str(context["action_type"]),
+                "wallet_address": str(context["wallet_address"]),
+            }
+            event = str(update["event"])
+            if event == "REJECTED":
+                return self.audit_system(
+                    EventType.LOCAL_REJECTED, str(update["code"]), **common,
+                )
+            if event == "COMPLETED":
+                if context.get("local_approved_recorded") is not True:
+                    if not self.audit_system(
+                        EventType.LOCAL_APPROVED, "LOCAL_APPROVED", **common,
+                    ):
+                        return False
+                    context["local_approved_recorded"] = True
+                return self.audit_system(
+                    EventType.BROADCAST_RESULT, str(update["code"]), **common,
+                )
+            if event == "FAILED":
+                return self.audit_system(
+                    EventType.TECHNICAL_ERROR, str(update["code"]), **common,
+                )
             return False
         common = {
             "action_id": str(update["action_id"]),
@@ -323,6 +418,98 @@ class AuthorityService(ResponseMixin):
                     "message": "Optional module read is unavailable.",
                 }
             return self._response(request, MessageKind.MODULE_READ_RESPONSE, payload)
+        if request.kind is MessageKind.MODULE_ACTION_INTENT:
+            module_id = str(request.payload["module_id"])
+            capability_id = str(request.payload["capability_id"])
+            action_type = str(request.payload["action_type"])
+            recovery_exit = (
+                self.lifecycle.snapshot.state is GuardState.RECOVERY_REQUIRED
+                and action_type in {"CLOSE_POSITION", "HLP_WITHDRAW"}
+            )
+            if self.lifecycle.snapshot.state in {
+                GuardState.ENTERING, GuardState.ACTIVE, GuardState.EXITING,
+            } or (
+                self.lifecycle.snapshot.state is GuardState.RECOVERY_REQUIRED
+                and not recovery_exit
+            ):
+                payload = self._module_preview_payload(
+                    module_id, capability_id, action_type,
+                    status="REFUSED", caveat="PROTECTED_FLOW_ACTIVE",
+                )
+            else:
+                try:
+                    _capability, adapter = self.module_action_adapter(
+                        module_id, capability_id, action_type,
+                    )
+                    wallet = self.lifecycle.wallet.read_public_balances()
+                    account = (
+                        wallet.payload.get("account")
+                        if wallet.ok and wallet.payload is not None else None
+                    )
+                    if not isinstance(account, Mapping):
+                        raise RuntimeError("Wallet account is unavailable")
+                    preview = adapter.preview(
+                        action_type, request.payload["params"], dict(account),
+                    )
+                    execution_available = (
+                        self.security_failure is None
+                        and (
+                            self.lifecycle.snapshot.state is GuardState.NORMAL
+                            or recovery_exit
+                        )
+                    )
+                    payload = self._module_preview_payload(
+                        module_id, capability_id, action_type,
+                        preview=preview, execution_available=execution_available,
+                    )
+                except Exception as exc:
+                    caveat = str(getattr(exc, "code", "CAPABILITY_UNAVAILABLE"))
+                    status = (
+                        "REFUSED"
+                        if caveat.startswith(("PERPDEX_", "HLP_"))
+                        and not caveat.endswith(("UNAVAILABLE", "INVALID"))
+                        else "UNAVAILABLE"
+                    )
+                    payload = self._module_preview_payload(
+                        module_id, capability_id, action_type,
+                        status=status, caveat=caveat,
+                    )
+            return self._response(request, MessageKind.MODULE_ACTION_PREVIEW, payload)
+        if request.kind is MessageKind.MODULE_AUTHORITY_INTENT:
+            if not self.revalidate_policy() or self.security_failure is not None:
+                return self.security_response(request)
+            assert owner_pid is not None
+            return prepare_module_authority(self, request, owner_pid)
+        if request.kind is MessageKind.MODULE_ACTION_STATUS_REQUEST:
+            module_id = str(request.payload["module_id"])
+            capability_id = str(request.payload["capability_id"])
+            try:
+                _capability, adapter = self.module_action_adapter(
+                    module_id, capability_id, "HLP_WITHDRAW",
+                )
+                operation = adapter.status(request.action_id or "")
+                if not isinstance(operation, Mapping):
+                    raise RuntimeError("Operation is unavailable")
+                phases = [{
+                    "cloid": phase.get("cloid"), "code": phase.get("code"),
+                    "phase_id": phase.get("phase_id"),
+                    "phase_type": phase.get("phase_type"),
+                    "public_id": phase.get("public_id"), "state": phase.get("state"),
+                } for phase in operation["phases"]]
+                payload = {
+                    "module_id": module_id, "capability_id": capability_id,
+                    "action_type": operation["action_type"],
+                    "operation_id": operation["operation_id"],
+                    "operation_state": operation["state"], "phases": phases,
+                    "code": "MODULE_ACTION_STATUS_READY",
+                    "message": "PerpDEX operation status is available.",
+                }
+                return self._response(request, MessageKind.MODULE_ACTION_STATUS, payload)
+            except Exception:
+                return self.refusal(
+                    request, RefusalCode.ACTION_ID_INVALID.value,
+                    "Module action was not found.",
+                )
         if request.kind is MessageKind.READ_LENDING_MARKETS:
             try:
                 payload = self.lending.compare(request.payload.get("force_refresh", False))
