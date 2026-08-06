@@ -17,6 +17,7 @@ from holon_modules import (
     load_registry as load_module_registry,
     load_toolset,
 )
+from holon_earn import EarnPortfolioService
 
 from .guard import (
     PROTECTED_STATES,
@@ -34,6 +35,7 @@ WALLET_BALANCES_TOOL = "holon_wallet_balances"
 LENDING_COMPARE_TOOL = "holon_lending_compare"
 LENDING_POSITIONS_TOOL = "holon_lending_positions"
 LENDING_PORTFOLIO_TOOL = "holon_lending_portfolio"
+EARN_PORTFOLIO_TOOL = "holon_earn_portfolio"
 LENDING_PREPARE_TOOL = "holon_lending_prepare"
 LENDING_EXECUTE_TOOL = "holon_lending_execute"
 PREPARE_TRANSFER_TOOL = "holon_prepare_transfer"
@@ -47,6 +49,7 @@ CAPABILITIES = [
     "health", "open_wallet", "wallet_balances", "prepare_transfer",
     "transfer_status", "cancel_transfer", "recover_transfer", "lending_compare",
     "lending_positions", "lending_portfolio", "lending_prepare", "lending_execute",
+    "earn_portfolio",
     "action_status", "cancel_action", "recover_action",
 ]
 PROTECTED_TOOL_ALLOWLIST = frozenset({
@@ -57,6 +60,7 @@ PROTECTED_TOOL_ALLOWLIST = frozenset({
 STATIC_TOOL_NAMES = frozenset({
     HEALTH_TOOL, OPEN_WALLET_TOOL, WALLET_BALANCES_TOOL,
     LENDING_COMPARE_TOOL, LENDING_POSITIONS_TOOL, LENDING_PORTFOLIO_TOOL,
+    EARN_PORTFOLIO_TOOL,
     LENDING_PREPARE_TOOL, LENDING_EXECUTE_TOOL, PREPARE_TRANSFER_TOOL,
     TRANSFER_STATUS_TOOL, CANCEL_TRANSFER_TOOL, RECOVER_TRANSFER_TOOL,
     ACTION_STATUS_TOOL, CANCEL_ACTION_TOOL, RECOVER_ACTION_TOOL,
@@ -249,6 +253,13 @@ def _unavailable_lending_portfolio(history_period: str = "none") -> dict[str, An
         "message": "Lending portfolio is unavailable.",
     })
     return _validated_fallback(MessageKind.LENDING_PORTFOLIO, value)
+
+
+def _unavailable_earn_portfolio() -> dict[str, Any]:
+    return _validated_fallback(
+        MessageKind.EARN_PORTFOLIO,
+        EarnPortfolioService.unavailable(None).to_dict(),
+    )
 
 
 class PluginRuntime:
@@ -475,6 +486,28 @@ class PluginRuntime:
         return json.dumps(
             _unavailable_lending_portfolio(history_period),
             ensure_ascii=False, separators=(",", ":"),
+        )
+
+    def handle_earn_portfolio(
+        self, params: Optional[dict] = None, **kwargs: Any,
+    ) -> str:
+        del kwargs
+        values = {} if params is None else params
+        if not isinstance(values, dict) or set(values) - {"force_refresh"}:
+            return json.dumps(_unavailable_earn_portfolio(), separators=(",", ":"))
+        force_refresh = values.get("force_refresh", False)
+        if type(force_refresh) is not bool:
+            return json.dumps(_unavailable_earn_portfolio(), separators=(",", ":"))
+        try:
+            response = self._connector.earn_portfolio(force_refresh)
+            if response.kind is MessageKind.EARN_PORTFOLIO:
+                return json.dumps(
+                    response.payload, ensure_ascii=False, separators=(",", ":"),
+                )
+        except Exception:
+            pass
+        return json.dumps(
+            _unavailable_earn_portfolio(), ensure_ascii=False, separators=(",", ":"),
         )
 
     def handle_lending_prepare(
@@ -893,6 +926,10 @@ def _handle_lending_portfolio(params: Optional[dict] = None, **kwargs: Any) -> s
     return _runtime.handle_lending_portfolio(params, **kwargs)
 
 
+def _handle_earn_portfolio(params: Optional[dict] = None, **kwargs: Any) -> str:
+    return _runtime.handle_earn_portfolio(params, **kwargs)
+
+
 def _handle_lending_prepare(params: Optional[dict] = None, **kwargs: Any) -> str:
     return _runtime.handle_lending_prepare(params, **kwargs)
 
@@ -1030,6 +1067,25 @@ def register(ctx: Any) -> None:
         },
         handler=_handle_lending_portfolio,
         description="Read the combined public Lending portfolio and analytics.",
+    )
+    ctx.register_tool(
+        name=EARN_PORTFOLIO_TOOL,
+        toolset="holon",
+        schema={
+            "name": EARN_PORTFOLIO_TOOL,
+            "description": (
+                "Read the normalized Earn portfolio across all active providers. "
+                "Compare typed metrics, freshness, exit conditions, and the explicit "
+                "NOT_ASSESSED risk state without unlocking Wallet."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"force_refresh": {"type": "boolean", "default": False}},
+                "required": [], "additionalProperties": False,
+            },
+        },
+        handler=_handle_earn_portfolio,
+        description="Read the normalized public Earn portfolio.",
     )
     ctx.register_tool(
         name=LENDING_PREPARE_TOOL,

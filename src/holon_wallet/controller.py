@@ -24,6 +24,15 @@ from holon_lending import (
     LendingPreflightService, LendingReadService, parse_lending_intent,
 )
 from holon_modules import CapabilityRegistry
+from holon_earn import (
+    EarnPortfolioService,
+    EarnPortfolioSnapshot,
+    EarnProviderRegistry,
+    EarnSnapshotStore,
+    LENDING_PROVIDER_ID,
+    LendingEarnProvider,
+    register_module_providers,
+)
 
 from .approval import (
     AllowanceReadService,
@@ -60,6 +69,7 @@ from .history import (
     lending_cashflows,
 )
 from .lending_view import lending_portfolio_to_map
+from .earn_view import earn_portfolio_to_map
 from .lending_action import prepare_lending_action
 from .model import ProfileSummary, WalletShellState
 from .module_view import module_page_to_map
@@ -223,6 +233,7 @@ class WalletController(QObject):
         lending_preflight_service: LendingPreflightService | None = None,
         public_cache_store: PublicCacheStore | None = None,
         lending_portfolio_service: LendingPortfolioService | None = None,
+        earn_portfolio_service: EarnPortfolioService | None = None,
         module_registry: CapabilityRegistry | None = None,
     ) -> None:
         super().__init__()
@@ -249,6 +260,16 @@ class WalletController(QObject):
             lending_reader,
             LendingAnalyticsStore(self._repository.paths.lending_analytics),
         )
+        self._module_registry = module_registry or CapabilityRegistry()
+        if earn_portfolio_service is None:
+            earn_registry = EarnProviderRegistry()
+            earn_registry.register(LendingEarnProvider(self._lending_portfolio_service))
+            register_module_providers(earn_registry, self._module_registry)
+            earn_portfolio_service = EarnPortfolioService(
+                earn_registry,
+                EarnSnapshotStore(self._repository.paths.earn_snapshots),
+            )
+        self._earn_portfolio_service = earn_portfolio_service
         self._public_data_executor = public_data_executor or ThreadPoolExecutor(
             max_workers=2, thread_name_prefix="holon-public-read",
         )
@@ -301,7 +322,7 @@ class WalletController(QObject):
         )
         self._owns_receipt_executor = receipt_executor is None
         self._state = WalletShellState()
-        self._module_page = module_page_to_map(module_registry or CapabilityRegistry())
+        self._module_page = module_page_to_map(self._module_registry)
         self._current_screen = "welcome"
         self._flow = "none"
         self._error_message = ""
@@ -347,6 +368,8 @@ class WalletController(QObject):
             int(datetime.now(UTC).timestamp()), "NOT_REFRESHED",
         )
         self._lending_portfolio = LendingPortfolioService.unavailable(None)
+        self._earn_portfolio = EarnPortfolioService.unavailable(None)
+        self._earn_filter = "all"
         self._lending_refreshing = False
         self._lending_generation = 0
         self._lending_history_period = "7d"
@@ -685,6 +708,14 @@ class WalletController(QObject):
     def lendingDataRefreshing(self) -> bool:
         return self._lending_refreshing
 
+    @Property(bool, notify=publicDataChanged)
+    def earnDataRefreshing(self) -> bool:
+        return self._lending_refreshing
+
+    @Property(str, notify=publicDataChanged)
+    def earnFilter(self) -> str:
+        return self._earn_filter
+
     @Property(str, notify=publicDataChanged)
     def lendingHistoryPeriod(self) -> str:
         return self._lending_history_period
@@ -765,8 +796,14 @@ class WalletController(QObject):
             self._network_snapshots,
             self._market_price_snapshot,
             self._selected_network,
-            self._lending_portfolio.get("protocols"),
+            self._earn_portfolio,
             show_zero_balances=self._show_zero_balances,
+        )
+
+    @Property("QVariantMap", notify=publicDataChanged)
+    def earnData(self) -> dict[str, object]:
+        return earn_portfolio_to_map(
+            self._earn_portfolio, self._market_price_snapshot, self._earn_filter,
         )
 
     @Property("QVariantMap", notify=publicDataChanged)
@@ -1936,10 +1973,14 @@ class WalletController(QObject):
             self._set_screen("settings")
 
     @Slot()
-    def showLending(self) -> None:
+    def showEarn(self) -> None:
         if self._state.profiles and not self._mainnet_in_progress:
-            self._set_screen("lending")
-            self.refreshLendingData(False)
+            self._set_screen("earn")
+            self.refreshEarnData(False)
+
+    @Slot()
+    def showLending(self) -> None:
+        self.showEarn()
 
     @Slot()
     def showModulePage(self) -> None:
@@ -1947,7 +1988,7 @@ class WalletController(QObject):
             self._set_screen("module")
 
     @Slot(bool, result=bool)
-    def refreshLendingData(self, force_refresh: bool = False) -> bool:
+    def refreshEarnData(self, force_refresh: bool = False) -> bool:
         active = self._state.active_profile
         if active is None or self._closed:
             return False
@@ -1957,17 +1998,34 @@ class WalletController(QObject):
         self.publicDataChanged.emit()
         operations = self._active_lending_cashflows()
         future = self._public_data_executor.submit(
-            self._lending_portfolio_service.read,
+            self._read_earn_bundle,
             {"label": active.label, "address": active.address},
             operations,
-            force_refresh=force_refresh,
-            history_period=self._lending_history_period,
+            force_refresh,
+            self._lending_history_period,
         )
         future.add_done_callback(
             lambda completed, current=generation: self._lending_data_finished(
                 current, completed,
             ),
         )
+        return True
+
+    @Slot(bool, result=bool)
+    def refreshLendingData(self, force_refresh: bool = False) -> bool:
+        return self.refreshEarnData(force_refresh)
+
+    @Slot(str, result=bool)
+    def selectEarnFilter(self, selected_filter: str) -> bool:
+        filters = {
+            item["id"] for item in self.earnData.get("availableFilters", [])
+            if isinstance(item, Mapping) and isinstance(item.get("id"), str)
+        }
+        if selected_filter not in filters:
+            return False
+        if selected_filter != self._earn_filter:
+            self._earn_filter = selected_filter
+            self.publicDataChanged.emit()
         return True
 
     @Slot(str, result=bool)
@@ -3689,7 +3747,7 @@ class WalletController(QObject):
             if is_lending:
                 self._cancel_transfer_request(clear_recipient=True)
                 self._set_lending_notice(_lending_preflight_notice(context, code))
-                self._set_screen("lending")
+                self._set_screen("earn")
                 return
             self._set_screen("send")
             return
@@ -4138,6 +4196,7 @@ class WalletController(QObject):
         operations: list[dict[str, object]] | None,
     ) -> tuple[
         PortfolioSnapshot, PriceSnapshot, MarketPriceSnapshot, dict[str, object],
+        EarnPortfolioSnapshot,
     ]:
         with ThreadPoolExecutor(max_workers=4, thread_name_prefix="holon-wallet-portfolio") as pool:
             wallet_future = pool.submit(
@@ -4161,7 +4220,30 @@ class WalletController(QObject):
                 if market_future is not None
                 else market_snapshot_from_chainlink(chainlink)
             )
-            return wallet_future.result(), chainlink, market, lending_future.result()
+            lending = lending_future.result()
+            earn = self._earn_portfolio_service.read(
+                {"label": label, "address": address},
+                provider_contexts={LENDING_PROVIDER_ID: {"lending_payload": lending}},
+            )
+            return wallet_future.result(), chainlink, market, lending, earn
+
+    def _read_earn_bundle(
+        self,
+        account: Mapping[str, str],
+        operations: list[dict[str, object]] | None,
+        force_refresh: bool,
+        history_period: str,
+    ) -> tuple[dict[str, object], EarnPortfolioSnapshot]:
+        lending = self._lending_portfolio_service.read(
+            account, operations, force_refresh=force_refresh,
+            history_period=history_period,
+        )
+        earn = self._earn_portfolio_service.read(
+            account,
+            provider_contexts={LENDING_PROVIDER_ID: {"lending_payload": lending}},
+            force_refresh=force_refresh,
+        )
+        return lending, earn
 
     @Slot(int, object)
     def _accept_public_data(
@@ -4175,15 +4257,17 @@ class WalletController(QObject):
         prices: PriceSnapshot | None = None
         market_prices: MarketPriceSnapshot | None = None
         lending: dict[str, object] | None = None
+        earn: EarnPortfolioSnapshot | None = None
         if (
             isinstance(result, tuple)
-            and len(result) == 4
+            and len(result) == 5
             and isinstance(result[0], PortfolioSnapshot)
             and isinstance(result[1], PriceSnapshot)
             and isinstance(result[2], MarketPriceSnapshot)
             and isinstance(result[3], dict)
+            and isinstance(result[4], EarnPortfolioSnapshot)
         ):
-            snapshot, prices, market_prices, lending = result
+            snapshot, prices, market_prices, lending, earn = result
         elif isinstance(result, PortfolioSnapshot):
             snapshot = result
         valid_bundle = (
@@ -4257,6 +4341,12 @@ class WalletController(QObject):
             and lending["account"].get("address") == active.address
         ):
             self._lending_portfolio = lending
+        if (
+            earn is not None and active is not None
+            and earn.account is not None
+            and earn.account.get("address") == active.address
+        ):
+            self._earn_portfolio = earn
         timestamps = [
             item.updated_at for item in self._network_snapshots.values()
             if item.updated_at
@@ -4288,17 +4378,30 @@ class WalletController(QObject):
         if generation != self._lending_generation or self._closed:
             return
         active = self._state.active_profile
+        lending = result[0] if isinstance(result, tuple) and len(result) == 2 else None
+        earn = result[1] if isinstance(result, tuple) and len(result) == 2 else None
         if (
-            isinstance(result, dict)
+            isinstance(lending, dict)
             and active is not None
-            and isinstance(result.get("account"), dict)
-            and result["account"].get("address") == active.address
+            and isinstance(lending.get("account"), dict)
+            and lending["account"].get("address") == active.address
         ):
-            self._lending_portfolio = result
+            self._lending_portfolio = lending
         elif active is not None:
             self._lending_portfolio = self._lending_portfolio_service.cached(
                 {"label": active.label, "address": active.address},
                 self._lending_history_period,
+            )
+        if (
+            isinstance(earn, EarnPortfolioSnapshot)
+            and active is not None
+            and earn.account is not None
+            and earn.account.get("address") == active.address
+        ):
+            self._earn_portfolio = earn
+        elif active is not None:
+            self._earn_portfolio = self._earn_portfolio_service.cached(
+                {"label": active.label, "address": active.address},
             )
         self._lending_refreshing = False
         self.publicDataChanged.emit()
@@ -4319,12 +4422,16 @@ class WalletController(QObject):
         active = self._state.active_profile
         if active is None:
             self._lending_portfolio = LendingPortfolioService.unavailable(None)
+            self._earn_portfolio = EarnPortfolioService.unavailable(None)
             self._public_data_updated_text = "Not refreshed"
             self.publicDataChanged.emit()
             return
         self._lending_portfolio = self._lending_portfolio_service.cached(
             {"label": active.label, "address": active.address},
             self._lending_history_period,
+        )
+        self._earn_portfolio = self._earn_portfolio_service.cached(
+            {"label": active.label, "address": active.address},
         )
         bundle = self._public_cache_store.load(active.profile_id, active.address)
         if bundle is None:

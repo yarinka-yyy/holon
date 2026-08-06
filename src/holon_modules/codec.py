@@ -217,6 +217,31 @@ def _capability(value: Any) -> CapabilityDeclaration:
             or tuple(sorted(set(operations))) != tuple(operations)
         ):
             raise _error(code, "Invalid public reader operations")
+    elif kind == "earn_provider":
+        descriptor = _object(
+            descriptor,
+            frozenset({"category", "network_ids", "provider_id"}),
+            code,
+            "Earn provider descriptor",
+        )
+        descriptor["provider_id"] = _identifier(
+            descriptor["provider_id"], code=code, label="Earn provider id",
+        )
+        if descriptor["category"] not in {"LENDING", "VAULT"}:
+            raise _error(code, "Invalid Earn provider category")
+        network_ids = descriptor["network_ids"]
+        if (
+            not isinstance(network_ids, list)
+            or not network_ids
+            or len(network_ids) > 16
+            or any(
+                not isinstance(network_id, str)
+                or _ID_RE.fullmatch(network_id) is None
+                for network_id in network_ids
+            )
+            or tuple(sorted(set(network_ids))) != tuple(network_ids)
+        ):
+            raise _error(code, "Invalid Earn provider networks")
     elif kind == "hermes_toolset":
         descriptor = _object(
             descriptor,
@@ -336,6 +361,16 @@ def decode_manifest(raw: bytes) -> ModuleManifest:
         raise _error(code, "Module file paths must be unique and sorted")
     if any(capability.component not in components for capability in capabilities):
         raise _error(code, "Capability component is undeclared")
+    earn_provider_keys: list[tuple[str, str]] = []
+    for capability in capabilities:
+        if capability.kind != "earn_provider":
+            continue
+        provider_id = str(capability.descriptor["provider_id"])
+        if provider_id != module_id and not provider_id.startswith(f"{module_id}."):
+            raise _error(code, "Earn provider id is outside the module namespace")
+        earn_provider_keys.append((capability.component, provider_id))
+    if len(earn_provider_keys) != len(set(earn_provider_keys)):
+        raise _error(code, "Duplicate Earn provider for component")
     for capability in capabilities:
         if capability.entry_point is None:
             continue

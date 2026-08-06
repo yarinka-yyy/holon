@@ -118,10 +118,10 @@ PageState {
                     onTriggered: walletController.showHistory()
                 }
                 ActionCard {
-                    objectName: "lendingAction"
+                    objectName: "earnAction"
                     width: walletController.modulePageAvailable ? 105 : 144; height: 102
-                    label: "Lending"; iconSource: "assets/lending.svg"
-                    onTriggered: walletController.showLending()
+                    label: "Earn"; iconSource: "assets/lending.svg"
+                    onTriggered: walletController.showEarn()
                 }
                 ActionCard {
                     objectName: "moduleAction"
@@ -256,9 +256,9 @@ PageState {
             }
             Text {
                 visible: walletController.selectedNetwork !== "ethereum"
-                    && !walletController.portfolioData.lendingComplete
+                    && !walletController.portfolioData.earnComplete
                 x: 28; y: assetsCard.y + assetsCard.height + 43
-                text: "Some Lending positions are unavailable · total is not understated"
+                text: "Some Earn positions are unavailable · total is explicitly incomplete"
                 color: Design.warning; font.family: Design.fontFamily; font.pixelSize: 11
             }
         }

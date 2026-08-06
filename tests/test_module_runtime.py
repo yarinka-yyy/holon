@@ -113,6 +113,9 @@ def test_integrity_and_factory_failure_are_contained(tmp_path: Path) -> None:
     assert failed.module_status("holon.mock").state is ModuleLifecycleState.DEGRADED
     assert failed.module_status("holon.mock").code == MODULE_LOAD_FAILED
     assert failed.capabilities() == ()
+    assert [
+        item.declaration.capability_id for item in failed.declared_capabilities()
+    ] == ["holon.mock.read"]
 
 
 def test_duplicate_capability_invalidates_both_modules(tmp_path: Path) -> None:

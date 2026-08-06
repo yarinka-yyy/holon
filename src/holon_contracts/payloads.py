@@ -6,6 +6,8 @@ import re
 from datetime import datetime
 from typing import Any, Mapping
 
+from holon_earn import EarnContractError, EarnPortfolioSnapshot
+
 from .codes import RefusalCode
 from .model import SCHEMA_VERSION, ActionState, MessageKind
 from .registry import load_registry
@@ -1163,6 +1165,14 @@ def validate_payload(kind: MessageKind, payload: Mapping[str, Any]) -> None:
         if payload.get("history_period", "none") not in {"none", "7d", "30d", "all"}:
             raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid Lending history period.")
         return
+    if kind is MessageKind.READ_EARN_PORTFOLIO:
+        if set(payload) - {"force_refresh"} or (
+            "force_refresh" in payload and type(payload["force_refresh"]) is not bool
+        ):
+            raise ContractViolation(
+                RefusalCode.REQUEST_INVALID.value, "Invalid Earn portfolio request.",
+            )
+        return
     if kind in {MessageKind.LENDING_ACTION_INTENT, MessageKind.LENDING_AUTHORITY_INTENT}:
         validate_lending_action_intent(payload)
         return
@@ -1183,6 +1193,14 @@ def validate_payload(kind: MessageKind, payload: Mapping[str, Any]) -> None:
         return
     if kind is MessageKind.LENDING_PORTFOLIO:
         validate_lending_portfolio(payload)
+        return
+    if kind is MessageKind.EARN_PORTFOLIO:
+        try:
+            EarnPortfolioSnapshot.from_dict(payload)
+        except EarnContractError as exc:
+            raise ContractViolation(
+                RefusalCode.REQUEST_INVALID.value, "Invalid Earn portfolio.",
+            ) from exc
         return
     if kind is MessageKind.LENDING_ACTION_PREVIEW:
         validate_lending_action_preview(payload)

@@ -352,6 +352,46 @@ class AuthorityTests(unittest.TestCase):
         self.assertEqual(portfolio.payload["history"]["period"], "7d")
         self.assertIsNone(self.lifecycle.ledger.snapshot.current)
 
+    def test_earn_portfolio_is_public_normalized_and_creates_no_action(self) -> None:
+        from holon_earn import (
+            EarnPortfolioService, EarnProviderRegistry, EarnSnapshotStore,
+            LendingEarnProvider,
+        )
+        from holon_lending import (
+            LendingAnalyticsStore, LendingPortfolioService, LendingReadService,
+        )
+
+        root = Path(self.temporary.name)
+        lending = LendingPortfolioService(
+            LendingReadService.unavailable(),
+            LendingAnalyticsStore(root / "lending-analytics.json"),
+        )
+        registry = EarnProviderRegistry()
+        registry.register(LendingEarnProvider(lending))
+        self.service.lending_portfolio = lending
+        self.service.earn_portfolio = EarnPortfolioService(
+            registry, EarnSnapshotStore(root / "earn-snapshots.json"),
+        )
+        self.lifecycle.disable_signing("POLICY_AUTHORITY_DISABLED")
+
+        response = self.service.handle(
+            make_envelope(
+                MessageKind.READ_EARN_PORTFOLIO, {"force_refresh": False},
+            ),
+            None,
+        )
+
+        self.assertEqual(response.kind, MessageKind.EARN_PORTFOLIO)
+        self.assertEqual(response.payload["earn_schema_version"], "1")
+        self.assertFalse(response.payload["authority_available"])
+        self.assertFalse(response.payload["total_complete"])
+        self.assertEqual(response.payload["providers"][0]["provider_id"], "holon.lending")
+        self.assertTrue(all(
+            product["risk"]["state"] == "NOT_ASSESSED"
+            for product in response.payload["providers"][0]["products"]
+        ))
+        self.assertIsNone(self.lifecycle.ledger.snapshot.current)
+
     def test_lending_preview_works_when_signing_disabled_without_action_state(self) -> None:
         request = make_envelope(
             MessageKind.LENDING_ACTION_INTENT,

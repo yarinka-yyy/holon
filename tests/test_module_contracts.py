@@ -97,3 +97,63 @@ def test_manifest_api_version_is_data_until_runtime_compatibility_check() -> Non
     manifest = decode_manifest((MOCK_ROOT / "module-manifest.json").read_bytes())
     incompatible = replace(manifest, core_api_version="2")
     assert decode_manifest(encode_manifest(incompatible)).core_api_version == "2"
+
+
+def test_earn_provider_descriptor_has_fixed_category_and_sorted_networks() -> None:
+    value = json.loads((MOCK_ROOT / "module-manifest.json").read_text(encoding="utf-8"))
+    capability = {
+        "capability_id": "holon.mock.earn",
+        "component": "wallet",
+        "descriptor": {
+            "category": "VAULT", "network_ids": ["base", "hyperliquid"],
+            "provider_id": "holon.mock.hyperliquid",
+        },
+        "entry_point": "holon_mock.wallet:create_view_model",
+        "kind": "earn_provider",
+        "version": "1",
+    }
+    value["capabilities"] = sorted(
+        [*value["capabilities"], capability], key=lambda item: item["capability_id"],
+    )
+    raw = (json.dumps(value, separators=(",", ":"), sort_keys=True) + "\n").encode()
+    assert any(item.kind == "earn_provider" for item in decode_manifest(raw).capabilities)
+
+    paired = json.loads(raw)
+    guard_capability = dict(capability)
+    guard_capability.update({
+        "capability_id": "holon.mock.earn.guard",
+        "component": "guard",
+        "entry_point": "holon_mock.guard:create_reader",
+    })
+    paired["capabilities"] = sorted(
+        [*paired["capabilities"], guard_capability],
+        key=lambda item: item["capability_id"],
+    )
+    paired_raw = (
+        json.dumps(paired, separators=(",", ":"), sort_keys=True) + "\n"
+    ).encode()
+    providers = [
+        item for item in decode_manifest(paired_raw).capabilities
+        if item.kind == "earn_provider"
+    ]
+    assert {item.component for item in providers} == {"guard", "wallet"}
+    assert {item.descriptor["provider_id"] for item in providers} == {
+        "holon.mock.hyperliquid",
+    }
+
+    for descriptor in (
+        {"category": "RISK", "network_ids": ["base"], "provider_id": "holon.mock.vault"},
+        {"category": "VAULT", "network_ids": ["hyperliquid", "base"], "provider_id": "holon.mock.vault"},
+        {"category": "VAULT", "network_ids": [], "provider_id": "holon.mock.vault"},
+        {"category": "VAULT", "network_ids": ["base"], "provider_id": "holon.other.vault"},
+        {"category": "VAULT", "network_ids": ["base"], "provider_id": "holon.mock.vault", "extra": True},
+    ):
+        invalid = json.loads(raw)
+        next(
+            item for item in invalid["capabilities"]
+            if item["capability_id"] == "holon.mock.earn"
+        )["descriptor"] = descriptor
+        encoded = (json.dumps(invalid, separators=(",", ":"), sort_keys=True) + "\n").encode()
+        with pytest.raises(ModuleContractError) as failure:
+            decode_manifest(encoded)
+        assert failure.value.code == MODULE_MANIFEST_INVALID

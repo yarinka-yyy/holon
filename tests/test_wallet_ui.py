@@ -19,6 +19,22 @@ from PySide6.QtCore import QObject, QMetaObject, Qt
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtTest import QTest
 
+from holon_earn import (
+    AvailabilityState,
+    EarnPortfolioSnapshot,
+    EarnProviderResult,
+    ExitConstraints,
+    FreshnessState,
+    MetricKind,
+    PortfolioState,
+    ProductCategory,
+    ProviderSource,
+    ProviderState,
+    RiskAssessment,
+    YieldMetric,
+    YieldPosition,
+    YieldProduct,
+)
 from holon_wallet.application import (
     WalletApplication,
     _AuthorityBridge,
@@ -231,6 +247,7 @@ def make_app(
     revoke_enabled: bool = True,
     policy_control_client=None,
     module_registry=None,
+    earn_portfolio_service=None,
 ) -> WalletApplication:
     history = HistoryStore(repository.paths)
     mainnet, tracker, rpc = mainnet_services(
@@ -253,13 +270,52 @@ def make_app(
         price_service=StubPriceService(),
         policy_control_client=policy_control_client,
         lending_portfolio_service=StubLendingPortfolioService(),
+        earn_portfolio_service=earn_portfolio_service,
         module_registry=module_registry,
     )
     app._test_mainnet_rpc = rpc
     return app
 
 
-def test_lending_tile_settings_gear_and_dashboard_at_minimum_size(
+class CachedVaultEarnService:
+    def read(self, account, **kwargs) -> EarnPortfolioSnapshot:
+        del kwargs
+        return self._snapshot(account)
+
+    def cached(self, account) -> EarnPortfolioSnapshot:
+        return self._snapshot(account)
+
+    @staticmethod
+    def _snapshot(account) -> EarnPortfolioSnapshot:
+        product = YieldProduct(
+            "fixture.vault:hlp", "fixture.vault", ProductCategory.VAULT,
+            "hlp", "HLP Fixture", "hyperliquid", ("usdc",),
+            YieldPosition("usdc", "20", "20", AvailabilityState.AVAILABLE),
+            (YieldMetric(
+                MetricKind.TRAILING_RETURN, "8.5", "30d",
+                AvailabilityState.AVAILABLE,
+            ),),
+            FreshnessState.CACHED, AvailabilityState.AVAILABLE,
+            "2026-08-06T12:00:00Z",
+            ExitConstraints(
+                AvailabilityState.AVAILABLE, None,
+                limitations=("Exit depends on available liquidity.",),
+            ),
+            RiskAssessment(),
+        )
+        provider = EarnProviderResult(
+            "fixture.vault", ProductCategory.VAULT, ("hyperliquid",),
+            ProviderState.DEGRADED, ProviderSource.CACHED, (product,),
+            "2026-08-06T12:00:00Z", "EARN_PROVIDER_CACHED",
+            "The last confirmed public snapshot is shown.",
+        )
+        return EarnPortfolioSnapshot(
+            PortfolioState.PARTIAL, account, (provider,), True,
+            "EARN_PORTFOLIO_PARTIAL", "Some Earn provider data is cached.",
+        )
+
+
+def test_earn_tile_filters_lending_dashboard_and_settings_at_minimum_size(
     tmp_path, qt_app,
 ) -> None:
     repository = VaultRepository(WalletPaths(tmp_path))
@@ -275,12 +331,16 @@ def test_lending_tile_settings_gear_and_dashboard_at_minimum_size(
         assert child(app, "settingsGearHover").property("y") == pytest.approx(4)
         assert child(app, "settingsGearIcon").property("width") == pytest.approx(22)
         assert child(app, "settingsGearMouseArea").property("width") == pytest.approx(44)
-        assert child(app, "lendingAction").property("enabled")
+        assert child(app, "earnAction").property("enabled")
         assert app.window.findChild(QObject, "lendingAssetRow-aave-v3") is None
 
-        invoke(child(app, "lendingAction"), "trigger")
+        invoke(child(app, "earnAction"), "trigger")
         qt_app.processEvents()
-        assert app.controller.currentScreen == "lending"
+        assert app.controller.currentScreen == "earn"
+        assert [item["id"] for item in app.controller.earnData["availableFilters"]] == [
+            "all", "lending",
+        ]
+        assert child(app, "earnFilters") is not None
         assert child(app, "lendingHistoryChart") is not None
         assert len(app.controller.lendingData["protocols"]) == 3
         assert app.controller.lendingData["hiddenProtocolCount"] == 3
@@ -290,14 +350,42 @@ def test_lending_tile_settings_gear_and_dashboard_at_minimum_size(
         assert child(app, "lendingProtocolColumn").property("height") == pytest.approx(606)
         invoke(child(app, "lendingRefreshButton"), "trigger")
         assert app.controller.lendingHistoryPeriod == "7d"
-        invoke(child(app, "lendingHeaderBackButton"), "trigger")
+        invoke(child(app, "earnHeaderBackButton"), "trigger")
         assert app.controller.currentScreen == "main"
-        invoke(child(app, "lendingAction"), "trigger")
+        invoke(child(app, "earnAction"), "trigger")
         qt_app.processEvents()
         assert child(app, "lendingProtocolColumn").property("height") == pytest.approx(0)
-        invoke(child(app, "lendingHeaderBackButton"), "trigger")
+        invoke(child(app, "earnHeaderBackButton"), "trigger")
         invoke(child(app, "settingsGearButton"), "trigger")
         assert app.controller.currentScreen == "settings"
+        assert app.qml_warnings == []
+    finally:
+        app.close()
+
+
+def test_earn_vault_filter_keeps_cached_position_visible(tmp_path, qt_app) -> None:
+    repository = VaultRepository(WalletPaths(tmp_path))
+    repository.create_new(
+        fresh_password(), repository.new_record(generate_mnemonic(), "Main Account"),
+    )
+    app = make_app(
+        qt_app, repository, earn_portfolio_service=CachedVaultEarnService(),
+    )
+    try:
+        invoke(child(app, "earnAction"), "trigger")
+        qt_app.processEvents()
+        assert [item["id"] for item in app.controller.earnData["availableFilters"]] == [
+            "all", "lending", "vaults",
+        ]
+        assert app.controller.selectEarnFilter("vaults")
+        qt_app.processEvents()
+        assert app.controller.currentScreen == "earn"
+        assert app.controller.earnData["showVaults"] is True
+        assert child(app, "earnVaultColumn").property("height") == pytest.approx(188)
+        vault = app.controller.earnData["vaultProducts"][0]
+        assert vault["dataState"] == "CACHED"
+        assert vault["metricLabel"] == "Trailing return · 30d"
+        assert vault["riskState"] == "Not assessed"
         assert app.qml_warnings == []
     finally:
         app.close()
@@ -487,7 +575,7 @@ def test_create_ui_persists_after_done_and_enables_wallet_controls(
     assert QGuiApplication.clipboard().text() == ""
     assert child(app, "sendAction").property("enabled")
     assert child(app, "transactionsAction").property("enabled")
-    assert child(app, "lendingAction").property("enabled")
+    assert child(app, "earnAction").property("enabled")
     assert child(app, "settingsGearButton").property("enabled")
     assert child(app, "allNetworksCard").property("enabled")
     assert child(app, "ethereumNetworkCard").property("enabled")

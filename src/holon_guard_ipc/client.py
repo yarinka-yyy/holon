@@ -140,6 +140,13 @@ class PipeGuardClient:
             response_timeout=50.0,
         )
 
+    def earn_portfolio(self, force_refresh: bool = False) -> ContractEnvelope:
+        return self.client.request(
+            MessageKind.READ_EARN_PORTFOLIO,
+            {"force_refresh": force_refresh},
+            response_timeout=50.0,
+        )
+
     def module_read(
         self,
         module_id: str,

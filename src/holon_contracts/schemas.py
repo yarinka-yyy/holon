@@ -31,6 +31,7 @@ REQUEST_KINDS = frozenset(
         MessageKind.READ_LENDING_MARKETS,
         MessageKind.READ_LENDING_POSITIONS,
         MessageKind.READ_LENDING_PORTFOLIO,
+        MessageKind.READ_EARN_PORTFOLIO,
         MessageKind.MODULE_READ_REQUEST,
         MessageKind.LENDING_ACTION_INTENT,
         MessageKind.LENDING_AUTHORITY_INTENT,
@@ -49,6 +50,7 @@ PAYLOAD_FIELDS = {
     MessageKind.READ_LENDING_MARKETS: frozenset(),
     MessageKind.READ_LENDING_POSITIONS: frozenset(),
     MessageKind.READ_LENDING_PORTFOLIO: frozenset(),
+    MessageKind.READ_EARN_PORTFOLIO: frozenset(),
     MessageKind.MODULE_READ_REQUEST: frozenset(
         {"module_id", "capability_id", "operation", "params"}
     ),
@@ -112,6 +114,12 @@ PAYLOAD_FIELDS = {
             "status", "authority_available", "account", "network", "asset",
             "summary", "protocols", "recommendation", "delivery", "history",
             "code", "message",
+        }
+    ),
+    MessageKind.EARN_PORTFOLIO: frozenset(
+        {
+            "account", "authority_available", "code", "earn_schema_version",
+            "message", "providers", "status", "total_complete",
         }
     ),
     MessageKind.MODULE_READ_RESPONSE: frozenset(

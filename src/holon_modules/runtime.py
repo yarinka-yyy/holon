@@ -102,11 +102,13 @@ class CapabilityRegistry:
         statuses: dict[str, ModuleStatus] | None = None,
         capabilities: dict[str, RegisteredCapability] | None = None,
         *,
+        declarations: dict[str, RegisteredCapability] | None = None,
         catalog_error: str | None = None,
         composition_id: str = "base",
     ) -> None:
         self._statuses = dict(statuses or {})
         self._capabilities = dict(capabilities or {})
+        self._declarations = dict(declarations or self._capabilities)
         self.catalog_error = catalog_error
         self.composition_id = composition_id
 
@@ -124,6 +126,16 @@ class CapabilityRegistry:
     def capabilities(self, kind: str | None = None) -> tuple[RegisteredCapability, ...]:
         values = (
             item for key, item in sorted(self._capabilities.items())
+            if kind is None or item.declaration.kind == kind
+        )
+        return tuple(values)
+
+    def declared_capabilities(
+        self, kind: str | None = None,
+    ) -> tuple[RegisteredCapability, ...]:
+        """Return verified declarations even when their module factory degraded."""
+        values = (
+            item for key, item in sorted(self._declarations.items())
             if kind is None or item.declaration.kind == kind
         )
         return tuple(values)
@@ -230,12 +242,17 @@ def load_registry(
         )
 
     registered: dict[str, RegisteredCapability] = {}
+    declarations: dict[str, RegisteredCapability] = {}
     for module_id in sorted(manifests):
         manifest = manifests[module_id]
         selected = [
             declaration for declaration in manifest.capabilities
             if declaration.component == component
         ]
+        for declaration in selected:
+            declarations[declaration.capability_id] = RegisteredCapability(
+                module_id, declaration, None, str(roots[module_id]),
+            )
         pending: list[RegisteredCapability] = []
         try:
             for declaration in selected:
@@ -261,5 +278,6 @@ def load_registry(
     return CapabilityRegistry(
         statuses,
         registered,
+        declarations=declarations,
         composition_id=catalog.composition_id,
     )

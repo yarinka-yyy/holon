@@ -68,6 +68,24 @@ def test_public_data_timestamp_uses_system_local_time_format() -> None:
     assert "UTC" not in _display_local_time(timestamp)
 
 
+def test_earn_filter_is_independent_from_wallet_network_selector(tmp_path) -> None:
+    item = controller(tmp_path)
+    secret = password()
+    item.beginCreate()
+    assert item.submitPassword(secret, secret)
+    assert item.finishBackup()
+
+    assert [entry["id"] for entry in item.earnData["availableFilters"]] == [
+        "all", "lending",
+    ]
+    assert item.selectEarnFilter("lending")
+    assert item.selectNetwork("base")
+    assert item.selectedNetwork == "base"
+    assert item.earnFilter == "lending"
+    assert not item.selectEarnFilter("vaults")
+    assert item.earnFilter == "lending"
+
+
 def test_bounded_approval_review_edit_and_wrong_password_are_terminal(tmp_path) -> None:
     item = controller(tmp_path)
     secret = password()
@@ -555,7 +573,7 @@ def test_lending_preflight_failure_returns_to_lending_not_send(tmp_path) -> None
     item._accept_transfer_preflight(5, LendingPreflightError("SIMULATION_FAILED"))
 
     assert responses[-1]["code"] == "SIMULATION_FAILED"
-    assert item.currentScreen == "lending"
+    assert item.currentScreen == "earn"
     assert item.lendingNotice == (
         "Withdraw all from Compound III was not prepared (SIMULATION_FAILED). "
         "Nothing was signed or sent."

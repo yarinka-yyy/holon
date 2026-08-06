@@ -226,7 +226,9 @@ class PackageBuilder:
         target = root / "payload" / "plugin" / "plugin.yaml"
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(generated, encoding="utf-8", newline="\n")
-        for package_name in ("holon_contracts", "holon_guard_ipc", "holon_modules"):
+        for package_name in (
+            "holon_contracts", "holon_earn", "holon_guard_ipc", "holon_modules",
+        ):
             package = self.source_root / "src" / package_name
             sources = sorted(package.glob("*.py"))
             if package_name == "holon_contracts":
@@ -244,7 +246,7 @@ class PackageBuilder:
     ) -> tuple[str, ...]:
         skills_root = self.source_root / "skills" / "crypto"
         skill_files = {path.parent.name: path for path in skills_root.glob("*/SKILL.md")}
-        if set(skill_files) != {"holon", "holon-lending"}:
+        if set(skill_files) != {"holon", "holon-earn", "holon-lending"}:
             raise BuildError("Holon skill source set is invalid")
         for name in sorted(skill_files):
             self._copy_file(

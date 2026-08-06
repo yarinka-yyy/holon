@@ -30,11 +30,12 @@ def test_manifest_is_canonical_and_records_required_versions(tmp_path: Path) -> 
     assert manifest.composition_id == "base"
     assert manifest.core_api_version == "1"
     assert manifest.module_ids == ()
-    assert manifest.skill_ids == ("holon", "holon-lending")
+    assert manifest.skill_ids == ("holon", "holon-earn", "holon-lending")
     assert manifest.hermes_compatibility == ">=0.18.2,<0.19.0"
     skill_files = [item for item in manifest.files if item.component == "skills"]
     assert {item.path for item in skill_files} == {
         "payload/skills/crypto/holon/SKILL.md",
+        "payload/skills/crypto/holon-earn/SKILL.md",
         "payload/skills/crypto/holon-lending/SKILL.md",
     }
     assert all(not item.critical for item in skill_files)

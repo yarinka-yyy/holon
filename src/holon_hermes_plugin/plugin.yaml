@@ -8,6 +8,7 @@ provides_tools:
   - holon_lending_compare
   - holon_lending_positions
   - holon_lending_portfolio
+  - holon_earn_portfolio
   - holon_lending_prepare
   - holon_lending_execute
   - holon_prepare_transfer

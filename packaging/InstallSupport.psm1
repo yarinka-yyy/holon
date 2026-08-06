@@ -60,7 +60,9 @@ function Test-HolLayout($File, $Manifest) {
     $critical = $path.StartsWith("payload/app/") -or $path.StartsWith("payload/plugin/")
     if ($path.StartsWith("payload/skills/crypto/")) {
         $parts = @($path.Split("/"))
-        $critical = $parts.Count -ge 5 -and $parts[3] -cnotin @("holon", "holon-lending")
+        $critical = $parts.Count -ge 5 -and $parts[3] -cnotin @(
+            "holon", "holon-earn", "holon-lending"
+        )
     }
     if ($File.component -cne $component -or $File.critical -ne $critical) {
         throw [System.ArgumentException]::new("Invalid package classification") }
@@ -106,8 +108,9 @@ function Read-HolManifest([string]$Root) {
     }).Count -or ($moduleIds -join "|") -cne (@($moduleIds | Sort-Object -Unique) -join "|")) {
         throw [System.ArgumentException]::new("Invalid module ids") }
     $skillIds = @($manifest.skill_ids)
-    if ($skillIds.Count -lt 2 -or "holon" -cnotin $skillIds -or
-        "holon-lending" -cnotin $skillIds -or @($skillIds | Where-Object {
+    if ($skillIds.Count -lt 3 -or "holon" -cnotin $skillIds -or
+        "holon-earn" -cnotin $skillIds -or "holon-lending" -cnotin $skillIds -or
+        @($skillIds | Where-Object {
             $_ -isnot [string] -or $_ -cnotmatch "^holon(?:-[a-z0-9]+)*$"
         }).Count -or ($skillIds -join "|") -cne (@($skillIds | Sort-Object -Unique) -join "|")) {
         throw [System.ArgumentException]::new("Invalid skill ids") }
@@ -206,7 +209,8 @@ function Read-HolInstalledSkillIds([string]$AppRoot) {
     }
     $ids = @($installed.skill_ids)
     $moduleIds = @($installed.module_ids)
-    if ($ids.Count -lt 2 -or "holon" -cnotin $ids -or "holon-lending" -cnotin $ids -or
+    if ($ids.Count -lt 3 -or "holon" -cnotin $ids -or "holon-earn" -cnotin $ids -or
+        "holon-lending" -cnotin $ids -or
         @($ids | Where-Object {
             $_ -isnot [string] -or $_ -cnotmatch "^holon(?:-[a-z0-9]+)*$"
         }).Count -or ($ids -join "|") -cne (@($ids | Sort-Object -Unique) -join "|") -or

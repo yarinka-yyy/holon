@@ -28,7 +28,7 @@ COMPONENTS = frozenset({
     "installer", "guard", "wallet", "plugin", "contracts", "policy",
     "skills", "initial-data", "modules",
 })
-BASE_SKILL_IDS = ("holon", "holon-lending")
+BASE_SKILL_IDS = ("holon", "holon-earn", "holon-lending")
 CORE_API_VERSION = "1"
 BASE_CATALOG_SHA256 = "8d3c5207bcad0a6af34abbb4b95e5ac10a6d750d77af0bb1c714d596976c4c43"
 ID_RE = re.compile(r"^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$")

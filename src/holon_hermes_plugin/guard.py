@@ -35,6 +35,8 @@ class GuardClient(Protocol):
         self, force_refresh: bool = False, history_period: str = "none",
     ) -> ContractEnvelope: ...
 
+    def earn_portfolio(self, force_refresh: bool = False) -> ContractEnvelope: ...
+
     def module_read(
         self,
         module_id: str,
@@ -85,6 +87,10 @@ class UnavailableGuardClient:
         self, force_refresh: bool = False, history_period: str = "none",
     ) -> ContractEnvelope:
         del force_refresh, history_period
+        raise RuntimeError("Guard is unavailable")
+
+    def earn_portfolio(self, force_refresh: bool = False) -> ContractEnvelope:
+        del force_refresh
         raise RuntimeError("Guard is unavailable")
 
     def module_read(
@@ -195,6 +201,12 @@ class GuardConnector:
         if health.availability is not GuardAvailability.AVAILABLE:
             raise RuntimeError("Guard is unavailable")
         return self._client.lending_portfolio(force_refresh, history_period)
+
+    def earn_portfolio(self, force_refresh: bool = False) -> ContractEnvelope:
+        health = self.ensure_available()
+        if health.availability is not GuardAvailability.AVAILABLE:
+            raise RuntimeError("Guard is unavailable")
+        return self._client.earn_portfolio(force_refresh)
 
     def module_read(
         self,

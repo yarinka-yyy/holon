@@ -11,6 +11,10 @@ from holon_lending import (
 )
 from holon_lending.preflight import unavailable_preview
 from holon_modules import CapabilityRegistry, ModuleLifecycleState
+from holon_earn import (
+    EarnPortfolioService,
+    LENDING_PROVIDER_ID,
+)
 from holon_policy import (
     PolicyEngine, PolicyRevisionStore, PolicyRevisionUnavailable, PolicySnapshot,
     policy_digest,
@@ -36,6 +40,7 @@ class AuthorityService(ResponseMixin):
         lending: LendingReader | None = None,
         lending_actions: ActionProfilesState | None = None,
         lending_portfolio: LendingPortfolioService | None = None,
+        earn_portfolio: EarnPortfolioService | None = None,
         lending_history=None,
         module_registry: CapabilityRegistry | None = None,
     ) -> None:
@@ -50,6 +55,7 @@ class AuthorityService(ResponseMixin):
         self.lending = lending or LendingReadService.unavailable()
         self.lending_actions = lending_actions or ActionProfilesState.load()
         self.lending_portfolio = lending_portfolio
+        self.earn_portfolio = earn_portfolio
         self.lending_history = lending_history
         self.module_registry = module_registry or CapabilityRegistry()
 
@@ -344,6 +350,32 @@ class AuthorityService(ResponseMixin):
                     account, request.payload.get("history_period", "none"),
                 )
             return self._response(request, MessageKind.LENDING_PORTFOLIO, payload)
+        if request.kind is MessageKind.READ_EARN_PORTFOLIO:
+            account = None
+            operations = None
+            try:
+                result = self.lifecycle.wallet.read_public_balances()
+                if result.ok and result.payload is not None:
+                    account = result.payload.get("account")
+                if account is not None and callable(self.lending_history):
+                    operations = self.lending_history(account["address"])
+                if self.lending_portfolio is None or self.earn_portfolio is None:
+                    raise RuntimeError("Earn portfolio is unavailable")
+                lending = self.lending_portfolio.read(
+                    account, operations,
+                    force_refresh=request.payload.get("force_refresh", False),
+                    history_period="none", history_limit=0,
+                )
+                payload = self.earn_portfolio.read(
+                    account,
+                    provider_contexts={
+                        LENDING_PROVIDER_ID: {"lending_payload": lending},
+                    },
+                    force_refresh=request.payload.get("force_refresh", False),
+                ).to_dict()
+            except Exception:
+                payload = EarnPortfolioService.unavailable(account).to_dict()
+            return self._response(request, MessageKind.EARN_PORTFOLIO, payload)
         if request.kind is MessageKind.LENDING_ACTION_INTENT:
             action = request.payload.get("action")
             mode = request.payload.get("amount_mode")

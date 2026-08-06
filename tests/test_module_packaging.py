@@ -68,14 +68,16 @@ def test_base_mock_and_disabled_packages_have_exact_optional_surface(tmp_path: P
         } == {expected}
 
     assert base_manifest.module_ids == ()
-    assert base_manifest.skill_ids == ("holon", "holon-lending")
+    assert base_manifest.skill_ids == ("holon", "holon-earn", "holon-lending")
     assert "holon_mock_status" not in (
         base / "payload/plugin/plugin.yaml"
     ).read_text(encoding="utf-8")
     assert not (base / "payload/plugin/modules").exists()
 
     assert mock_manifest.module_ids == ("holon.mock",)
-    assert mock_manifest.skill_ids == ("holon", "holon-lending", "holon-mock")
+    assert mock_manifest.skill_ids == (
+        "holon", "holon-earn", "holon-lending", "holon-mock",
+    )
     assert "holon_mock_status" in (
         mock / "payload/plugin/plugin.yaml"
     ).read_text(encoding="utf-8")
@@ -84,7 +86,7 @@ def test_base_mock_and_disabled_packages_have_exact_optional_surface(tmp_path: P
     assert next(item for item in mock_manifest.files if item.path == mock_skill).critical
 
     assert disabled_manifest.module_ids == ("holon.mock",)
-    assert disabled_manifest.skill_ids == ("holon", "holon-lending")
+    assert disabled_manifest.skill_ids == ("holon", "holon-earn", "holon-lending")
     assert "holon_mock_status" not in (
         disabled / "payload/plugin/plugin.yaml"
     ).read_text(encoding="utf-8")
@@ -178,5 +180,6 @@ def test_legacy_v2_ownership_migrates_only_fixed_base_skills(tmp_path: Path) -> 
 
     assert _install(base, local, hermes)[0] == 0
     assert (skills / "holon/SKILL.md").read_text(encoding="utf-8") != "holon"
+    assert (skills / "holon-earn/SKILL.md").is_file()
     assert (skills / "holon-lending/SKILL.md").read_text(encoding="utf-8") != "holon-lending"
     assert (skills / "holon-private/SKILL.md").read_text(encoding="utf-8") == "holon-private"

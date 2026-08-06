@@ -8,7 +8,7 @@ platforms: [windows]
 metadata:
   hermes:
     tags: [holon, lending, usdc, aave, compound, morpho]
-    related_skills: [holon]
+    related_skills: [holon, holon-earn]
 ---
 
 # Holon Lending

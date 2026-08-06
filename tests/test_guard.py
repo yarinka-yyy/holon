@@ -53,10 +53,12 @@ class FakeProcess:
 class RecordingPipeClient:
     def __init__(self) -> None:
         self.kind = None
+        self.payload = None
         self.response_timeout = None
 
     def request(self, kind, payload=None, **kwargs):
         self.kind = kind
+        self.payload = payload
         self.response_timeout = kwargs.get("response_timeout")
         return object()
 
@@ -118,6 +120,15 @@ class GuardConnectorTests(unittest.TestCase):
         self.assertIs(client.kind, MessageKind.OPEN_WALLET)
         self.assertEqual(client.response_timeout, WALLET_OPEN_RESPONSE_TIMEOUT)
         self.assertGreater(WALLET_OPEN_RESPONSE_TIMEOUT, 10.0)
+
+    def test_earn_portfolio_uses_public_read_contract(self) -> None:
+        client = RecordingPipeClient()
+
+        PipeGuardClient(client).earn_portfolio(force_refresh=True)
+
+        self.assertIs(client.kind, MessageKind.READ_EARN_PORTFOLIO)
+        self.assertEqual(client.payload, {"force_refresh": True})
+        self.assertEqual(client.response_timeout, 50.0)
 
     @patch("holon_hermes_plugin.launcher.wait_for_pipe")
     @patch("holon_hermes_plugin.launcher.subprocess.Popen")

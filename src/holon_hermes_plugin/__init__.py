@@ -16,6 +16,7 @@ def _load_shared(name: str) -> None:
         sys.modules[name] = module
 
 
+_load_shared("holon_earn")
 _load_shared("holon_contracts")
 _load_shared("holon_guard_ipc")
 _load_shared("holon_modules")

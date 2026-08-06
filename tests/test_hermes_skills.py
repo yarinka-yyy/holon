@@ -14,9 +14,10 @@ ROOT = Path(__file__).parents[1]
 SKILLS_ROOT = ROOT / "skills" / "crypto"
 PLUGIN_MANIFEST = ROOT / "src" / "holon_hermes_plugin" / "plugin.yaml"
 HERMES_PYTHON_ENV = "HOLON_TEST_HERMES_PYTHON"
-EXPECTED_SKILLS = {"holon", "holon-lending"}
+EXPECTED_SKILLS = {"holon", "holon-earn", "holon-lending"}
 INDEX_TRIGGERS = {
-    "holon": "Holon, wallet, crypto, transfer, or lending",
+    "holon": "Holon, wallet, crypto, transfer, Earn",
+    "holon-earn": "Holon Earn, yield, APY, return",
     "holon-lending": "Holon Lending, Aave, Compound, Morpho",
 }
 LANGUAGE_RULE = (
@@ -53,7 +54,7 @@ def _provided_tools() -> set[str]:
 def test_skill_source_is_exact_and_compact() -> None:
     skill_files = set(SKILLS_ROOT.glob("*/SKILL.md"))
     assert {path.parent.name for path in skill_files} == EXPECTED_SKILLS
-    assert len(skill_files) == 2
+    assert len(skill_files) == 3
     for name in EXPECTED_SKILLS:
         fields, frontmatter, body = _frontmatter_and_body(name)
         assert fields == {
@@ -68,7 +69,11 @@ def test_skill_source_is_exact_and_compact() -> None:
         assert 1 <= len(fields["description"]) <= 500
         assert len(_content(name)) <= 8_000
         assert "  hermes:" in frontmatter
-        related = "holon-lending" if name == "holon" else "holon"
+        related = {
+            "holon": "holon-earn, holon-lending",
+            "holon-earn": "holon, holon-lending",
+            "holon-lending": "holon, holon-earn",
+        }[name]
         assert f"related_skills: [{related}]" in frontmatter
         assert body.strip()
 
@@ -83,6 +88,15 @@ def test_language_rule_is_first_and_scenario_contracts_are_present() -> None:
             "PROTECTED_FLOW_STARTED",
             "Never ask the user to type or paste a seed phrase",
             "holon-lending",
+        ),
+        "holon-earn": (
+            "only `/holon-earn`",
+            "holon_earn_portfolio",
+            "SUPPLY_APY",
+            "TRAILING_RETURN",
+            "NOT_ASSESSED",
+            "total explicitly incomplete",
+            "load and follow `holon-lending`",
         ),
         "holon-lending": (
             "only `/holon-lending`",
@@ -133,7 +147,7 @@ index = build_skills_system_prompt(
 commands = get_skill_commands()
 views = {{
     name: json.loads(skill_view(name, preprocess=False))
-    for name in ("holon", "holon-lending")
+    for name in ("holon", "holon-earn", "holon-lending")
 }}
 print(json.dumps({{
     "python": list(sys.version_info[:2]),
@@ -171,7 +185,7 @@ def test_installed_hermes_discovers_skills_in_isolated_home(tmp_path: Path) -> N
     result = json.loads(completed.stdout)
 
     assert result["python"] == [3, 11]
-    assert set(result["commands"]) == {"/holon", "/holon-lending"}
+    assert set(result["commands"]) == {"/holon", "/holon-earn", "/holon-lending"}
     assert set(result["commands"].values()) == EXPECTED_SKILLS
     for name in EXPECTED_SKILLS:
         fields, _, body = _frontmatter_and_body(name)

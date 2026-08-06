@@ -260,6 +260,7 @@ class WalletApplication:
         status_client: WalletStatusClient | None = None,
         policy_control_client=None,
         lending_portfolio_service: object | None = None,
+        earn_portfolio_service: object | None = None,
         module_registry: CapabilityRegistry | None = None,
     ) -> None:
         self.qt_app = qt_app or QGuiApplication.instance()
@@ -303,6 +304,7 @@ class WalletApplication:
             ),
             policy_control_client=policy_control_client,
             lending_portfolio_service=lending_portfolio_service,
+            earn_portfolio_service=earn_portfolio_service,
             module_registry=(
                 module_registry
                 if module_registry is not None

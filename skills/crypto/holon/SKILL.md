@@ -1,6 +1,6 @@
 ---
 name: holon
-description: "Use for any Holon, wallet, crypto, transfer, or lending request. Covers setup, balances, approvals, action status, cancellation, and recovery; load before generic wallet guidance."
+description: "Use for any Holon, wallet, crypto, transfer, Earn, or Lending request. Covers setup, balances, yield routing, approvals, action status, cancellation, and recovery."
 version: "0.1.0-alpha"
 author: Holon
 license: Apache-2.0
@@ -8,7 +8,7 @@ platforms: [windows]
 metadata:
   hermes:
     tags: [holon, wallet, crypto, guard, onboarding]
-    related_skills: [holon-lending]
+    related_skills: [holon-earn, holon-lending]
 ---
 
 # Holon
@@ -39,6 +39,7 @@ Use the smallest matching path:
 | Start, set up, create, import, or open Holon | Follow **Onboarding and Wallet access**. |
 | Check integration availability | Call `holon_health`. |
 | Read Wallet ETH or USDC balances | Call `holon_wallet_balances`. |
+| Compare Earn providers, yield metrics, exit conditions, or risk state | Load and follow `holon-earn`. |
 | Send ETH or USDC | Follow **Transfer workflow**. |
 | Compare yield, read positions, supply, withdraw, approval, or Lending recovery | Load and follow `holon-lending`. |
 | Check, cancel, or recover an existing action | Follow **Lifecycle and recovery** using the exact known `action_id`. |

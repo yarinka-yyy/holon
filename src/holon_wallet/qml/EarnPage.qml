@@ -8,14 +8,17 @@ PageState {
     property var primaryProtocols: walletController.lendingData.visibleProtocols || []
     property var emptyProtocols: walletController.lendingData.emptyProtocols || []
     property int hiddenProtocolCount: walletController.lendingData.hiddenProtocolCount || 0
+    property bool showLending: walletController.earnData.showLending
+    property bool showVaults: walletController.earnData.showVaults
+    property var vaultProducts: walletController.earnData.vaultProducts || []
     function protocolModel() {
         return showAllProtocols ? primaryProtocols.concat(emptyProtocols) : primaryProtocols
     }
     onActiveChanged: if (active) showAllProtocols = false
 
     ScreenHeader {
-        objectName: "lendingHeader"; x: 28; y: 42; width: parent.width - 56
-        title: "Lending"; subtitle: "Base USDC positions and yield"
+        objectName: "earnHeader"; x: 28; y: 42; width: parent.width - 56
+        title: "Earn"; subtitle: "Compare Lending and available Vaults"
         onBackRequested: walletController.showMain()
     }
 
@@ -32,22 +35,51 @@ PageState {
         }
     }
 
+    Row {
+        id: earnFilters; objectName: "earnFilters"
+        x: 28; y: walletController.lendingNotice.length > 0 ? 182 : 112
+        spacing: 8
+        Repeater {
+            model: walletController.earnData.availableFilters || []
+            delegate: Rectangle {
+                required property var modelData
+                objectName: "earnFilter-" + modelData.id
+                width: 88; height: 34; radius: 11
+                property bool selected: walletController.earnFilter === modelData.id
+                color: selected ? Design.accentSoft : Design.surfaceSecondary
+                border.width: 1; border.color: selected ? Design.accent : Design.border
+                Text {
+                    anchors.centerIn: parent; text: modelData.label
+                    color: parent.selected ? Design.accent : Design.textMuted
+                    font.family: Design.fontFamily; font.pixelSize: 12
+                }
+                MouseArea {
+                    anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                    onClicked: walletController.selectEarnFilter(modelData.id)
+                }
+            }
+        }
+    }
+
     Flickable {
         id: scroll
-        x: 0; y: walletController.lendingNotice.length > 0 ? 182 : 120
+        x: 0; y: walletController.lendingNotice.length > 0 ? 230 : 160
         width: parent.width; height: parent.height - y - 6
         contentWidth: width; contentHeight: content.height + 28
         clip: true; boundsBehavior: Flickable.StopAtBounds
 
         Item {
             id: content; width: scroll.width
-            height: protocolColumn.y + protocolColumn.height + 86
+            height: Math.max(
+                root.showLending ? protocolColumn.y + protocolColumn.height : 0,
+                root.showVaults ? vaultColumn.y + vaultColumn.height : 0
+            ) + 86
 
             Item {
                 objectName: "lendingRefreshButton"
                 anchors.right: parent.right; anchors.rightMargin: 28
                 y: 0; width: 126; height: 34
-                function trigger() { walletController.refreshLendingData(true) }
+                function trigger() { walletController.refreshEarnData(true) }
                 Text {
                     anchors.right: refreshIcon.left; anchors.rightMargin: 8
                     anchors.verticalCenter: parent.verticalCenter; text: "Refresh now"
@@ -59,7 +91,7 @@ PageState {
                     anchors.verticalCenter: parent.verticalCenter
                     width: 19; height: 19; source: "assets/refresh.svg"
                     RotationAnimation on rotation {
-                        running: walletController.lendingDataRefreshing
+                        running: walletController.earnDataRefreshing
                         from: 0; to: 360; duration: 800; loops: Animation.Infinite
                     }
                 }
@@ -70,12 +102,13 @@ PageState {
             }
 
             Text {
-                x: 28; y: 9; text: walletController.lendingData.updatedText
+                x: 28; y: 9; text: walletController.earnData.updatedText
                 color: Design.textFaint; font.family: Design.fontFamily; font.pixelSize: 12
             }
 
             SurfaceCard {
                 objectName: "lendingSummaryCard"
+                visible: root.showLending
                 x: 28; y: 44; width: 458; height: 132
                 Row {
                     x: 18; y: 20; spacing: 10
@@ -111,7 +144,7 @@ PageState {
             }
 
             Row {
-                id: chartModes; x: 28; y: 194; spacing: 8
+                id: chartModes; visible: root.showLending; x: 28; y: 194; spacing: 8
                 Repeater {
                     model: [{id: "position", label: "Position"}, {id: "yield", label: "Yield"}]
                     delegate: Rectangle {
@@ -133,6 +166,7 @@ PageState {
             }
 
             Row {
+                id: historyPeriods; visible: root.showLending
                 x: 304; y: 194; spacing: 6
                 Repeater {
                     model: [{id: "7d", label: "7D"}, {id: "30d", label: "30D"}, {id: "all", label: "All"}]
@@ -157,6 +191,7 @@ PageState {
 
             SurfaceCard {
                 objectName: "lendingChartCard"
+                visible: root.showLending
                 x: 28; y: 242; width: 458; height: 258
                 Text {
                     x: 16; y: 13
@@ -271,7 +306,7 @@ PageState {
             Text {
                 id: noActiveProtocols
                 x: 28; y: 518; width: 458
-                visible: root.primaryProtocols.length === 0 && root.hiddenProtocolCount > 0
+                visible: root.showLending && root.primaryProtocols.length === 0 && root.hiddenProtocolCount > 0
                 text: "No active Lending positions"
                 color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 12
                 horizontalAlignment: Text.AlignHCenter
@@ -281,7 +316,7 @@ PageState {
                 id: protocolToggle; objectName: "lendingProtocolToggle"
                 x: 28; y: noActiveProtocols.visible ? 546 : 518
                 width: 458; height: 40; radius: 12
-                visible: root.hiddenProtocolCount > 0
+                visible: root.showLending && root.hiddenProtocolCount > 0
                 color: protocolToggleMouse.containsMouse ? Design.surfaceSecondary : "transparent"
                 border.width: 1; border.color: Design.border
                 function trigger() { root.showAllProtocols = !root.showAllProtocols }
@@ -301,6 +336,7 @@ PageState {
 
             Column {
                 id: protocolColumn; objectName: "lendingProtocolColumn"
+                visible: root.showLending
                 x: 28
                 y: protocolToggle.visible ? protocolToggle.y + protocolToggle.height + 14 : 518
                 width: 458; spacing: 12
@@ -341,8 +377,55 @@ PageState {
                 }
             }
 
+            Column {
+                id: vaultColumn; objectName: "earnVaultColumn"
+                visible: root.showVaults
+                x: 28
+                y: root.showLending ? protocolColumn.y + protocolColumn.height + 26 : 44
+                width: 458; spacing: 12
+                Repeater {
+                    model: root.vaultProducts
+                    delegate: SurfaceCard {
+                        required property var modelData
+                        objectName: "earnVaultCard-" + modelData.productId
+                        width: vaultColumn.width; height: 188
+                        Text {
+                            x: 16; y: 16; width: 300; text: modelData.displayName
+                            color: Design.text; font.family: Design.fontFamily
+                            font.pixelSize: 17; font.weight: Font.DemiBold; elide: Text.ElideRight
+                        }
+                        Text {
+                            anchors.right: parent.right; anchors.rightMargin: 16; y: 19
+                            text: modelData.dataState
+                            color: modelData.dataState === "LIVE" ? Design.accent
+                                : modelData.dataState === "UNAVAILABLE" ? Design.danger : Design.warning
+                            font.family: Design.fontFamily; font.pixelSize: 11
+                        }
+                        Text { x: 16; y: 51; text: modelData.networkId; color: Design.textFaint; font.family: Design.fontFamily; font.pixelSize: 11 }
+                        Rectangle { x: 16; y: 76; width: parent.width - 32; height: 1; color: "#12FFFFFF" }
+                        Text { x: 16; y: 91; text: "Position"; color: Design.textFaint; font.family: Design.fontFamily; font.pixelSize: 10 }
+                        Text { x: 16; y: 110; text: walletController.balancesVisible ? modelData.position : "••••"; color: Design.text; font.family: Design.fontFamily; font.pixelSize: 16; font.weight: Font.DemiBold }
+                        Text { x: 220; y: 91; text: modelData.metricLabel; color: Design.textFaint; font.family: Design.fontFamily; font.pixelSize: 10 }
+                        Text { x: 220; y: 110; text: modelData.metricValue; color: Design.text; font.family: Design.fontFamily; font.pixelSize: 16; font.weight: Font.DemiBold }
+                        Text { x: 16; y: 143; text: "Risk: " + modelData.riskState; color: Design.warning; font.family: Design.fontFamily; font.pixelSize: 10 }
+                        Text { x: 16; y: 162; width: parent.width - 32; text: modelData.exitConstraints; color: Design.textFaint; font.family: Design.fontFamily; font.pixelSize: 9; elide: Text.ElideRight }
+                    }
+                }
+                Text {
+                    visible: root.vaultProducts.length === 0
+                    width: parent.width; height: 42; text: "Vault provider data is unavailable"
+                    color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 12
+                    horizontalAlignment: Text.AlignHCenter
+                }
+            }
+
             Text {
-                x: 28; y: protocolColumn.y + protocolColumn.height + 26; width: 458
+                visible: root.showLending
+                x: 28
+                y: root.showVaults
+                    ? vaultColumn.y + vaultColumn.height + 26
+                    : protocolColumn.y + protocolColumn.height + 26
+                width: 458
                 text: "To supply or withdraw, ask Hermes. Wallet will open the prepared transaction for confirmation."
                 color: Design.textFaint; font.family: Design.fontFamily; font.pixelSize: 11
                 wrapMode: Text.WordWrap; horizontalAlignment: Text.AlignHCenter

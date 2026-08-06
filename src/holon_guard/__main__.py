@@ -28,6 +28,13 @@ from holon_modules import (
     default_catalog_path,
     load_registry as load_module_registry,
 )
+from holon_earn import (
+    EarnPortfolioService,
+    EarnProviderRegistry,
+    EarnSnapshotStore,
+    LendingEarnProvider,
+    register_module_providers,
+)
 from holon_installation import verify_installed
 
 from .action_model import ActionStateSnapshot
@@ -211,16 +218,25 @@ def main(argv: list[str] | None = None) -> int:
                 except HistoryUnavailableError:
                     return None
 
+            lending_portfolio = LendingPortfolioService(
+                lending_reader,
+                LendingAnalyticsStore(data_dir / "lending-analytics.json"),
+            )
+            earn_registry = EarnProviderRegistry()
+            earn_registry.register(LendingEarnProvider(lending_portfolio))
+            register_module_providers(earn_registry, module_registry)
+            earn_portfolio = EarnPortfolioService(
+                earn_registry, EarnSnapshotStore(data_dir / "earn-snapshots.json"),
+            )
+
             authority = AuthorityService(
                 lifecycle, PolicyEngine(policy_snapshot.policy), audit,
                 security_failure=failure, policy_snapshot=policy_snapshot,
                 revision_store=revision_store,
                 lending=lending_reader,
                 lending_actions=ActionProfilesState.load(),
-                lending_portfolio=LendingPortfolioService(
-                    lending_reader,
-                    LendingAnalyticsStore(data_dir / "lending-analytics.json"),
-                ),
+                lending_portfolio=lending_portfolio,
+                earn_portfolio=earn_portfolio,
                 lending_history=lending_history,
                 module_registry=module_registry,
             )

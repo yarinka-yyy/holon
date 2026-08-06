@@ -14,6 +14,12 @@ from requests import exceptions as request_errors
 from web3 import Web3
 
 from holon_contracts.registry import load_registry
+from holon_earn import (
+    AvailabilityState,
+    EarnPortfolioSnapshot,
+    ProductCategory,
+    YieldProduct,
+)
 
 from .public_data import NetworkSnapshot, PublicDataStatus
 
@@ -450,7 +456,7 @@ def portfolio_to_map(
     snapshots: Mapping[str, NetworkSnapshot],
     prices: MarketPriceSnapshot | PriceSnapshot,
     selected_network: str,
-    lending_protocols: object = None,
+    earn_portfolio: object = None,
     *,
     show_zero_balances: bool = True,
 ) -> dict[str, object]:
@@ -496,45 +502,62 @@ def portfolio_to_map(
             or selected_network != "all" and item.get("isGasAsset") is True
         )
     )
-    lending_items = (
-        list(lending_protocols) if isinstance(lending_protocols, (list, tuple))
-        else []
+    legacy_lending = (
+        list(earn_portfolio) if isinstance(earn_portfolio, (list, tuple)) else None
     )
-    lending_included = "base" in selected_ids and lending_protocols is not None
-    known_lending_complete = (
-        len(lending_items) == 3
-        and all(
-            isinstance(item, Mapping)
+    normalized_earn = (
+        earn_portfolio if isinstance(earn_portfolio, EarnPortfolioSnapshot) else None
+    )
+    if normalized_earn is not None:
+        selected_products = tuple(
+            product for product in normalized_earn.products
+            if selected_network == "all" or product.network_id == selected_network
+        )
+        earn_complete = normalized_earn.complete_for(selected_network)
+        earn_assets = tuple(
+            _earn_asset_model(product, price_by_market)
+            for product in selected_products
+            if _earn_position_nonzero(product)
+        )
+        lending_complete = _category_complete(
+            normalized_earn, ProductCategory.LENDING, selected_network,
+        )
+    else:
+        lending_items = legacy_lending or []
+        lending_included = "base" in selected_ids and legacy_lending is not None
+        known_lending_complete = (
+            len(lending_items) == 3
+            and all(
+                isinstance(item, Mapping)
+                and isinstance(item.get("position_atomic"), str)
+                and item["position_atomic"].isdecimal()
+                for item in lending_items
+            )
+        )
+        earn_complete = not lending_included or known_lending_complete
+        lending_complete = earn_complete
+        earn_assets = tuple(
+            _lending_asset_model(item, price_by_market)
+            for item in lending_items
+            if lending_included
+            and isinstance(item, Mapping)
             and isinstance(item.get("position_atomic"), str)
             and item["position_atomic"].isdecimal()
-            for item in lending_items
+            and int(item["position_atomic"]) > 0
         )
-    )
-    lending_complete = not lending_included or known_lending_complete
-    lending_assets = tuple(
-        _lending_asset_model(item, price_by_market)
-        for item in lending_items
-        if lending_included
-        and isinstance(item, Mapping)
-        and isinstance(item.get("position_atomic"), str)
-        and item["position_atomic"].isdecimal()
-        and int(item["position_atomic"]) > 0
-    )
-    asset_models = wallet_assets + lending_assets
-    total_models = all_wallet_assets + lending_assets
-    all_lending_total = (
-        sum(int(item["position_atomic"]) for item in lending_items)
-        if known_lending_complete else None
-    )
+    asset_models = wallet_assets + earn_assets
+    total_models = all_wallet_assets + earn_assets
     network_models = tuple(
         _network_model(
             network_id, snapshots[network_id], price_by_market,
-            all_lending_total if network_id == "base" and lending_protocols is not None else 0,
+            _network_earn_usd(
+                normalized_earn, legacy_lending, network_id, price_by_market,
+            ),
         )
         for network_id in selected_ids
     )
     total_available = (
-        lending_complete
+        earn_complete
         and all(bool(asset["totalAvailable"]) for asset in total_models)
     )
     total = (
@@ -553,6 +576,7 @@ def portfolio_to_map(
         "assets": visible_assets,
         "networks": list(network_models),
         "lendingComplete": lending_complete,
+        "earnComplete": earn_complete,
     }
 
 
@@ -744,7 +768,7 @@ def _network_model(
     network_id: str,
     snapshot: NetworkSnapshot,
     prices: Mapping[str, MarketPrice],
-    lending_atomic: int | None = 0,
+    earn_usd: Decimal | None = Decimal(0),
 ) -> dict[str, object]:
     registry = load_registry()
     total = Decimal(0)
@@ -763,14 +787,10 @@ def _network_model(
             total += Decimal(balance.atomic_units).scaleb(-meta.decimals) * price.value_usd
         elif balance.atomic_units:
             available = False
-    usdc_price = prices.get("usdc-usd")
-    if lending_atomic is None:
+    if earn_usd is None:
         available = False
-    elif lending_atomic:
-        if usdc_price is None or usdc_price.value_usd is None:
-            available = False
-        else:
-            total += Decimal(lending_atomic).scaleb(-6) * usdc_price.value_usd
+    else:
+        total += earn_usd
     return {
         "networkId": network_id,
         "label": snapshot.label,
@@ -778,6 +798,145 @@ def _network_model(
         "totalAvailable": available,
         "totalUsd": format_usd(total) if available else "Data unavailable",
     }
+
+
+def _category_complete(
+    snapshot: EarnPortfolioSnapshot,
+    category: ProductCategory,
+    selected_network: str,
+) -> bool:
+    category_providers = tuple(
+        provider for provider in snapshot.providers if provider.category is category
+    )
+    if not category_providers:
+        return False
+    providers = tuple(
+        provider for provider in category_providers
+        if selected_network == "all" or selected_network in provider.network_ids
+    )
+    if not providers:
+        return selected_network != "all"
+    return all(
+        provider.products
+        and all(
+            product.position.availability is AvailabilityState.AVAILABLE
+            for product in provider.products
+            if selected_network == "all" or product.network_id == selected_network
+        )
+        and any(
+            selected_network == "all" or product.network_id == selected_network
+            for product in provider.products
+        )
+        for provider in providers
+    )
+
+
+def _network_earn_usd(
+    snapshot: EarnPortfolioSnapshot | None,
+    legacy_lending: list[object] | None,
+    network_id: str,
+    prices: Mapping[str, MarketPrice],
+) -> Decimal | None:
+    if snapshot is not None:
+        if not snapshot.complete_for(network_id):
+            return None
+        products = tuple(
+            product for product in snapshot.products if product.network_id == network_id
+        )
+        values = tuple(_earn_product_usd(product, prices) for product in products)
+        return None if any(value is None for value in values) else sum(
+            (value for value in values if value is not None), Decimal(0),
+        )
+    if network_id != "base" or legacy_lending is None:
+        return Decimal(0)
+    if (
+        len(legacy_lending) != 3
+        or any(
+            not isinstance(item, Mapping)
+            or not isinstance(item.get("position_atomic"), str)
+            or not item["position_atomic"].isdecimal()
+            for item in legacy_lending
+        )
+    ):
+        return None
+    atomic = sum(int(item["position_atomic"]) for item in legacy_lending)
+    if not atomic:
+        return Decimal(0)
+    price = prices.get("usdc-usd")
+    return (
+        Decimal(atomic).scaleb(-6) * price.value_usd
+        if price is not None and price.value_usd is not None else None
+    )
+
+
+def _earn_position_nonzero(product: YieldProduct) -> bool:
+    try:
+        return bool(
+            product.position.value_usd is not None
+            and Decimal(product.position.value_usd) > 0
+            or product.position.amount is not None
+            and Decimal(product.position.amount) > 0
+        )
+    except (ArithmeticError, ValueError):
+        return False
+
+
+def _earn_product_usd(
+    product: YieldProduct, prices: Mapping[str, MarketPrice],
+) -> Decimal | None:
+    if product.position.availability is not AvailabilityState.AVAILABLE:
+        return None
+    if product.position.value_usd is not None:
+        return Decimal(product.position.value_usd)
+    if product.position.amount is None:
+        return None
+    amount = Decimal(product.position.amount)
+    if not amount:
+        return Decimal(0)
+    meta = load_registry().asset_by_id.get(product.position.asset_id)
+    price = (
+        prices.get(meta.market_price_id)
+        if meta is not None and meta.market_price_id is not None else None
+    )
+    return amount * price.value_usd if price is not None and price.value_usd is not None else None
+
+
+def _earn_asset_model(
+    product: YieldProduct, prices: Mapping[str, MarketPrice],
+) -> dict[str, object]:
+    value = _earn_product_usd(product, prices)
+    meta = load_registry().asset_by_id.get(product.position.asset_id)
+    symbol = meta.display_symbol if meta is not None else product.position.asset_id.upper()
+    amount = product.position.amount
+    protocol = product.protocol_id
+    is_lending = product.category is ProductCategory.LENDING
+    return {
+        "assetId": protocol if is_lending else product.product_id,
+        "isGasAsset": False,
+        "symbol": f"{symbol} · {product.network_id} {product.category.value.title()}",
+        "label": product.display_name,
+        "balanceAvailable": product.position.availability is AvailabilityState.AVAILABLE,
+        "amount": _format_earn_amount(amount, symbol),
+        "totalAvailable": value is not None,
+        "usd": format_usd(value) if value is not None else "Data unavailable",
+        "usdRaw": format(value, "f") if value is not None else "",
+        "breakdown": [],
+        "dataState": product.freshness.value,
+        "iconSource": {
+            "aave-v3": "assets/aave-logo-white.png",
+            "compound-v3": "assets/compound-logo-white.svg",
+            "morpho-v1": "assets/morpho-logo-white.svg",
+        }.get(protocol, "assets/usdc.webp"),
+    }
+
+
+def _format_earn_amount(value: str | None, symbol: str) -> str:
+    if value is None:
+        return "Data unavailable"
+    parsed = Decimal(value)
+    places = 2 if symbol == "USDC" else 6
+    rendered = parsed.quantize(Decimal(1).scaleb(-places), rounding=ROUND_DOWN)
+    return f"{rendered:.{places}f} {symbol}"
 
 
 def _lending_asset_model(

@@ -7,7 +7,8 @@ from pathlib import Path
 
 SOURCE_ROOT = Path(__file__).parents[1] / "src"
 COMPATIBLE_PACKAGES = (
-    "holon_contracts", "holon_guard_ipc", "holon_hermes_plugin", "holon_modules",
+    "holon_contracts", "holon_earn", "holon_guard_ipc", "holon_hermes_plugin",
+    "holon_modules",
 )
 ALLOWED_IMPORT_ROOTS = {
     "__future__",
@@ -15,11 +16,13 @@ ALLOWED_IMPORT_ROOTS = {
     "collections",
     "dataclasses",
     "datetime",
+    "decimal",
     "enum",
     "functools",
     "hashlib",
     "importlib",
     "holon_contracts",
+    "holon_earn",
     "holon_guard_ipc",
     "holon_modules",
     "json",
@@ -31,6 +34,7 @@ ALLOWED_IMPORT_ROOTS = {
     "stat",
     "subprocess",
     "sys",
+    "tempfile",
     "threading",
     "time",
     "types",
