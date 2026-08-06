@@ -220,6 +220,29 @@ class GuardConnector:
             raise RuntimeError("Guard is unavailable")
         return self._client.module_read(module_id, capability_id, operation, params)
 
+    def module_action_preview(
+        self, module_id: str, capability_id: str, action_type: str,
+        params: dict[str, object],
+    ) -> ContractEnvelope:
+        health = self.ensure_available()
+        if health.availability is not GuardAvailability.AVAILABLE:
+            raise RuntimeError("Guard is unavailable")
+        return self._client.module_action_preview(
+            module_id, capability_id, action_type, params,
+        )
+
+    def module_action_execute(
+        self, module_id: str, capability_id: str, action_type: str,
+        params: dict[str, object], preview_digest: str, action_id: str,
+    ) -> ContractEnvelope:
+        health = self.ensure_available()
+        if health.availability is not GuardAvailability.AVAILABLE:
+            raise RuntimeError("Guard is unavailable")
+        return self._client.module_action_execute(
+            module_id, capability_id, action_type, params,
+            preview_digest, action_id,
+        )
+
     def lending_action_preview(
         self, payload: dict[str, object],
     ) -> ContractEnvelope:

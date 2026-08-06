@@ -30,6 +30,7 @@ if (-not (Test-Path -LiteralPath $moduleCatalog -PathType Leaf)) {
     throw "Guard module catalog is unavailable"
 }
 $moduleBuildArguments = @("--add-data", "$moduleCatalog;holon_modules")
+$includeHyperliquidSdk = $false
 $compositionModules = Join-Path $CompositionRoot "modules"
 $catalog = Get-Content -LiteralPath $moduleCatalog -Raw -Encoding UTF8 | ConvertFrom-Json
 foreach ($entry in @($catalog.modules)) {
@@ -40,6 +41,7 @@ foreach ($entry in @($catalog.modules)) {
     )
     $moduleManifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
     if (-not $entry.enabled) { continue }
+    if ($entry.module_id -ceq "holon.perpdex") { $includeHyperliquidSdk = $true }
     foreach ($file in @($moduleManifest.files | Where-Object {
         $_.targets -ccontains "guard" -or $_.targets -ccontains "shared"
     })) {
@@ -60,6 +62,9 @@ foreach ($entry in @($catalog.modules)) {
     })) {
         $moduleBuildArguments += @("--hidden-import", $capability.entry_point.Split(":")[0])
     }
+}
+if ($includeHyperliquidSdk) {
+    $moduleBuildArguments += @("--collect-all", "hyperliquid")
 }
 $versionFile = Join-Path $PSScriptRoot "windows-version.txt"
 New-Item -ItemType Directory -Force -Path $buildRoot | Out-Null

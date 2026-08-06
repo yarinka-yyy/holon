@@ -1,13 +1,16 @@
 param(
     [string]$PythonPath = "",
     [string]$InnoCompilerPath = "",
-    [string]$CompositionId = "base",
+    [string]$CompositionId = "extended",
     [string[]]$ModuleRoot = @(),
     [string[]]$DisabledModuleId = @()
 )
 
 $ErrorActionPreference = "Stop"
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+if ($CompositionId -ceq "extended" -and @($ModuleRoot).Count -eq 0) {
+    $ModuleRoot = @((Join-Path $projectRoot "modules\perpdex"))
+}
 if ([string]::IsNullOrWhiteSpace($PythonPath)) {
     $PythonPath = Join-Path $projectRoot ".venv\Scripts\python.exe"
 }

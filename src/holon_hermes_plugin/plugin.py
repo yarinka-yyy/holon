@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections import OrderedDict
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -268,6 +269,7 @@ class PluginRuntime:
         self._protected_latch = False
         self._protected_action_id: str | None = None
         self._lending_requests: OrderedDict[str, dict[str, object]] = OrderedDict()
+        self._module_previews: OrderedDict[str, dict[str, object]] = OrderedDict()
 
     def _remember_lending_request(
         self, action_id: str, params: dict[str, object],
@@ -430,6 +432,184 @@ class PluginRuntime:
             "result": {},
             "code": "CAPABILITY_UNAVAILABLE",
             "message": "Optional module read is unavailable.",
+        }, ensure_ascii=False, separators=(",", ":"))
+
+    @staticmethod
+    def _module_action_params(values: dict[str, Any]) -> tuple[str, dict[str, object]]:
+        action_type = values.get("action_type")
+        required, allowed = {
+            "OPEN_POSITION": (
+                {"action_type", "leverage", "market", "notional_usdc", "side"},
+                {"action_type", "leverage", "market", "notional_usdc", "side"},
+            ),
+            "CLOSE_POSITION": (
+                {"action_type", "amount_mode", "market"},
+                {"action_type", "amount_mode", "market", "percent"},
+            ),
+            "HLP_DEPOSIT": (
+                {"action_type", "amount_usdc"},
+                {"action_type", "amount_usdc"},
+            ),
+            "HLP_WITHDRAW": (
+                {"action_type", "amount_mode"},
+                {"action_type", "amount_mode", "amount_usdc"},
+            ),
+        }.get(action_type, (set(), set()))
+        if not required or not required.issubset(values) or not set(values).issubset(allowed):
+            raise ValueError("Invalid protected module parameters")
+        if action_type == "OPEN_POSITION":
+            if (
+                values["market"] not in {"BTC", "ETH", "SOL"}
+                or values["side"] not in {"LONG", "SHORT"}
+                or type(values["leverage"]) is not int
+                or not 1 <= values["leverage"] <= 3
+                or not isinstance(values["notional_usdc"], str)
+            ):
+                raise ValueError("Invalid open parameters")
+            params = {key: values[key] for key in (
+                "leverage", "market", "notional_usdc", "side",
+            )}
+        elif action_type == "CLOSE_POSITION":
+            percent = values.get("percent")
+            if (
+                values["market"] not in {"BTC", "ETH", "SOL"}
+                or values["amount_mode"] not in {"FULL", "PERCENT"}
+                or values["amount_mode"] == "FULL" and percent is not None
+                or values["amount_mode"] == "PERCENT"
+                and not isinstance(percent, str)
+            ):
+                raise ValueError("Invalid close parameters")
+            params = {
+                "amount_mode": values["amount_mode"], "market": values["market"],
+                "percent": percent,
+            }
+        elif action_type == "HLP_DEPOSIT":
+            if not isinstance(values["amount_usdc"], str):
+                raise ValueError("Invalid HLP deposit parameters")
+            params = {"amount_usdc": values["amount_usdc"]}
+        else:
+            amount_usdc = values.get("amount_usdc")
+            if (
+                values["amount_mode"] not in {"EXACT", "ALL"}
+                or values["amount_mode"] == "ALL" and amount_usdc is not None
+                or values["amount_mode"] == "EXACT"
+                and not isinstance(amount_usdc, str)
+            ):
+                raise ValueError("Invalid HLP withdrawal parameters")
+            params = {
+                "amount_mode": values["amount_mode"],
+                "amount_usdc": amount_usdc,
+            }
+        return str(action_type), params
+
+    def handle_module_action_prepare(
+        self, module_id: str, capability_id: str,
+        params: Optional[dict] = None, **kwargs: Any,
+    ) -> str:
+        values: dict[str, Any] = {}
+        if not isinstance(params, dict) or set(params).intersection(kwargs):
+            return self._module_action_failure("MODULE_ACTION_PREVIEW_INVALID")
+        values.update(params)
+        values.update(kwargs)
+        try:
+            action_type, semantic = self._module_action_params(values)
+            response = self._connector.module_action_preview(
+                module_id, capability_id, action_type, semantic,
+            )
+            if (
+                response.kind is not MessageKind.MODULE_ACTION_PREVIEW
+                or response.payload["status"] != "PREVIEW_READY"
+                or response.payload["execution_available"] is not True
+            ):
+                return json.dumps(
+                    response.payload, ensure_ascii=False, separators=(",", ":"),
+                )
+            payload = dict(response.payload)
+            digest = str(payload["preview_digest"])
+            self._module_previews[digest] = {
+                "action_type": action_type, "capability_id": capability_id,
+                "expires_at": payload["expires_at"], "module_id": module_id,
+                "params": semantic,
+            }
+            self._module_previews.move_to_end(digest)
+            while len(self._module_previews) > 32:
+                self._module_previews.popitem(last=False)
+            payload.update({
+                "confirmation_required": True,
+                "next_step": (
+                    "Explain the exact preview and risks. Only after explicit confirmation "
+                    "in a later user message call holon_perpdex_execute once with preview_digest."
+                ),
+            })
+            return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        except Exception:
+            return self._module_action_failure("MODULE_ACTION_PREVIEW_UNAVAILABLE")
+
+    @staticmethod
+    def _module_action_failure(code: str, action_id: str | None = None) -> str:
+        value: dict[str, object] = {
+            "status": "UNAVAILABLE", "authority_available": False,
+            "code": code, "message": "Protected module action is unavailable.",
+        }
+        if action_id is not None:
+            value["action_id"] = action_id
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+    def handle_module_action_execute(
+        self, module_id: str, capability_id: str,
+        params: Optional[dict] = None, **kwargs: Any,
+    ) -> str:
+        if (
+            not isinstance(params, dict) or kwargs or set(params) != {"preview_digest"}
+            or not isinstance(params.get("preview_digest"), str)
+        ):
+            return self._module_action_failure("MODULE_ACTION_EXECUTE_INVALID")
+        digest = str(params["preview_digest"])
+        prepared = self._module_previews.pop(digest, None)
+        if (
+            prepared is None or prepared["module_id"] != module_id
+            or prepared["capability_id"] != capability_id
+        ):
+            return self._module_action_failure("MODULE_ACTION_PREVIEW_UNKNOWN")
+        try:
+            expires = datetime.fromisoformat(
+                str(prepared["expires_at"]).removesuffix("Z") + "+00:00",
+            )
+        except ValueError:
+            expires = datetime.min.replace(tzinfo=UTC)
+        if expires <= datetime.now(UTC):
+            return self._module_action_failure("MODULE_ACTION_PREVIEW_EXPIRED")
+        action_id = new_action_id()
+        if not self._begin_protected_dispatch(action_id):
+            return self._module_action_failure("PROTECTED_FLOW_ACTIVE", action_id)
+        try:
+            response = self._connector.module_action_execute(
+                module_id, capability_id, str(prepared["action_type"]),
+                dict(prepared["params"]), digest, action_id,
+            )
+        except Exception:
+            if self._protected_action_id == action_id:
+                self._protected_latch = False
+                self._protected_action_id = None
+            return self._module_action_failure("MODULE_ACTION_EXECUTE_UNAVAILABLE", action_id)
+        self._finish_protected_dispatch(response, action_id)
+        if response.kind is MessageKind.PROTECTED_FLOW_STARTED:
+            return json.dumps({
+                "status": "AWAITING_LOCAL_CONFIRMATION",
+                "authority_available": True, "action_id": action_id,
+                "action_type": prepared["action_type"], "code": response.payload["code"],
+                "message": "Review the exact Hyperliquid bundle in Wallet.",
+                "turn_state": "END_REQUIRED",
+                "next_step": (
+                    "End this turn and wait for the Wallet decision. Do not retry. "
+                    "When the user returns, call holon_action_status with this action_id."
+                ),
+            }, ensure_ascii=False, separators=(",", ":"))
+        return json.dumps({
+            "status": "REFUSED", "authority_available": False,
+            "action_id": action_id,
+            "code": response.payload.get("code", "MODULE_ACTION_REFUSED"),
+            "message": response.payload.get("message", "Protected module action was refused."),
         }, ensure_ascii=False, separators=(",", ":"))
 
     def handle_lending_compare(
@@ -836,7 +1016,7 @@ def _optional_module_registry():
 
 def _optional_tool_declarations():
     registry = _optional_module_registry()
-    candidates: dict[str, list[object]] = {}
+    candidates: dict[str, list[tuple[object, str]]] = {}
     for capability in registry.capabilities("hermes_toolset"):
         module_id = capability.module_id
         if registry.module_status(module_id).state is not ModuleLifecycleState.READY:
@@ -844,25 +1024,40 @@ def _optional_tool_declarations():
         try:
             root = Path(capability.resource_root or "")
             manifest = decode_manifest((root / "module-manifest.json").read_bytes())
-            readers = {
+            targets = {
                 item.capability_id: item for item in manifest.capabilities
-                if item.kind == "public_reader"
+                if item.kind in {"public_reader", "protected_action_adapter"}
             }
             descriptor_path = str(capability.declaration.descriptor["descriptor_path"])
             tools = list(load_toolset(root / descriptor_path))
             if any(
-                tool.capability_id not in readers
-                or tool.operation not in readers[tool.capability_id].descriptor["operations"]
+                tool.capability_id not in targets
+                or (
+                    targets[tool.capability_id].kind == "public_reader"
+                    and tool.operation not in targets[tool.capability_id].descriptor["operations"]
+                )
+                or (
+                    targets[tool.capability_id].kind == "protected_action_adapter"
+                    and (
+                        targets[tool.capability_id].component != "guard"
+                        or tool.operation not in {"prepare", "execute"}
+                        or targets[tool.capability_id].descriptor.get("adapter_version") != "1"
+                        or targets[tool.capability_id].descriptor.get("profile_id")
+                        != "hyperliquid-mainnet-v1"
+                    )
+                )
                 or tool.name in STATIC_TOOL_NAMES
                 for tool in tools
             ):
                 continue
-            candidates[module_id] = tools
+            candidates[module_id] = [
+                (tool, targets[tool.capability_id].kind) for tool in tools
+            ]
         except Exception:
             continue
     owners: dict[str, list[str]] = {}
     for module_id, tools in candidates.items():
-        for tool in tools:
+        for tool, _kind in tools:
             owners.setdefault(tool.name, []).append(module_id)
     conflicts = {
         module_id
@@ -870,21 +1065,30 @@ def _optional_tool_declarations():
         for module_id in module_ids
     }
     return tuple(
-        (module_id, tool)
+        (module_id, tool, capability_kind)
         for module_id in sorted(candidates) if module_id not in conflicts
-        for tool in candidates[module_id]
+        for tool, capability_kind in candidates[module_id]
     )
 
 
 def _register_optional_tools(ctx: Any) -> None:
-    for module_id, tool in _optional_tool_declarations():
+    for module_id, tool, capability_kind in _optional_tool_declarations():
         def handler(
             params: Optional[dict] = None,
             _module_id: str = module_id,
             _capability_id: str = tool.capability_id,
             _operation: str = tool.operation,
+            _capability_kind: str = capability_kind,
             **kwargs: Any,
         ) -> str:
+            if _capability_kind == "protected_action_adapter":
+                if _operation == "prepare":
+                    return _runtime.handle_module_action_prepare(
+                        _module_id, _capability_id, params, **kwargs,
+                    )
+                return _runtime.handle_module_action_execute(
+                    _module_id, _capability_id, params, **kwargs,
+                )
             return _runtime.handle_module_read(
                 _module_id, _capability_id, _operation, params, **kwargs,
             )

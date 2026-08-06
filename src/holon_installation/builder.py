@@ -156,9 +156,9 @@ class PackageBuilder:
             if registry.module_status(module_id).state is not ModuleLifecycleState.READY:
                 continue
             manifest = manifests[module_id]
-            readers = {
+            targets = {
                 item.capability_id: item for item in manifest.capabilities
-                if item.kind == "public_reader"
+                if item.kind in {"public_reader", "protected_action_adapter"}
             }
             descriptor_path = str(capability.declaration.descriptor["descriptor_path"])
             try:
@@ -168,11 +168,24 @@ class PackageBuilder:
             except Exception as exc:
                 raise BuildError("Optional Hermes descriptor is invalid") from exc
             if any(
-                item.capability_id not in readers
-                or item.operation not in readers[item.capability_id].descriptor["operations"]
+                item.capability_id not in targets
+                or (
+                    targets[item.capability_id].kind == "public_reader"
+                    and item.operation not in targets[item.capability_id].descriptor["operations"]
+                )
+                or (
+                    targets[item.capability_id].kind == "protected_action_adapter"
+                    and (
+                        targets[item.capability_id].component != "guard"
+                        or item.operation not in {"prepare", "execute"}
+                        or targets[item.capability_id].descriptor.get("adapter_version") != "1"
+                        or targets[item.capability_id].descriptor.get("profile_id")
+                        != "hyperliquid-mainnet-v1"
+                    )
+                )
                 for item in declarations
             ):
-                raise BuildError("Optional Hermes descriptor references unavailable reader")
+                raise BuildError("Optional Hermes descriptor references unavailable capability")
             candidates[module_id] = tuple(item.name for item in declarations)
         owners: dict[str, list[str]] = {}
         for module_id, names in candidates.items():

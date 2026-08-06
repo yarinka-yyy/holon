@@ -56,6 +56,15 @@ uv sync --locked --all-groups
 .\packaging\build-installer.ps1
 ```
 
+The current M8 development build defaults to the `extended` composition and
+passes the repository-owned `modules\perpdex` root explicitly. To prove that
+the removable-module boundary remains intact, build Base without optional
+modules with:
+
+```powershell
+.\packaging\build-installer.ps1 -CompositionId base
+```
+
 The build script requires the project `.venv` to report exactly CPython 3.13.14,
 rebuilds native Guard and Wallet executables, validates production staging, and
 writes an unsigned local artifact to `dist\Holon-0.1.0-alpha-Setup.exe`. It

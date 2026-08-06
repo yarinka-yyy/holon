@@ -14,6 +14,7 @@ from typing import Callable, Mapping
 from PySide6.QtCore import Property, QLocale, QObject, QTime, QTimer, Signal, Slot
 from PySide6.QtGui import QGuiApplication
 from holon_contracts.registry import load_registry
+from holon_guard_ipc import PipeGuardClient
 from holon_wallet_control import AUTHORITY_VERSION
 from holon_guard_ipc.policy_control import ControlProtocolError, ControlUnavailable
 from holon_wallet_control.lending_operation import LendingOperationStateError, LendingOperationStore
@@ -240,6 +241,7 @@ class WalletController(QObject):
         earn_portfolio_service: EarnPortfolioService | None = None,
         module_registry: CapabilityRegistry | None = None,
         perpdex_executor: PerpDexExecutor | None = None,
+        module_action_client=None,
     ) -> None:
         super().__init__()
         self._repository = repository or VaultRepository()
@@ -303,6 +305,7 @@ class WalletController(QObject):
             max_workers=2, thread_name_prefix="holon-public-read",
         )
         self._owns_public_data_executor = public_data_executor is None
+        self._module_action_client = module_action_client or PipeGuardClient()
         self._transfer_preflight_service = (
             transfer_preflight_service or TransferPreflightService()
         )
@@ -351,7 +354,14 @@ class WalletController(QObject):
         )
         self._owns_receipt_executor = receipt_executor is None
         self._state = WalletShellState()
-        self._module_page = module_page_to_map(self._module_registry)
+        self._perpdex_return_screen = "main"
+        self._module_page = module_page_to_map(
+            self._module_registry,
+            account_provider=self._module_active_account,
+            action_client=self._module_action_client,
+            executor=self._public_data_executor,
+            before_execute=self._begin_module_page_dispatch,
+        )
         self._current_screen = "welcome"
         self._flow = "none"
         self._error_message = ""
@@ -529,6 +539,23 @@ class WalletController(QObject):
     @Property("QVariantMap", constant=True)
     def modulePageData(self) -> dict[str, object]:
         return dict(self._module_page)
+
+    def _module_active_account(self) -> dict[str, str] | None:
+        active = self._state.active_profile
+        if active is None:
+            return None
+        return {"address": active.address, "label": active.label}
+
+    def _begin_module_page_dispatch(self) -> None:
+        if self._current_screen == "module":
+            self._perpdex_return_screen = "module"
+
+    def _show_perpdex_destination(self, target: str) -> None:
+        destination = "module" if target == "module" and self._module_page else "main"
+        model = self._module_page.get("model")
+        if destination == "module" and callable(getattr(model, "refresh", None)):
+            model.refresh()
+        self._set_screen(destination)
 
     @Property("QVariantMap", notify=perpDexChanged)
     def perpDexAction(self) -> dict[str, object]:
@@ -1519,6 +1546,9 @@ class WalletController(QObject):
         if not isinstance(bundle, Mapping):
             completion(self._external_refusal(request, "PERPDEX_BUNDLE_INVALID"))
             return
+        self._perpdex_return_screen = (
+            "module" if self._current_screen == "module" else "main"
+        )
         self._perpdex_external = dict(request)
         self._perpdex_completion = completion
         self._perpdex_begin_delivery = begin_delivery
@@ -1922,9 +1952,10 @@ class WalletController(QObject):
             self._perpdex_adapter.mark_operation(operation_id, "REJECTED")
         except Exception:
             pass
+        target = self._perpdex_return_screen
         self._notify_perpdex("REJECTED", "ACTION_CANCELLED")
         self._clear_perpdex_action()
-        self._set_screen("main")
+        self._show_perpdex_destination(target)
 
     @Slot()
     def returnToPerpDexReview(self) -> None:
@@ -1939,8 +1970,9 @@ class WalletController(QObject):
     def finishPerpDexExecution(self) -> None:
         if self._perpdex_in_progress:
             return
+        target = self._perpdex_return_screen
         self._clear_perpdex_action()
-        self._set_screen("main")
+        self._show_perpdex_destination(target)
 
     @Slot(str, result=bool)
     def checkMainnetStatus(self, action_id: str) -> bool:
@@ -2201,6 +2233,9 @@ class WalletController(QObject):
     def showModulePage(self) -> None:
         if self._state.profiles and not self._mainnet_in_progress and self._module_page:
             self._set_screen("module")
+            model = self._module_page.get("model")
+            if callable(getattr(model, "refresh", None)):
+                model.refresh()
 
     @Slot(bool, result=bool)
     def refreshEarnData(self, force_refresh: bool = False) -> bool:
@@ -4421,8 +4456,9 @@ class WalletController(QObject):
             "flow_id": request["flow_id"], "action_id": request["action_id"],
             "code": "ACTION_CANCELLED",
         }
+        target = self._perpdex_return_screen
         self._clear_perpdex_action()
-        self._set_screen("main")
+        self._show_perpdex_destination(target)
         return response
 
     def _expire_perpdex(self) -> None:
@@ -4434,9 +4470,10 @@ class WalletController(QObject):
             )
         except Exception:
             pass
+        target = self._perpdex_return_screen
         self._notify_perpdex("FAILED", "ACTION_EXPIRED")
         self._clear_perpdex_action()
-        self._set_screen("main")
+        self._show_perpdex_destination(target)
 
     def _clear_perpdex_action(self, *, clear_result: bool = True) -> None:
         self._perpdex_expiry_timer.stop()
@@ -4446,6 +4483,7 @@ class WalletController(QObject):
         self._perpdex_begin_delivery = None
         self._perpdex_bundle = None
         self._perpdex_in_progress = False
+        self._perpdex_return_screen = "main"
         if clear_result:
             self._perpdex_result = None
         self.perpDexChanged.emit()

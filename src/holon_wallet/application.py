@@ -268,6 +268,7 @@ class WalletApplication:
         lending_portfolio_service: object | None = None,
         earn_portfolio_service: object | None = None,
         module_registry: CapabilityRegistry | None = None,
+        module_action_client=None,
     ) -> None:
         self.qt_app = qt_app or QGuiApplication.instance()
         if self.qt_app is None:
@@ -316,6 +317,7 @@ class WalletApplication:
                 if module_registry is not None
                 else load_module_registry(default_catalog_path(), "wallet")
             ),
+            module_action_client=module_action_client,
         )
         self.window = WalletQuickView(self.controller)
         global _RECOVERY_TYPE_REGISTERED

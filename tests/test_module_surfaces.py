@@ -13,6 +13,7 @@ from holon_modules import ModuleLifecycleState, build_composition, load_registry
 
 ROOT = Path(__file__).parents[1]
 MOCK_ROOT = ROOT / "modules" / "mock"
+PERPDEX_ROOT = ROOT / "modules" / "perpdex"
 
 
 def _mock_composition(tmp_path: Path, *, disabled: bool = False) -> Path:
@@ -137,3 +138,89 @@ def test_hermes_registers_only_catalog_backed_declarative_mock_tool(
     disabled_registry = load_registry(disabled / "module-catalog.json", "hermes")
     monkeypatch.setattr(plugin, "_optional_module_registry", lambda: disabled_registry)
     assert plugin._optional_tool_declarations() == ()
+
+
+class _PerpDexConnector(_Connector):
+    def __init__(self) -> None:
+        self.previews = []
+        self.executions = []
+
+    def module_action_preview(self, module_id, capability_id, action_type, params):
+        self.previews.append((module_id, capability_id, action_type, params))
+        return make_envelope(MessageKind.MODULE_ACTION_PREVIEW, {
+            "status": "PREVIEW_READY", "authority_available": True,
+            "execution_available": True, "module_id": module_id,
+            "capability_id": capability_id, "action_type": action_type,
+            "account": {"address": "0x" + "12" * 20, "label": "Main"},
+            "preview": {"action_type": action_type},
+            "preview_digest": "b" * 64, "expires_at": "2099-01-01T00:00:00.000Z",
+            "checks": ["HLP_IDENTITY_VERIFIED"], "caveats": ["RISK_NOT_ASSESSED"],
+            "code": "MODULE_ACTION_PREVIEW_READY", "message": "Preview ready.",
+        })
+
+    def module_action_execute(
+        self, module_id, capability_id, action_type, params, digest, action_id,
+    ):
+        self.executions.append(
+            (module_id, capability_id, action_type, params, digest, action_id),
+        )
+        return make_envelope(MessageKind.PROTECTED_FLOW_STARTED, {
+            "guard_state": "ACTIVE", "action_state": "AWAITING_LOCAL_CONFIRMATION",
+            "flow_id": "11111111-1111-4111-8111-111111111111",
+            "code": "AWAITING_LOCAL_CONFIRMATION", "message": "Action ready.",
+        }, action_id=action_id)
+
+
+def test_hermes_perpdex_prepare_then_execute_consumes_preview_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    composition = tmp_path / "extended"
+    build_composition(composition, "extended", [PERPDEX_ROOT])
+    registry = load_registry(composition / "module-catalog.json", "hermes")
+    connector = _PerpDexConnector()
+    runtime = plugin.PluginRuntime(connector)
+    monkeypatch.setattr(plugin, "_optional_module_registry", lambda: registry)
+    monkeypatch.setattr(plugin, "_runtime", runtime)
+    context = _Context()
+
+    plugin.register(context)
+
+    optional = {
+        item["name"]: item for item in context.tools
+        if item["name"].startswith("holon_perpdex_")
+    }
+    assert set(optional) == {
+        "holon_perpdex_execute", "holon_perpdex_markets",
+        "holon_perpdex_portfolio", "holon_perpdex_prepare",
+    }
+    closed = json.loads(optional["holon_perpdex_prepare"]["handler"]({
+        "action_type": "CLOSE_POSITION", "amount_mode": "FULL", "market": "BTC",
+    }))
+    assert closed["status"] == "PREVIEW_READY"
+    assert connector.previews[-1][2:] == (
+        "CLOSE_POSITION", {"amount_mode": "FULL", "market": "BTC", "percent": None},
+    )
+    withdrawn = json.loads(optional["holon_perpdex_prepare"]["handler"]({
+        "action_type": "HLP_WITHDRAW", "amount_mode": "ALL",
+    }))
+    assert withdrawn["status"] == "PREVIEW_READY"
+    assert connector.previews[-1][2:] == (
+        "HLP_WITHDRAW", {"amount_mode": "ALL", "amount_usdc": None},
+    )
+    prepared = json.loads(optional["holon_perpdex_prepare"]["handler"]({
+        "action_type": "HLP_DEPOSIT", "amount_usdc": "25",
+    }))
+    assert prepared["status"] == "PREVIEW_READY"
+    assert prepared["confirmation_required"] is True
+    assert connector.previews[-1][2:] == ("HLP_DEPOSIT", {"amount_usdc": "25"})
+
+    executed = json.loads(optional["holon_perpdex_execute"]["handler"]({
+        "preview_digest": prepared["preview_digest"],
+    }))
+    assert executed["status"] == "AWAITING_LOCAL_CONFIRMATION"
+    assert len(connector.executions) == 1
+    repeated = json.loads(optional["holon_perpdex_execute"]["handler"]({
+        "preview_digest": prepared["preview_digest"],
+    }))
+    assert repeated["code"] == "MODULE_ACTION_PREVIEW_UNKNOWN"
+    assert len(connector.executions) == 1

@@ -40,6 +40,21 @@ def test_installer_build_is_single_production_pipeline() -> None:
     assert 'winget' not in script.lower()
 
 
+def test_m8_installer_defaults_to_explicit_extended_module_root() -> None:
+    packaging = Path(__file__).parents[1] / "packaging"
+    installer = (packaging / "build-installer.ps1").read_text(encoding="utf-8")
+    assert '[string]$CompositionId = "extended"' in installer
+    assert 'Join-Path $projectRoot "modules\\perpdex"' in installer
+    assert '$compositionArguments += @("--module-root", $resolvedRoot)' in installer
+    for name in ("build-guard.ps1", "build-wallet.ps1"):
+        source = (packaging / name).read_text(encoding="utf-8")
+        assert '$entry.module_id -ceq "holon.perpdex"' in source
+        assert '$moduleBuildArguments += @("--collect-all", "hyperliquid")' in source
+        assert source.index('if ($includeHyperliquidSdk)') > source.index(
+            'if (-not $entry.enabled) { continue }'
+        )
+
+
 def test_guard_and_wallet_use_the_fixed_windows_version_resource() -> None:
     packaging = Path(__file__).parents[1] / "packaging"
     version = (packaging / "windows-version.txt").read_text(encoding="utf-8")

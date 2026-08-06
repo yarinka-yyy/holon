@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from concurrent.futures import Future
 from types import SimpleNamespace
 
 from holon_contracts import MessageKind, make_envelope
@@ -12,6 +13,10 @@ from holon_modules import (
     encode_manifest,
     load_registry,
 )
+from holon_wallet.module_view import ModuleViewModel, module_page_to_map
+from holon_earn import EarnPortfolioService, EarnProviderRegistry, register_module_providers
+from holon_wallet.earn_view import earn_portfolio_to_map
+from holon_wallet.prices import PriceSnapshot
 
 from test_perpdex_reader import ACCOUNT, FakeInfo
 
@@ -52,6 +57,7 @@ def test_perpdex_manifest_is_canonical_and_registers_only_by_component(
     assert [item.declaration.capability_id for item in wallet.capabilities()] == [
         "holon.perpdex.action.wallet",
         "holon.perpdex.earn.hlp.wallet",
+        "holon.perpdex.read.wallet",
         "holon.perpdex.wallet",
     ]
     assert [item.declaration.capability_id for item in hermes.capabilities()] == [
@@ -103,3 +109,103 @@ def test_module_read_cannot_spoof_guard_supplied_account() -> None:
         assert getattr(exc, "code", None) == "UNKNOWN_AUTHORITY_FIELD"
     else:
         raise AssertionError("Guard-owned account field was accepted")
+
+
+class _ImmediateExecutor:
+    def submit(self, function, *args):
+        future = Future()
+        try:
+            future.set_result(function(*args))
+        except Exception as exc:
+            future.set_exception(exc)
+        return future
+
+
+class _ModuleActionClient:
+    def __init__(self) -> None:
+        self.previews = []
+        self.executions = []
+
+    def module_action_preview(self, module_id, capability_id, action_type, params):
+        self.previews.append((module_id, capability_id, action_type, params))
+        return make_envelope(MessageKind.MODULE_ACTION_PREVIEW, {
+            "status": "PREVIEW_READY", "authority_available": True,
+            "execution_available": True, "module_id": module_id,
+            "capability_id": capability_id, "action_type": action_type,
+            "account": ACCOUNT, "preview": {"amount_usdc": params["amount_usdc"]},
+            "preview_digest": "a" * 64, "expires_at": "2099-01-01T00:00:00.000Z",
+            "checks": ["HLP_IDENTITY_VERIFIED"], "caveats": ["RISK_NOT_ASSESSED"],
+            "code": "MODULE_ACTION_PREVIEW_READY", "message": "Preview ready.",
+        })
+
+    def module_action_execute(
+        self, module_id, capability_id, action_type, params, digest, action_id,
+    ):
+        self.executions.append(
+            (module_id, capability_id, action_type, params, digest, action_id),
+        )
+        return make_envelope(MessageKind.PROTECTED_FLOW_STARTED, {
+            "guard_state": "ACTIVE", "action_state": "AWAITING_LOCAL_CONFIRMATION",
+            "flow_id": "11111111-1111-4111-8111-111111111111",
+            "code": "AWAITING_LOCAL_CONFIRMATION", "message": "Action is ready.",
+        }, action_id=action_id)
+
+
+def test_wallet_module_view_model_has_only_fixed_reads_and_prepared_execute(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    composition = _extended(tmp_path)
+    monkeypatch.syspath_prepend(str(PERPDEX_ROOT / "src"))
+    registry = load_registry(composition / "module-catalog.json", "wallet")
+    registry.resolve("holon.perpdex.read.wallet").contribution._post = FakeInfo()
+    registry.resolve("holon.perpdex.action.wallet").contribution.configure(tmp_path / "data")
+    client = _ModuleActionClient()
+    page = module_page_to_map(
+        registry, account_provider=lambda: ACCOUNT, action_client=client,
+        executor=_ImmediateExecutor(),
+    )
+    model = page["model"]
+    assert isinstance(model, ModuleViewModel)
+
+    assert model.refresh()
+    assert [item["market"] for item in model.markets] == ["BTC", "ETH", "SOL"]
+    assert model.portfolio["account"] == {
+        "address": ACCOUNT["address"].lower(), "label": "Main",
+    }
+    assert model.operationHistory == []
+
+    assert model.prepareHlpDeposit("25")
+    assert model.prepared["preview_digest"] == "a" * 64
+    assert client.previews[-1][2:] == ("HLP_DEPOSIT", {"amount_usdc": "25"})
+    assert model.executePrepared()
+    assert model.prepared == {}
+    assert len(client.executions) == 1
+    assert not model.executePrepared()
+
+
+def test_extended_hlp_contributes_one_labelled_vault_position_to_earn(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    composition = _extended(tmp_path)
+    monkeypatch.syspath_prepend(str(PERPDEX_ROOT / "src"))
+    module_registry = load_registry(composition / "module-catalog.json", "wallet")
+    provider = module_registry.resolve("holon.perpdex.earn.hlp.wallet").contribution
+    provider._reader._post = FakeInfo()
+    registry = EarnProviderRegistry()
+    register_module_providers(registry, module_registry)
+
+    snapshot = EarnPortfolioService(registry).read(ACCOUNT)
+    assert snapshot.total_complete is True
+    assert len(snapshot.products) == 1
+    product = snapshot.products[0]
+    assert product.position.value_usd == "20"
+    assert product.network_id == "hyperliquid-mainnet"
+    mapped = earn_portfolio_to_map(
+        snapshot, PriceSnapshot.unavailable(0, "NOT_NEEDED"), "vaults",
+    )
+    assert [item["id"] for item in mapped["availableFilters"]] == [
+        "all", "lending", "vaults",
+    ]
+    assert len(mapped["vaultProducts"]) == 1
+    assert mapped["vaultProducts"][0]["metricLabel"] == "Protocol APR"
+    assert mapped["vaultProducts"][0]["riskState"] == "Not assessed"

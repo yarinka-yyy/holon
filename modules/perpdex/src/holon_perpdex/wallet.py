@@ -348,6 +348,33 @@ class WalletProtectedActionAdapter:
     def status(self, operation_id: str) -> Mapping[str, object] | None:
         return None if self._operations is None else self._operations.status(operation_id)
 
+    def history(
+        self, account: Mapping[str, str], *, limit: int = 20,
+    ) -> tuple[dict[str, object], ...]:
+        """Return a bounded presentation view without nonces or wire digests."""
+        if (
+            self._operations is None or type(limit) is not int
+            or not 1 <= limit <= 20
+            or not isinstance(account, Mapping)
+            or not isinstance(account.get("address"), str)
+        ):
+            return ()
+        values = self._operations.latest(str(account["address"]))[:limit]
+        return tuple({
+            "action_type": item["action_type"],
+            "created_at": item["created_at"],
+            "intent": dict(item["intent"]),
+            "operation_id": item["operation_id"],
+            "phases": [{
+                "code": phase["code"],
+                "phase_type": phase["phase_type"],
+                "public_id": phase["public_id"],
+                "state": phase["state"],
+            } for phase in item["phases"]],
+            "state": item["state"],
+            "updated_at": item["updated_at"],
+        } for item in values)
+
 
 def create_protected_adapter() -> WalletProtectedActionAdapter:
     return WalletProtectedActionAdapter()
@@ -360,9 +387,15 @@ def create_earn_provider():
     return HlpEarnProvider(HyperliquidReader())
 
 
+def create_reader() -> HyperliquidReader:
+    return HyperliquidReader()
+
+
 def create_page_model() -> dict[str, str]:
     return {
+        "actionCapabilityId": "holon.perpdex.action.guard",
         "body": "Hyperliquid public data and protected actions.",
         "moduleId": "holon.perpdex",
+        "readCapabilityId": "holon.perpdex.read.wallet",
         "title": "PerpDEX",
     }

@@ -10,12 +10,18 @@ from powershell_support import fake_hermes, invoke
 
 
 MOCK_ROOT = SOURCE_ROOT / "modules" / "mock"
+PERPDEX_ROOT = SOURCE_ROOT / "modules" / "perpdex"
 
 
-def _package(root: Path, name: str, *, mock: bool = False, disabled: bool = False):
+def _package(
+    root: Path, name: str, *, mock: bool = False, perpdex: bool = False,
+    disabled: bool = False,
+):
     composition = root / f"composition-{name}"
-    module_roots = [MOCK_ROOT] if mock else []
-    disabled_ids = ["holon.mock"] if disabled else []
+    module_roots = [MOCK_ROOT] if mock else [PERPDEX_ROOT] if perpdex else []
+    disabled_ids = [
+        "holon.mock" if mock else "holon.perpdex"
+    ] if disabled else []
     build_composition(
         composition, name, module_roots, disabled_module_ids=disabled_ids,
     )
@@ -93,6 +99,48 @@ def test_base_mock_and_disabled_packages_have_exact_optional_surface(tmp_path: P
     disabled_module = disabled / "payload/plugin/modules/holon.mock"
     assert {path.name for path in disabled_module.iterdir()} == {"module-manifest.json"}
     assert not (disabled / "payload/skills/crypto/holon-mock").exists()
+
+
+def test_extended_package_has_only_declared_perpdex_surfaces(tmp_path: Path) -> None:
+    composition, package, manifest = _package(
+        tmp_path, "extended", perpdex=True,
+    )
+    assert manifest.composition_id == "extended"
+    assert manifest.module_ids == ("holon.perpdex",)
+    assert manifest.skill_ids == (
+        "holon", "holon-earn", "holon-lending", "holon-perpdex",
+    )
+    plugin = package / "payload/plugin"
+    yaml = (plugin / "plugin.yaml").read_text(encoding="utf-8")
+    assert all(name in yaml for name in (
+        "holon_perpdex_execute", "holon_perpdex_markets",
+        "holon_perpdex_portfolio", "holon_perpdex_prepare",
+    ))
+    module = plugin / "modules/holon.perpdex"
+    assert {path.name for path in module.iterdir()} == {
+        "hermes-tools.json", "module-manifest.json",
+    }
+    assert (package / "payload/skills/crypto/holon-perpdex/SKILL.md").is_file()
+    expected = (composition / "module-catalog.json").read_bytes()
+    assert (package / "payload/app/module-catalog.json").read_bytes() == expected
+
+
+def test_base_extended_base_install_removes_perpdex_surfaces(tmp_path: Path) -> None:
+    _, base, _ = _package(tmp_path, "base")
+    _, extended, _ = _package(tmp_path, "extended", perpdex=True)
+    local, hermes = tmp_path / "local", tmp_path / "hermes"
+
+    assert _install(base, local, hermes)[0] == 0
+    assert _install(extended, local, hermes)[0] == 0
+    plugin = hermes / "plugins/holon"
+    assert (plugin / "modules/holon.perpdex/hermes-tools.json").is_file()
+    assert (hermes / "skills/crypto/holon-perpdex/SKILL.md").is_file()
+    assert "holon_perpdex_execute" in (plugin / "plugin.yaml").read_text(encoding="utf-8")
+
+    assert _install(base, local, hermes)[0] == 0
+    assert not (plugin / "modules").exists()
+    assert not (hermes / "skills/crypto/holon-perpdex").exists()
+    assert "holon_perpdex_execute" not in (plugin / "plugin.yaml").read_text(encoding="utf-8")
 
 
 def test_base_mock_base_install_removes_all_stale_optional_surfaces(tmp_path: Path) -> None:

@@ -64,6 +64,7 @@ from wallet_public_support import (
     mainnet_services,
     public_snapshot,
 )
+from test_perpdex_reader import FakeInfo
 
 
 def test_guard_status_callbacks_are_non_blocking_and_ordered() -> None:
@@ -248,6 +249,7 @@ def make_app(
     policy_control_client=None,
     module_registry=None,
     earn_portfolio_service=None,
+    module_action_client=None,
 ) -> WalletApplication:
     history = HistoryStore(repository.paths)
     mainnet, tracker, rpc = mainnet_services(
@@ -272,6 +274,7 @@ def make_app(
         lending_portfolio_service=StubLendingPortfolioService(),
         earn_portfolio_service=earn_portfolio_service,
         module_registry=module_registry,
+        module_action_client=module_action_client,
     )
     app._test_mainnet_rpc = rpc
     return app
@@ -419,6 +422,37 @@ def test_mock_module_uses_the_single_bounded_wallet_page_slot(
         assert app.controller.currentScreen == "module"
         assert child(app, "mockModulePage") is not None
         assert "Mock Module" in child(app, "mockModuleText").property("text")
+        assert app.qml_warnings == []
+    finally:
+        app.close()
+
+
+def test_perpdex_module_page_loads_live_cards_and_forms(
+    tmp_path, qt_app, monkeypatch,
+) -> None:
+    source = Path(__file__).parents[1] / "modules/perpdex"
+    composition = tmp_path / "extended-composition"
+    build_composition(composition, "extended", [source])
+    monkeypatch.syspath_prepend(str(composition / "modules/holon.perpdex/src"))
+    registry = load_registry(composition / "module-catalog.json", "wallet")
+    registry.resolve("holon.perpdex.read.wallet").contribution._post = FakeInfo()
+    repository = VaultRepository(WalletPaths(tmp_path / "wallet"))
+    repository.create_new(
+        fresh_password(), repository.new_record(generate_mnemonic(), "Main Account"),
+    )
+    app = make_app(qt_app, repository, module_registry=registry)
+    try:
+        invoke(child(app, "moduleAction"), "trigger")
+        qt_app.processEvents()
+        assert app.controller.currentScreen == "module"
+        assert child(app, "perpDexModulePage") is not None
+        assert child(app, "perpDexAccountCard") is not None
+        assert child(app, "perpDexTradeCard") is not None
+        assert child(app, "perpDexHlpCard") is not None
+        assert child(app, "perpDexExecutePreparedButton") is not None
+        assert [item["market"] for item in app.controller.modulePageData["model"].markets] == [
+            "BTC", "ETH", "SOL",
+        ]
         assert app.qml_warnings == []
     finally:
         app.close()
