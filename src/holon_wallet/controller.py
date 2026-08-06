@@ -181,6 +181,7 @@ class WalletController(QObject):
     selectedNetworkChanged = Signal()
     historyChanged = Signal()
     balancesVisibilityChanged = Signal()
+    zeroBalancesVisibilityChanged = Signal()
     receiveNetworkChanged = Signal()
     historySelectionChanged = Signal()
     settingsSectionChanged = Signal()
@@ -347,6 +348,7 @@ class WalletController(QObject):
         self._lending_history_period = "7d"
         self._flow_price_snapshot: PriceSnapshot | None = None
         self._balances_visible = True
+        self._show_zero_balances = self._settings.load_show_zero_balances()
         self._receive_network = "base"
         self._history_records: tuple[WalletHistoryRecord, ...] = ()
         self._history_available = True
@@ -752,6 +754,7 @@ class WalletController(QObject):
             self._market_price_snapshot,
             self._selected_network,
             self._lending_portfolio.get("protocols"),
+            show_zero_balances=self._show_zero_balances,
         )
 
     @Property("QVariantMap", notify=publicDataChanged)
@@ -795,6 +798,10 @@ class WalletController(QObject):
     @Property(bool, notify=balancesVisibilityChanged)
     def balancesVisible(self) -> bool:
         return self._balances_visible
+
+    @Property(bool, notify=zeroBalancesVisibilityChanged)
+    def showZeroBalances(self) -> bool:
+        return self._show_zero_balances
 
     @Property(str, notify=receiveNetworkChanged)
     def receiveNetwork(self) -> str:
@@ -1501,6 +1508,25 @@ class WalletController(QObject):
     def toggleBalancesVisibility(self) -> None:
         self._balances_visible = not self._balances_visible
         self.balancesVisibilityChanged.emit()
+
+    @Slot(bool, result=bool)
+    def setShowZeroBalances(self, visible: bool) -> bool:
+        if type(visible) is not bool:
+            return False
+        if visible == self._show_zero_balances:
+            return True
+        active = self._state.active_profile
+        if active is None:
+            return False
+        try:
+            self._settings.save_show_zero_balances(visible, active.profile_id)
+        except (StorageError, ValueError):
+            self._set_error("Display preference could not be saved")
+            return False
+        self._show_zero_balances = visible
+        self.zeroBalancesVisibilityChanged.emit()
+        self.publicDataChanged.emit()
+        return True
 
     @Slot(str, result=bool)
     def selectReceiveNetwork(self, network_id: str) -> bool:

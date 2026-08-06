@@ -27,7 +27,7 @@ from holon_wallet.prices import (
     portfolio_to_map,
 )
 from holon_wallet.lending_view import _updated_text, lending_portfolio_to_map
-from holon_wallet.public_data import PublicDataStatus
+from holon_wallet.public_data import AssetReadError, PublicDataStatus
 from holon_lending import LendingPortfolioService
 
 from wallet_public_support import public_snapshot
@@ -235,6 +235,102 @@ def test_network_sort_keeps_gas_first_but_all_networks_uses_dollar_value() -> No
     assert [item["assetId"] for item in combined["assets"][:3]] == [
         "usdc", "wbtc", "pol",
     ]
+
+
+def test_zero_filter_keeps_only_selected_network_gas_and_all_can_be_empty() -> None:
+    snapshots = {
+        network_id: public_snapshot(network_id, eth=0, usdc=0)
+        for network_id in ("ethereum", "base", "arbitrum", "optimism", "polygon", "bsc")
+    }
+    prices = market_snapshot()
+
+    polygon = portfolio_to_map(
+        snapshots, prices, "polygon", show_zero_balances=False,
+    )
+    assert [item["assetId"] for item in polygon["assets"]] == ["pol"]
+    assert polygon["totalUsd"] == "$0.00"
+
+    combined = portfolio_to_map(
+        snapshots, prices, "all", show_zero_balances=False,
+    )
+    assert combined["assets"] == []
+    assert combined["totalUsd"] == "$0.00"
+
+    full = portfolio_to_map(
+        snapshots, prices, "all", show_zero_balances=True,
+    )
+    assert {item["assetId"] for item in full["assets"]}.issuperset({
+        "eth", "pol", "bnb", "usdc", "op", "arb",
+    })
+
+
+def test_zero_filter_hides_fresh_subcent_dust_but_full_list_restores_it() -> None:
+    optimism = public_snapshot("optimism", eth=0, usdc=0)
+    optimism = replace(optimism, assets=tuple(
+        replace(item, atomic_units=10**12) if item.asset_id == "op" else item
+        for item in optimism.assets
+    ))
+    filtered = portfolio_to_map(
+        {"optimism": optimism}, market_snapshot(), "optimism",
+        show_zero_balances=False,
+    )
+    assert [item["assetId"] for item in filtered["assets"]] == ["eth"]
+    assert filtered["totalUsd"] == "$0.00"
+
+    full = portfolio_to_map(
+        {"optimism": optimism}, market_snapshot(), "optimism",
+        show_zero_balances=True,
+    )
+    op = next(item for item in full["assets"] if item["assetId"] == "op")
+    assert op["amount"] != "0 OP"
+    assert op["usd"] == "$0.00"
+    assert full["totalUsd"] == filtered["totalUsd"]
+
+    all_networks = portfolio_to_map(
+        {"optimism": optimism}, market_snapshot(), "all",
+        show_zero_balances=False,
+    )
+    assert all_networks["assets"] == []
+
+
+def test_zero_filter_never_hides_unknown_partial_or_unavailable_assets() -> None:
+    optimism = public_snapshot("optimism", eth=0, usdc=0)
+    optimism = replace(optimism, assets=tuple(
+        replace(item, atomic_units=10**12) if item.asset_id == "op" else item
+        for item in optimism.assets
+    ))
+    prices = market_snapshot()
+    prices = replace(prices, prices=tuple(
+        replace(item, status=MarketPriceStatus.UNAVAILABLE, value_usd=None)
+        if item.market_price_id == "op-usd" else item
+        for item in prices.prices
+    ))
+    unknown = portfolio_to_map(
+        {"optimism": optimism}, prices, "optimism",
+        show_zero_balances=False,
+    )
+    assert any(item["assetId"] == "op" for item in unknown["assets"])
+
+    polygon = public_snapshot("polygon", eth=0, usdc=0)
+    polygon = replace(
+        polygon,
+        status=PublicDataStatus.PARTIAL,
+        asset_errors=(AssetReadError("dai", "RPC_UNAVAILABLE"),),
+    )
+    partial = portfolio_to_map(
+        {"polygon": polygon}, market_snapshot(), "polygon",
+        show_zero_balances=False,
+    )
+    assert len(partial["assets"]) == len(polygon.assets)
+    assert next(item for item in partial["assets"] if item["assetId"] == "dai")["saved"]
+    assert not next(item for item in partial["assets"] if item["assetId"] == "usdc")["saved"]
+
+    unavailable = portfolio_to_map(
+        {"base": public_snapshot("base", PublicDataStatus.UNAVAILABLE)},
+        market_snapshot(), "base", show_zero_balances=False,
+    )
+    assert unavailable["assets"]
+    assert all(item["amount"] == "Data unavailable" for item in unavailable["assets"])
 
 
 def test_portfolio_totals_and_breakdown_are_exact_and_fail_closed() -> None:

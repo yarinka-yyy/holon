@@ -168,9 +168,41 @@ def test_settings_are_public_atomic_and_invalid_values_fall_back(tmp_path) -> No
     store.save_active_id(valid)
 
     assert store.load_active_id({valid}) == valid
+    assert store.load_show_zero_balances() is False
+    saved = json.loads(paths.settings.read_text(encoding="utf-8"))
+    assert saved == {
+        "schema_version": 2,
+        "active_profile_id": valid,
+        "show_zero_balances": False,
+    }
+    store.save_show_zero_balances(True, valid)
+    assert store.load_show_zero_balances() is True
+    assert store.load_active_id({valid}) == valid
     assert store.load_active_id({"different"}) is None
     paths.settings.write_text("not-json", encoding="utf-8")
     assert store.load_active_id({valid}) is None
+    assert store.load_show_zero_balances() is False
+
+
+def test_settings_v1_is_read_without_rewrite_and_invalid_boolean_is_safe(tmp_path) -> None:
+    paths = WalletPaths(tmp_path)
+    paths.data_dir.mkdir(parents=True, exist_ok=True)
+    valid = "00000000-0000-4000-8000-000000000001"
+    v1 = {"schema_version": 1, "active_profile_id": valid}
+    paths.settings.write_text(json.dumps(v1), encoding="utf-8")
+    store = SettingsStore(paths)
+
+    assert store.load_active_id({valid}) == valid
+    assert store.load_show_zero_balances() is False
+    assert json.loads(paths.settings.read_text(encoding="utf-8")) == v1
+
+    paths.settings.write_text(json.dumps({
+        "schema_version": 2,
+        "active_profile_id": valid,
+        "show_zero_balances": "yes",
+    }), encoding="utf-8")
+    assert store.load_active_id({valid}) == valid
+    assert store.load_show_zero_balances() is False
 
 
 def test_password_policy_and_errors_never_include_secret_canaries(tmp_path, capsys) -> None:

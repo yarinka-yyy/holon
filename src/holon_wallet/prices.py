@@ -451,11 +451,15 @@ def portfolio_to_map(
     prices: MarketPriceSnapshot | PriceSnapshot,
     selected_network: str,
     lending_protocols: object = None,
+    *,
+    show_zero_balances: bool = True,
 ) -> dict[str, object]:
     registry = load_registry()
     network_ids = tuple(item.network_id for item in registry.networks)
     if selected_network not in {"all", *network_ids}:
         raise ValueError("Unsupported portfolio filter")
+    if type(show_zero_balances) is not bool:
+        raise ValueError("Show-zero preference must be boolean")
     selected_ids = (
         tuple(item for item in network_ids if item in snapshots)
         if selected_network == "all" else (selected_network,)
@@ -479,10 +483,19 @@ def portfolio_to_map(
             for deployment in registry.deployments
         )
     )
-    wallet_assets = tuple(sorted(
+    all_wallet_assets = tuple(sorted(
         wallet_assets,
         key=lambda item: _asset_sort_key(item, selected_network != "all"),
     ))
+    wallet_assets = (
+        all_wallet_assets
+        if show_zero_balances else
+        tuple(
+            item for item in all_wallet_assets
+            if item.get("_hiddenByZeroPreference") is not True
+            or selected_network != "all" and item.get("isGasAsset") is True
+        )
+    )
     lending_items = (
         list(lending_protocols) if isinstance(lending_protocols, (list, tuple))
         else []
@@ -508,6 +521,7 @@ def portfolio_to_map(
         and int(item["position_atomic"]) > 0
     )
     asset_models = wallet_assets + lending_assets
+    total_models = all_wallet_assets + lending_assets
     all_lending_total = (
         sum(int(item["position_atomic"]) for item in lending_items)
         if known_lending_complete else None
@@ -521,10 +535,10 @@ def portfolio_to_map(
     )
     total_available = (
         lending_complete
-        and all(bool(asset["totalAvailable"]) for asset in asset_models)
+        and all(bool(asset["totalAvailable"]) for asset in total_models)
     )
     total = (
-        sum((Decimal(str(asset["usdRaw"])) for asset in asset_models), Decimal(0))
+        sum((Decimal(str(asset["usdRaw"])) for asset in total_models), Decimal(0))
         if total_available
         else None
     )
@@ -640,6 +654,7 @@ def _asset_model(
     known_balances = 0
     balances_available = True
     incomplete = False
+    saved_value = False
     deployments = {
         item.network_id for item in registry.deployments
         if item.asset_id == asset_id and item.network_id in selected_ids
@@ -659,7 +674,14 @@ def _asset_model(
         )
         atomic = balance.atomic_units if available and balance is not None else None
         balances_available = balances_available and available
-        stale = snapshot is not None and asset_id in snapshot.errors_by_id
+        stale = snapshot is not None and (
+            snapshot.status is PublicDataStatus.PARTIAL
+            or asset_id in snapshot.errors_by_id
+        )
+        saved_value = saved_value or bool(
+            available and snapshot is not None
+            and asset_id in snapshot.errors_by_id
+        )
         incomplete = incomplete or stale or not available
         if atomic is not None:
             atomic_total += atomic
@@ -694,6 +716,7 @@ def _asset_model(
         "balanceAvailable": balances_available,
         "amount": _format_token(atomic_total, decimals, symbol) if known_balances else "Data unavailable",
         "incomplete": incomplete,
+        "saved": saved_value,
         "totalAvailable": contribution_available,
         "usd": usd_text,
         "usdRaw": format(usd, "f") if usd is not None else "0" if contribution_available else "",
@@ -701,6 +724,18 @@ def _asset_model(
         "iconSource": meta.icon_path.removeprefix("qml/"),
         "iconVisualSize": meta.icon_visual_size,
         "_atomicRaw": str(atomic_total),
+        "_confirmedZero": (
+            balances_available and not incomplete
+            and known_balances == len(deployments) and atomic_total == 0
+        ),
+        "_hiddenByZeroPreference": (
+            balances_available and not incomplete
+            and known_balances == len(deployments)
+            and (
+                atomic_total == 0
+                or atomic_total > 0 and usd is not None and usd < Decimal("0.01")
+            )
+        ),
         "_registryPosition": registry_position,
     }
 

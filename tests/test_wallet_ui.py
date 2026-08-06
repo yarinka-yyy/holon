@@ -31,7 +31,8 @@ from holon_policy import Policy, policy_digest
 from holon_wallet.broadcast import MainnetTransferCode
 from holon_wallet.approval import UINT256_MAX
 from holon_wallet.history import HistoryStatus, HistoryStore, WalletHistoryRecord
-from holon_wallet.storage import WalletPaths, atomic_write_json
+from holon_wallet.public_data import PortfolioSnapshot
+from holon_wallet.storage import StorageError, WalletPaths, atomic_write_json
 from holon_wallet.transfer import TransferPreflightCode, TransferPreflightError
 from holon_wallet.trusted_recipients import TrustedPolicyDraft, TrustedPolicyDraftStore
 from holon_wallet.vault import VaultRepository
@@ -44,6 +45,7 @@ from wallet_public_support import (
     StubPriceService,
     StubTransferPreflightService,
     mainnet_services,
+    public_snapshot,
 )
 
 
@@ -515,6 +517,77 @@ def test_create_ui_persists_after_done_and_enables_wallet_controls(
     assert app.controller.currentScreen == "settings"
     invoke(child(app, "settingsBackButton"), "trigger")
     assert app.controller.currentScreen == "main"
+
+
+def test_zero_balance_toggle_filters_by_scope_and_persists(tmp_path, qt_app) -> None:
+    class ZeroPublicDataService(StubPublicDataService):
+        def refresh(self, profile_id, address, network_ids):
+            self.calls.append((profile_id, address, network_ids))
+            return PortfolioSnapshot(profile_id, address, tuple(
+                public_snapshot(network_id, eth=0, usdc=0)
+                for network_id in network_ids
+            ))
+
+    repository = VaultRepository(WalletPaths(tmp_path))
+    repository.create_new(
+        fresh_password(), repository.new_record(generate_mnemonic(), "Main Account"),
+    )
+    app = make_app(qt_app, repository, ZeroPublicDataService())
+    try:
+        toggle = child(app, "showZeroBalancesToggle")
+        refresh = child(app, "refreshButton")
+        assert app.controller.showZeroBalances is False
+        assert toggle.property("checked") is False
+        assert toggle.property("x") == pytest.approx(176)
+        assert toggle.property("width") == pytest.approx(176)
+        assert toggle.property("x") + toggle.property("width") < refresh.property("x")
+        assert app.controller.portfolioData["assets"] == []
+        assert child(app, "emptyAssetsLabel").property("visible")
+
+        invoke(child(app, "polygonNetworkCard"), "trigger")
+        assert [item["assetId"] for item in app.controller.portfolioData["assets"]] == [
+            "pol",
+        ]
+        invoke(child(app, "allNetworksCard"), "trigger")
+        assert app.controller.portfolioData["assets"] == []
+
+        invoke(toggle, "trigger")
+        qt_app.processEvents()
+        assert app.controller.showZeroBalances is True
+        assert toggle.property("checked") is True
+        assert app.controller.portfolioData["assets"]
+        assert not child(app, "emptyAssetsLabel").property("visible")
+    finally:
+        app.close()
+
+    reopened = make_app(qt_app, repository, ZeroPublicDataService())
+    try:
+        assert reopened.controller.showZeroBalances is True
+        assert child(reopened, "showZeroBalancesToggle").property("checked") is True
+    finally:
+        reopened.close()
+
+
+def test_zero_balance_toggle_write_failure_keeps_previous_value(
+    tmp_path, qt_app, monkeypatch,
+) -> None:
+    repository = VaultRepository(WalletPaths(tmp_path))
+    repository.create_new(
+        fresh_password(), repository.new_record(generate_mnemonic(), "Main Account"),
+    )
+    app = make_app(qt_app, repository)
+    try:
+        def fail_write(*_args):
+            raise StorageError("safe failure")
+
+        monkeypatch.setattr(
+            app.controller._settings, "save_show_zero_balances", fail_write,
+        )
+        assert not app.controller.setShowZeroBalances(True)
+        assert app.controller.showZeroBalances is False
+        assert app.controller.errorMessage == "Display preference could not be saved"
+    finally:
+        app.close()
 
 
 def test_import_navigation_and_cancel_clear_fields(wallet_app, qt_app) -> None:
@@ -1266,6 +1339,25 @@ def test_network_icons_are_accessible_but_new_networks_do_not_enter_send() -> No
     assert "OP Mainnet" not in send
     assert "Polygon" not in send
     assert "BNB Smart Chain" not in send
+
+
+def test_zero_balance_toggle_is_accessible_and_does_not_refresh_networks() -> None:
+    qml = Path(__file__).parents[1] / "src" / "holon_wallet" / "qml"
+    toggle = (qml / "ShowZeroBalancesToggle.qml").read_text(encoding="utf-8")
+    main = (qml / "MainPage.qml").read_text(encoding="utf-8")
+
+    assert 'Accessible.name: "Show zero balances"' in toggle
+    assert "Accessible.role: Accessible.CheckBox" in toggle
+    assert "Accessible.checked: checked" in toggle
+    assert "activeFocusOnTab: true" in toggle
+    assert "Keys.onSpacePressed: trigger()" in toggle
+    assert "Keys.onReturnPressed: trigger()" in toggle
+    handler = main.split("ShowZeroBalancesToggle", 1)[1].split("Item {", 1)[0]
+    assert "setShowZeroBalances(checked)" in handler
+    assert "refreshPublicData" not in handler
+    asset_row = (qml / "AssetRow.qml").read_text(encoding="utf-8")
+    assert " · partial" not in asset_row
+    assert 'root.asset.saved ? " · saved"' in asset_row
 
 
 def test_terminal_result_icons_are_never_reused_from_the_rotating_spinner() -> None:

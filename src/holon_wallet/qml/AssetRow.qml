@@ -60,7 +60,7 @@ Item {
         Text {
             anchors.right: parent.right
             text: root.amountsVisible
-                ? ((root.asset.amount || "Data unavailable") + (root.asset.incomplete ? " · partial" : ""))
+                ? ((root.asset.amount || "Data unavailable") + (root.asset.saved ? " · saved" : ""))
                 : "••••••"
             color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 13
         }

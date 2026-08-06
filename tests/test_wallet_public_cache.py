@@ -15,7 +15,9 @@ from holon_wallet.prices import (
     PriceSnapshot, PriceStatus,
 )
 from holon_wallet.public_cache import PublicCacheStore
-from holon_wallet.public_data import AssetBalance, AssetReadError, PublicDataStatus
+from holon_wallet.public_data import (
+    NETWORK_BY_ID, AssetBalance, AssetReadError, PublicDataStatus,
+)
 from holon_wallet.storage import StorageError, WalletPaths, atomic_write_json
 from holon_wallet.vault import VaultRepository
 from holon_wallet.wallet_crypto import generate_mnemonic
@@ -131,6 +133,37 @@ def test_controller_displays_cache_immediately_while_refresh_is_pending(tmp_path
         assert controller.maximumTransferAmount(
             "base", "usdc", "0x" + "44" * 20,
         ) == ""
+    finally:
+        controller.shutdown()
+
+
+def test_controller_hides_cached_zero_assets_before_refresh(tmp_path) -> None:
+    repository = VaultRepository(WalletPaths(tmp_path))
+    profile = repository.new_record(generate_mnemonic(), "Main Account")
+    repository.create_new("fixture-password", profile)
+    PublicCacheStore(repository.paths).save(
+        profile.summary.profile_id,
+        profile.summary.address,
+        {
+            network_id: public_snapshot(network_id, eth=0, usdc=0)
+            for network_id in NETWORK_BY_ID
+        },
+        prices(),
+    )
+    controller = WalletController(
+        repository,
+        StubPublicDataService(),
+        public_data_executor=DeferredExecutor(),
+        price_service=StubPriceService(),
+        lending_portfolio_service=StubLendingPortfolioService(),
+    )
+    try:
+        assert controller.showZeroBalances is False
+        assert controller.portfolioData["assets"] == []
+        assert controller.selectNetwork("polygon")
+        assert [item["assetId"] for item in controller.portfolioData["assets"]] == [
+            NETWORK_BY_ID["polygon"].native_asset_id,
+        ]
     finally:
         controller.shutdown()
 

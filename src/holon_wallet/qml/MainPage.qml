@@ -169,6 +169,14 @@ PageState {
                 x: 28; y: 486; text: "Assets"; color: Design.textMuted
                 font.family: Design.fontFamily; font.pixelSize: 16; font.weight: Font.Medium
             }
+            ShowZeroBalancesToggle {
+                objectName: "showZeroBalancesToggle"
+                x: 176; y: 474; width: 176; height: 38
+                checked: walletController.showZeroBalances
+                onToggled: function(checked) {
+                    walletController.setShowZeroBalances(checked)
+                }
+            }
             Item {
                 objectName: "refreshButton"
                 x: 372; y: 474; width: 114; height: 38
@@ -197,7 +205,8 @@ PageState {
             SurfaceCard {
                 id: assetsCard
                 x: 28; y: 520; width: 458
-                height: assetRows.height
+                height: walletController.portfolioData.assets.length > 0
+                    ? assetRows.height : 64
                 Column {
                     id: assetRows; width: parent.width
                     Repeater {
@@ -216,6 +225,14 @@ PageState {
                             divider: index < walletController.portfolioData.assets.length - 1
                         }
                     }
+                }
+                Text {
+                    objectName: "emptyAssetsLabel"
+                    anchors.centerIn: parent
+                    visible: walletController.portfolioData.assets.length === 0
+                    text: "No assets with a balance"
+                    color: Design.textMuted
+                    font.family: Design.fontFamily; font.pixelSize: 13
                 }
             }
             Text {
