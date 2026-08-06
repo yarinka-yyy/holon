@@ -165,6 +165,53 @@ class PipeGuardClient:
             response_timeout=20.0,
         )
 
+    def module_action_preview(
+        self,
+        module_id: str,
+        capability_id: str,
+        action_type: str,
+        params: dict[str, object],
+    ) -> ContractEnvelope:
+        return self.client.request(
+            MessageKind.MODULE_ACTION_INTENT,
+            {
+                "module_id": module_id,
+                "capability_id": capability_id,
+                "action_type": action_type,
+                "params": params,
+            },
+            response_timeout=40.0,
+        )
+
+    def module_action_execute(
+        self,
+        module_id: str,
+        capability_id: str,
+        action_type: str,
+        params: dict[str, object],
+        preview_digest: str,
+        action_id: str,
+    ) -> ContractEnvelope:
+        return self.client.request(
+            MessageKind.MODULE_AUTHORITY_INTENT,
+            {
+                "module_id": module_id,
+                "capability_id": capability_id,
+                "action_type": action_type,
+                "params": params,
+                "preview_digest": preview_digest,
+            },
+            action_id=action_id,
+            owner_pid=os.getpid(),
+            response_timeout=40.0,
+        )
+
+    def module_action_status(self, action_id: str) -> ContractEnvelope:
+        return self.client.request(
+            MessageKind.ACTION_STATUS_REQUEST,
+            action_id=action_id,
+        )
+
     def lending_action_preview(
         self, payload: dict[str, object],
     ) -> ContractEnvelope:

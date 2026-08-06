@@ -19,6 +19,7 @@ from .model import (
     MAX_MODULE_FILES,
     MAX_MODULES,
     MAX_PATH_LENGTH,
+    MAX_PROTECTED_ACTION_TYPES,
     MODULE_CATALOG_INVALID,
     MODULE_DUPLICATE,
     MODULE_MANIFEST_INVALID,
@@ -191,9 +192,9 @@ def _capability(value: Any) -> CapabilityDeclaration:
         )
         if _ENTRY_POINT_RE.fullmatch(entry_point) is None:
             raise _error(code, "Invalid entry point")
-    if kind in {"hermes_toolset", "protected_action_adapter"}:
+    if kind == "hermes_toolset":
         if entry_point is not None:
-            raise _error(code, "Capability cannot load executable code in M7")
+            raise _error(code, "Hermes capability cannot load executable code")
     elif entry_point is None:
         raise _error(code, "Capability entry point is required")
     descriptor = raw["descriptor"]
@@ -284,13 +285,28 @@ def _capability(value: Any) -> CapabilityDeclaration:
     elif kind == "protected_action_adapter":
         descriptor = _object(
             descriptor,
-            frozenset({"action_types"}),
+            frozenset({"action_types", "adapter_version", "profile_id"}),
             code,
             "protected action descriptor",
         )
+        if descriptor["adapter_version"] != "1":
+            raise _error(code, "Unsupported protected action adapter version")
+        descriptor["profile_id"] = _identifier(
+            descriptor["profile_id"], code=code, label="protected action profile id",
+        )
         action_types = descriptor["action_types"]
-        if not isinstance(action_types, list) or action_types:
-            raise _error(code, "M7 protected action adapters cannot expose actions")
+        if (
+            not isinstance(action_types, list)
+            or not action_types
+            or len(action_types) > MAX_PROTECTED_ACTION_TYPES
+            or any(
+                not isinstance(action_type, str)
+                or re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", action_type) is None
+                for action_type in action_types
+            )
+            or tuple(sorted(set(action_types))) != tuple(action_types)
+        ):
+            raise _error(code, "Invalid protected action types")
     return CapabilityDeclaration(
         capability_id, kind, version, component, entry_point, dict(descriptor),
     )

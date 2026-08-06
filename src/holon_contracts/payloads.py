@@ -137,8 +137,12 @@ LENDING_ACTION_CODES = frozenset({
 })
 HEX_64_RE = re.compile(r"^[0-9a-f]{64}$")
 MODULE_ID_RE = re.compile(r"^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$")
+MODULE_ACTION_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
 MODULE_FORBIDDEN_FIELDS = frozenset({
     "credential", "mnemonic", "password", "private", "secret", "seed", "signed",
+})
+MODULE_ACTION_FORBIDDEN_FIELDS = MODULE_FORBIDDEN_FIELDS | frozenset({
+    "calldata", "contract", "method", "selector", "signature", "wire",
 })
 
 
@@ -1107,6 +1111,23 @@ def _module_json(value: object, *, depth: int = 0) -> None:
     raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid module data.")
 
 
+def _module_action_json(value: object, *, depth: int = 0) -> None:
+    """Validate semantic module action data and reject raw signing/wire fields."""
+    _module_json(value, depth=depth)
+    if isinstance(value, list):
+        for item in value:
+            _module_action_json(item, depth=depth + 1)
+        return
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if any(token in key.casefold() for token in MODULE_ACTION_FORBIDDEN_FIELDS):
+                raise ContractViolation(
+                    RefusalCode.ARBITRARY_CALL_REFUSED.value,
+                    "Raw module actions and signing material are refused.",
+                )
+            _module_action_json(item, depth=depth + 1)
+
+
 def validate_module_read_request(payload: Mapping[str, Any]) -> None:
     if set(payload) != PAYLOAD_FIELDS[MessageKind.MODULE_READ_REQUEST]:
         raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid module read request.")
@@ -1116,6 +1137,11 @@ def validate_module_read_request(payload: Mapping[str, Any]) -> None:
     params = payload.get("params")
     if not isinstance(params, Mapping):
         raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid module parameters.")
+    if "active_account" in params:
+        raise ContractViolation(
+            RefusalCode.UNKNOWN_AUTHORITY_FIELD.value,
+            "Active Wallet account is supplied only by Guard.",
+        )
     _module_json(params)
 
 
@@ -1144,12 +1170,114 @@ def validate_module_read_response(payload: Mapping[str, Any]) -> None:
         raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid module message.")
 
 
+def validate_module_action_intent(
+    payload: Mapping[str, Any], *, authority: bool,
+) -> None:
+    kind = (
+        MessageKind.MODULE_AUTHORITY_INTENT
+        if authority else MessageKind.MODULE_ACTION_INTENT
+    )
+    expected = PAYLOAD_FIELDS[kind]
+    if set(payload) != expected:
+        code = (
+            RefusalCode.UNKNOWN_AUTHORITY_FIELD
+            if set(payload) - expected else RefusalCode.REQUEST_INVALID
+        )
+        raise ContractViolation(code.value, "Invalid module action fields.")
+    _module_identifier(payload.get("module_id"), "module id")
+    _module_identifier(payload.get("capability_id"), "capability id")
+    action_type = payload.get("action_type")
+    if not isinstance(action_type, str) or MODULE_ACTION_RE.fullmatch(action_type) is None:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid module action type.")
+    params = payload.get("params")
+    if not isinstance(params, Mapping):
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid module action parameters.")
+    _module_action_json(params)
+    if authority:
+        preview_digest = payload.get("preview_digest")
+        if not isinstance(preview_digest, str) or HEX_64_RE.fullmatch(preview_digest) is None:
+            raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid module action digest.")
+
+
+def validate_module_action_preview(payload: Mapping[str, Any]) -> None:
+    if set(payload) != PAYLOAD_FIELDS[MessageKind.MODULE_ACTION_PREVIEW]:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid module action preview.")
+    _safe_text(payload)
+    status = payload.get("status")
+    expected_code = {
+        "PREVIEW_READY": "MODULE_ACTION_PREVIEW_READY",
+        "REFUSED": "MODULE_ACTION_REFUSED",
+        "UNAVAILABLE": "MODULE_ACTION_UNAVAILABLE",
+    }.get(status)
+    if expected_code is None or payload.get("code") != expected_code:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid module action status.")
+    if payload.get("authority_available") is not False or payload.get("execution_available") is not False:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid module authority status.")
+    _module_identifier(payload.get("module_id"), "module id")
+    _module_identifier(payload.get("capability_id"), "capability id")
+    action_type = payload.get("action_type")
+    if not isinstance(action_type, str) or MODULE_ACTION_RE.fullmatch(action_type) is None:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid module action type.")
+    account = payload.get("account")
+    if account is not None and (
+        not isinstance(account, Mapping)
+        or set(account) != {"address", "label"}
+        or not isinstance(account.get("address"), str)
+        or ADDRESS_RE.fullmatch(account["address"]) is None
+        or not isinstance(account.get("label"), str)
+        or not account["label"]
+        or len(account["label"]) > 64
+    ):
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid module action account.")
+    preview = payload.get("preview")
+    if not isinstance(preview, Mapping):
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid module action data.")
+    _module_action_json(preview)
+    checks = payload.get("checks")
+    caveats = payload.get("caveats")
+    for values, label in ((checks, "checks"), (caveats, "caveats")):
+        if (
+            not isinstance(values, list)
+            or len(values) > 32
+            or len(set(values)) != len(values)
+            or any(not isinstance(item, str) or CODE_RE.fullmatch(item) is None for item in values)
+        ):
+            raise ContractViolation(RefusalCode.REQUEST_INVALID.value, f"Invalid module action {label}.")
+    preview_digest = payload.get("preview_digest")
+    expires_at = payload.get("expires_at")
+    if status == "PREVIEW_READY":
+        if (
+            account is None
+            or not preview
+            or not checks
+            or not isinstance(preview_digest, str)
+            or HEX_64_RE.fullmatch(preview_digest) is None
+            or not isinstance(expires_at, str)
+            or UTC_TIMESTAMP_RE.fullmatch(expires_at) is None
+        ):
+            raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Incomplete module action preview.")
+        return
+    if account is not None or preview or checks or preview_digest is not None or expires_at is not None:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid unavailable module action preview.")
+    if not caveats:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Missing module action refusal reason.")
+
+
 def validate_payload(kind: MessageKind, payload: Mapping[str, Any]) -> None:
     if kind is MessageKind.MODULE_READ_REQUEST:
         validate_module_read_request(payload)
         return
     if kind is MessageKind.MODULE_READ_RESPONSE:
         validate_module_read_response(payload)
+        return
+    if kind is MessageKind.MODULE_ACTION_INTENT:
+        validate_module_action_intent(payload, authority=False)
+        return
+    if kind is MessageKind.MODULE_AUTHORITY_INTENT:
+        validate_module_action_intent(payload, authority=True)
+        return
+    if kind is MessageKind.MODULE_ACTION_PREVIEW:
+        validate_module_action_preview(payload)
         return
     if kind is MessageKind.READ_LENDING_MARKETS:
         if set(payload) not in (set(), {"force_refresh"}) or (

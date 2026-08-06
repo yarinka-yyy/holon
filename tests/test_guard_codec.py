@@ -17,6 +17,7 @@ class GuardCodecTests(unittest.TestCase):
             MessageKind.PREPARE_TRANSFER,
             MessageKind.TRANSFER_INTENT,
             MessageKind.LENDING_AUTHORITY_INTENT,
+            MessageKind.MODULE_AUTHORITY_INTENT,
         })
         requests = (
             transfer_request(),
@@ -38,6 +39,20 @@ class GuardCodecTests(unittest.TestCase):
                     "action": "supply", "amount_mode": "exact", "amount": "1",
                 },
                 action_id="act-44444444-4444-4444-8444-444444444444",
+            ),
+            make_envelope(
+                MessageKind.MODULE_AUTHORITY_INTENT,
+                {
+                    "module_id": "holon.perpdex",
+                    "capability_id": "holon.perpdex.action.guard",
+                    "action_type": "OPEN_POSITION",
+                    "params": {
+                        "leverage": 2, "market": "BTC",
+                        "notional_usdc": "10", "side": "LONG",
+                    },
+                    "preview_digest": "a" * 64,
+                },
+                action_id="act-55555555-5555-4555-8555-555555555555",
             ),
         )
         for request in requests:

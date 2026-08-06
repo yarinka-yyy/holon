@@ -283,7 +283,21 @@ class AuthorityService(ResponseMixin):
                     or not callable(capability.contribution)
                 ):
                     raise RuntimeError("Module read is unavailable")
-                result = capability.contribution(operation, request.payload["params"])
+                params = dict(request.payload["params"])
+                account_operations = getattr(
+                    capability.contribution, "ACCOUNT_OPERATIONS", (),
+                )
+                if operation in account_operations:
+                    wallet_result = self.lifecycle.wallet.read_public_balances()
+                    account = (
+                        wallet_result.payload.get("account")
+                        if wallet_result.ok and wallet_result.payload is not None
+                        else None
+                    )
+                    if not isinstance(account, Mapping):
+                        raise RuntimeError("Wallet account is unavailable")
+                    params["active_account"] = dict(account)
+                result = capability.contribution(operation, params)
                 if not isinstance(result, Mapping):
                     raise RuntimeError("Module result is invalid")
                 payload = {

@@ -16,6 +16,7 @@ OWNER_REQUIRED_KINDS = frozenset({
     MessageKind.PREPARE_TRANSFER,
     MessageKind.TRANSFER_INTENT,
     MessageKind.LENDING_AUTHORITY_INTENT,
+    MessageKind.MODULE_AUTHORITY_INTENT,
 })
 RESPONSE_FIELDS = frozenset({"ipc_version", "message"})
 

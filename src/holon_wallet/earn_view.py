@@ -67,6 +67,7 @@ def _product_to_map(
     metric = product.metrics[0] if product.metrics else None
     metric_label = (
         "Supply APY" if metric is not None and metric.kind is MetricKind.SUPPLY_APY
+        else "Protocol APR" if metric is not None and metric.kind is MetricKind.PROTOCOL_APR
         else f"Trailing return · {metric.period}"
         if metric is not None and metric.kind is MetricKind.TRAILING_RETURN
         else "Yield"

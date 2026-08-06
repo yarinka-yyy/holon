@@ -31,6 +31,7 @@ class ProductCategory(str, Enum):
 
 class MetricKind(str, Enum):
     SUPPLY_APY = "SUPPLY_APY"
+    PROTOCOL_APR = "PROTOCOL_APR"
     TRAILING_RETURN = "TRAILING_RETURN"
 
 
@@ -131,8 +132,8 @@ class YieldMetric:
     def __post_init__(self) -> None:
         if self.value_percent is not None:
             decimal_string(self.value_percent, "yield percentage", signed=True)
-        if self.kind is MetricKind.SUPPLY_APY and self.period is not None:
-            raise EarnContractError("SUPPLY_APY cannot have a historical period")
+        if self.kind in {MetricKind.SUPPLY_APY, MetricKind.PROTOCOL_APR} and self.period is not None:
+            raise EarnContractError("Current annual yield cannot have a historical period")
         if self.kind is MetricKind.TRAILING_RETURN:
             _plain_text(self.period, "trailing return period", 32)
         if self.availability is AvailabilityState.AVAILABLE and self.value_percent is None:

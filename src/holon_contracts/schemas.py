@@ -10,6 +10,7 @@ ACTION_REQUIRED_KINDS = frozenset(
         MessageKind.PREPARE_TRANSFER,
         MessageKind.TRANSFER_INTENT,
         MessageKind.LENDING_AUTHORITY_INTENT,
+        MessageKind.MODULE_AUTHORITY_INTENT,
         MessageKind.ACTION_STATUS_REQUEST,
         MessageKind.CANCEL_ACTION,
         MessageKind.RECOVER_ACTION,
@@ -33,6 +34,8 @@ REQUEST_KINDS = frozenset(
         MessageKind.READ_LENDING_PORTFOLIO,
         MessageKind.READ_EARN_PORTFOLIO,
         MessageKind.MODULE_READ_REQUEST,
+        MessageKind.MODULE_ACTION_INTENT,
+        MessageKind.MODULE_AUTHORITY_INTENT,
         MessageKind.LENDING_ACTION_INTENT,
         MessageKind.LENDING_AUTHORITY_INTENT,
         MessageKind.PREPARE_TRANSFER,
@@ -53,6 +56,12 @@ PAYLOAD_FIELDS = {
     MessageKind.READ_EARN_PORTFOLIO: frozenset(),
     MessageKind.MODULE_READ_REQUEST: frozenset(
         {"module_id", "capability_id", "operation", "params"}
+    ),
+    MessageKind.MODULE_ACTION_INTENT: frozenset(
+        {"module_id", "capability_id", "action_type", "params"}
+    ),
+    MessageKind.MODULE_AUTHORITY_INTENT: frozenset(
+        {"module_id", "capability_id", "action_type", "params", "preview_digest"}
     ),
     MessageKind.LENDING_ACTION_INTENT: frozenset(
         {
@@ -126,6 +135,13 @@ PAYLOAD_FIELDS = {
         {
             "status", "module_id", "capability_id", "operation", "result",
             "code", "message",
+        }
+    ),
+    MessageKind.MODULE_ACTION_PREVIEW: frozenset(
+        {
+            "status", "authority_available", "execution_available", "module_id",
+            "capability_id", "action_type", "account", "preview",
+            "preview_digest", "expires_at", "checks", "caveats", "code", "message",
         }
     ),
     MessageKind.LENDING_ACTION_PREVIEW: frozenset(
