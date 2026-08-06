@@ -1,0 +1,1 @@
+{"tools":[{"capability_id":"holon.mock.read","description":"Return the deterministic read-only M7 mock module status.","name":"holon_mock_status","operation":"status","parameters":{"additionalProperties":false,"properties":{},"required":[],"type":"object"}}]}

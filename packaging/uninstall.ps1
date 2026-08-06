@@ -45,10 +45,12 @@ $appRoot = Join-Path $holonRoot "app"
 $dataRoot = Join-Path $holonRoot "data"
 $pluginRoot = Join-Path (Join-Path $HermesHome "plugins") "holon"
 $skillsRoot = Join-Path (Join-Path $HermesHome "skills") "crypto"
-$holonSkillRoot = Join-Path $skillsRoot "holon"
-$lendingSkillRoot = Join-Path $skillsRoot "holon-lending"
 
 try {
+    $manifest = Read-HolManifest $PSScriptRoot
+    Test-HolPackage $PSScriptRoot $manifest
+    $skillIds = @(Read-HolInstalledSkillIds $appRoot)
+    if (-not $skillIds.Count) { $skillIds = @($manifest.skill_ids) }
     $configurationWarning = $false
     $oldHome = $env:HERMES_HOME
     try {
@@ -58,7 +60,11 @@ try {
             if ($LASTEXITCODE -ne 0) { $configurationWarning = $true }
         } catch { $configurationWarning = $true }
     } finally { $env:HERMES_HOME = $oldHome }
-    foreach ($path in @($appRoot, $pluginRoot, $holonSkillRoot, $lendingSkillRoot)) {
+    $ownedRoots = @($appRoot, $pluginRoot)
+    foreach ($skillId in $skillIds) {
+        $ownedRoots += Join-Path $skillsRoot $skillId
+    }
+    foreach ($path in $ownedRoots) {
         if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force }
     }
     if ($RemoveData -and $ConfirmDataDeletion -and (Test-Path -LiteralPath $dataRoot)) {

@@ -1,6 +1,9 @@
 param(
     [string]$PythonPath = "",
-    [string]$InnoCompilerPath = ""
+    [string]$InnoCompilerPath = "",
+    [string]$CompositionId = "base",
+    [string[]]$ModuleRoot = @(),
+    [string[]]$DisabledModuleId = @()
 )
 
 $ErrorActionPreference = "Stop"
@@ -21,18 +24,42 @@ if ($LASTEXITCODE -ne 0) { throw "Third-party license verification failed" }
 
 $buildRoot = [System.IO.Path]::GetFullPath((Join-Path $projectRoot "build\installer"))
 $packageRoot = [System.IO.Path]::GetFullPath((Join-Path $buildRoot "package"))
+$compositionRoot = [System.IO.Path]::GetFullPath((Join-Path $buildRoot "composition"))
 $expectedPrefix = $buildRoot.TrimEnd('\') + '\'
-if (-not $packageRoot.StartsWith($expectedPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+if (-not $packageRoot.StartsWith($expectedPrefix, [System.StringComparison]::OrdinalIgnoreCase) -or
+    -not $compositionRoot.StartsWith($expectedPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
     throw "Unsafe installer staging path"
 }
-if (Test-Path -LiteralPath $packageRoot) {
-    Remove-Item -LiteralPath $packageRoot -Recurse -Force
+foreach ($target in @($packageRoot, $compositionRoot)) {
+    if (Test-Path -LiteralPath $target) {
+        Remove-Item -LiteralPath $target -Recurse -Force
+    }
 }
 New-Item -ItemType Directory -Force -Path $buildRoot | Out-Null
 
-& (Join-Path $PSScriptRoot "build-guard.ps1") -PythonPath $PythonPath
+$compositionArguments = @(
+    (Join-Path $PSScriptRoot "build_composition.py"),
+    "--destination", $compositionRoot,
+    "--composition-id", $CompositionId
+)
+foreach ($root in $ModuleRoot) {
+    $resolvedRoot = (Resolve-Path -LiteralPath $root).Path
+    if (-not (Test-Path -LiteralPath (Join-Path $resolvedRoot "module-manifest.json") -PathType Leaf)) {
+        throw "Every module root must contain module-manifest.json"
+    }
+    $compositionArguments += @("--module-root", $resolvedRoot)
+}
+foreach ($moduleId in $DisabledModuleId) {
+    $compositionArguments += @("--disabled-module-id", $moduleId)
+}
+& $PythonPath @compositionArguments
+if ($LASTEXITCODE -ne 0) { throw "Module composition build failed" }
+
+& (Join-Path $PSScriptRoot "build-guard.ps1") `
+    -PythonPath $PythonPath -CompositionRoot $compositionRoot
 if ($LASTEXITCODE -ne 0) { throw "Guard build failed" }
-& (Join-Path $PSScriptRoot "build-wallet.ps1") -PythonPath $PythonPath
+& (Join-Path $PSScriptRoot "build-wallet.ps1") `
+    -PythonPath $PythonPath -CompositionRoot $compositionRoot
 if ($LASTEXITCODE -ne 0) { throw "Wallet build failed" }
 
 $iconPath = Join-Path $buildRoot "holon.ico"
@@ -44,7 +71,8 @@ if ($LASTEXITCODE -ne 0) { throw "Installer icon build failed" }
     --source-root $projectRoot `
     --destination $packageRoot `
     --guard (Join-Path $projectRoot "dist\HolonGuard.exe") `
-    --wallet (Join-Path $projectRoot "dist\HolonWallet.exe")
+    --wallet (Join-Path $projectRoot "dist\HolonWallet.exe") `
+    --composition-root $compositionRoot
 if ($LASTEXITCODE -ne 0) { throw "Production package build failed" }
 
 if ([string]::IsNullOrWhiteSpace($InnoCompilerPath)) {

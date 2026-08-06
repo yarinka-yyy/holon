@@ -1,6 +1,8 @@
 """Contract, policy, journal, request control, and Guard lifecycle boundary."""
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from holon_contracts import ContractEnvelope, MessageKind, SecurityCode
 from holon_guard_ipc import GuardState
 from holon_journal import EventType, JournalFailure
@@ -8,6 +10,7 @@ from holon_lending import (
     ActionProfilesState, LendingPortfolioService, LendingReader, LendingReadService,
 )
 from holon_lending.preflight import unavailable_preview
+from holon_modules import CapabilityRegistry, ModuleLifecycleState
 from holon_policy import (
     PolicyEngine, PolicyRevisionStore, PolicyRevisionUnavailable, PolicySnapshot,
     policy_digest,
@@ -34,6 +37,7 @@ class AuthorityService(ResponseMixin):
         lending_actions: ActionProfilesState | None = None,
         lending_portfolio: LendingPortfolioService | None = None,
         lending_history=None,
+        module_registry: CapabilityRegistry | None = None,
     ) -> None:
         self.lifecycle = lifecycle
         self.policy = policy
@@ -47,6 +51,7 @@ class AuthorityService(ResponseMixin):
         self.lending_actions = lending_actions or ActionProfilesState.load()
         self.lending_portfolio = lending_portfolio
         self.lending_history = lending_history
+        self.module_registry = module_registry or CapabilityRegistry()
 
     def replace_policy_snapshot(self, snapshot: PolicySnapshot) -> None:
         self.policy_snapshot = snapshot
@@ -257,6 +262,47 @@ class AuthorityService(ResponseMixin):
                 MessageKind.WALLET_BALANCES,
                 result.payload,
             )
+        if request.kind is MessageKind.MODULE_READ_REQUEST:
+            module_id = str(request.payload["module_id"])
+            capability_id = str(request.payload["capability_id"])
+            operation = str(request.payload["operation"])
+            try:
+                status = self.module_registry.module_status(module_id)
+                capability = self.module_registry.resolve(capability_id)
+                if (
+                    status.state is not ModuleLifecycleState.READY
+                    or capability.module_id != module_id
+                    or capability.declaration.kind != "public_reader"
+                    or operation not in capability.declaration.descriptor["operations"]
+                    or not callable(capability.contribution)
+                ):
+                    raise RuntimeError("Module read is unavailable")
+                result = capability.contribution(operation, request.payload["params"])
+                if not isinstance(result, Mapping):
+                    raise RuntimeError("Module result is invalid")
+                payload = {
+                    "status": "READY",
+                    "module_id": module_id,
+                    "capability_id": capability_id,
+                    "operation": operation,
+                    "result": dict(result),
+                    "code": "MODULE_READ_READY",
+                    "message": "Optional module read completed.",
+                }
+                return self._response(
+                    request, MessageKind.MODULE_READ_RESPONSE, payload,
+                )
+            except Exception:
+                payload = {
+                    "status": "UNAVAILABLE",
+                    "module_id": module_id,
+                    "capability_id": capability_id,
+                    "operation": operation,
+                    "result": {},
+                    "code": "CAPABILITY_UNAVAILABLE",
+                    "message": "Optional module read is unavailable.",
+                }
+            return self._response(request, MessageKind.MODULE_READ_RESPONSE, payload)
         if request.kind is MessageKind.READ_LENDING_MARKETS:
             try:
                 payload = self.lending.compare(request.payload.get("force_refresh", False))

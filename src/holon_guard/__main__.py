@@ -23,6 +23,11 @@ from holon_lending import (
     ActionProfilesState, LendingAnalyticsStore, LendingPortfolioService,
     LendingReadService,
 )
+from holon_modules import (
+    CapabilityRegistry,
+    default_catalog_path,
+    load_registry as load_module_registry,
+)
 from holon_installation import verify_installed
 
 from .action_model import ActionStateSnapshot
@@ -78,6 +83,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--plugin-root", type=Path, default=None)
     parser.add_argument("--hermes-version", default="")
     parser.add_argument("--wallet-path", type=Path, default=None)
+    parser.add_argument("--module-catalog", type=Path, default=None)
     return parser
 
 
@@ -167,6 +173,13 @@ def main(argv: list[str] | None = None) -> int:
                 policy_snapshot = revision_store.recoverable_snapshot()
                 revision_invalid = True
             install_failure = _integrity_failure(args)
+            module_registry = (
+                CapabilityRegistry(catalog_error=install_failure)
+                if install_failure is not None
+                else load_module_registry(
+                    args.module_catalog or default_catalog_path(), "guard",
+                )
+            )
             ledger = ActionLedger(action_store, action_snapshot)
             wallet = _wallet_controller(args, install_failure)
             lifecycle = GuardLifecycle.restore(
@@ -209,6 +222,7 @@ def main(argv: list[str] | None = None) -> int:
                     LendingAnalyticsStore(data_dir / "lending-analytics.json"),
                 ),
                 lending_history=lending_history,
+                module_registry=module_registry,
             )
             if lifecycle.snapshot.state.value == "SIGNING_DISABLED":
                 authority.audit_system(

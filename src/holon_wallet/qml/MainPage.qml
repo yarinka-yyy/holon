@@ -103,20 +103,34 @@ PageState {
                 color: Design.textFaint; font.family: Design.fontFamily; font.pixelSize: 12
             }
 
-            ActionCard {
-                objectName: "sendAction"; x: 28; y: 286; width: 144; height: 102
-                label: "Send"; iconSource: "assets/send.svg"
-                onTriggered: walletController.showSend()
-            }
-            ActionCard {
-                objectName: "transactionsAction"; x: 185; y: 286; width: 144; height: 102
-                label: "History"; iconSource: "assets/clock.svg"
-                onTriggered: walletController.showHistory()
-            }
-            ActionCard {
-                objectName: "lendingAction"; x: 342; y: 286; width: 144; height: 102
-                label: "Lending"; iconSource: "assets/lending.svg"
-                onTriggered: walletController.showLending()
+            Row {
+                x: 28; y: 286; spacing: 13
+                ActionCard {
+                    objectName: "sendAction"
+                    width: walletController.modulePageAvailable ? 105 : 144; height: 102
+                    label: "Send"; iconSource: "assets/send.svg"
+                    onTriggered: walletController.showSend()
+                }
+                ActionCard {
+                    objectName: "transactionsAction"
+                    width: walletController.modulePageAvailable ? 105 : 144; height: 102
+                    label: "History"; iconSource: "assets/clock.svg"
+                    onTriggered: walletController.showHistory()
+                }
+                ActionCard {
+                    objectName: "lendingAction"
+                    width: walletController.modulePageAvailable ? 105 : 144; height: 102
+                    label: "Lending"; iconSource: "assets/lending.svg"
+                    onTriggered: walletController.showLending()
+                }
+                ActionCard {
+                    objectName: "moduleAction"
+                    visible: walletController.modulePageAvailable
+                    width: visible ? 105 : 0; height: 102
+                    label: walletController.modulePageData.label || "Module"
+                    iconSource: walletController.modulePageData.iconSource || "assets/holon.svg"
+                    onTriggered: walletController.showModulePage()
+                }
             }
 
             Row {

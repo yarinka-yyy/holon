@@ -1,5 +1,6 @@
 param(
-    [string]$PythonPath = ""
+    [string]$PythonPath = "",
+    [string]$CompositionRoot = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -21,6 +22,47 @@ $lendingReadProfile = Join-Path $sourceRoot "holon_lending\read-profiles.json"
 $lendingActionProfile = Join-Path $sourceRoot "holon_lending\action-profiles.json"
 $baselinePolicy = Join-Path $sourceRoot "holon_policy\baseline-policy.json"
 $networkAssets = Join-Path $sourceRoot "holon_contracts\network-assets.json"
+$defaultCompositionRoot = Join-Path $sourceRoot "holon_modules"
+if ([string]::IsNullOrWhiteSpace($CompositionRoot)) {
+    $CompositionRoot = $defaultCompositionRoot
+}
+$CompositionRoot = [IO.Path]::GetFullPath($CompositionRoot)
+$moduleCatalog = Join-Path $CompositionRoot "module-catalog.json"
+if (-not (Test-Path -LiteralPath $moduleCatalog -PathType Leaf)) {
+    throw "Wallet module catalog is unavailable"
+}
+$moduleBuildArguments = @("--add-data", "$moduleCatalog;holon_modules")
+$compositionModules = Join-Path $CompositionRoot "modules"
+$catalog = Get-Content -LiteralPath $moduleCatalog -Raw -Encoding UTF8 | ConvertFrom-Json
+foreach ($entry in @($catalog.modules)) {
+    $stagedModuleRoot = Join-Path $compositionModules $entry.module_id
+    $manifestPath = Join-Path $stagedModuleRoot "module-manifest.json"
+    $moduleBuildArguments += @(
+        "--add-data", "$manifestPath;holon_modules/modules/$($entry.module_id)"
+    )
+    $moduleManifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    if (-not $entry.enabled) { continue }
+    foreach ($file in @($moduleManifest.files | Where-Object {
+        $_.targets -ccontains "wallet" -or $_.targets -ccontains "shared"
+    })) {
+        $source = Join-Path $stagedModuleRoot $file.path.Replace("/", "\")
+        $relativeParent = [IO.Path]::GetDirectoryName($file.path.Replace("/", "\"))
+        $destination = "holon_modules/modules/$($entry.module_id)"
+        if (-not [string]::IsNullOrWhiteSpace($relativeParent)) {
+            $destination += "/" + $relativeParent.Replace("\", "/")
+        }
+        $moduleBuildArguments += @("--add-data", "$source;$destination")
+    }
+    $stagedSourceRoot = Join-Path $stagedModuleRoot "src"
+    if (Test-Path -LiteralPath $stagedSourceRoot -PathType Container) {
+        $moduleBuildArguments += @("--paths", $stagedSourceRoot)
+    }
+    foreach ($capability in @($moduleManifest.capabilities | Where-Object {
+        $_.component -ceq "wallet" -and $null -ne $_.entry_point
+    })) {
+        $moduleBuildArguments += @("--hidden-import", $capability.entry_point.Split(":")[0])
+    }
+}
 $versionFile = Join-Path $PSScriptRoot "windows-version.txt"
 New-Item -ItemType Directory -Force -Path $buildRoot | Out-Null
 $iconPath = Join-Path $buildRoot "holon-wallet.ico"
@@ -51,6 +93,7 @@ try {
         --add-data "$lendingActionProfile;holon_lending" `
         --add-data "$baselinePolicy;holon_policy" `
         --add-data "$networkAssets;holon_contracts" `
+        @moduleBuildArguments `
         --collect-data bip_utils `
         --collect-all coincurve `
         --collect-data web3 `

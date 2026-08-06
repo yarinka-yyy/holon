@@ -19,6 +19,11 @@ from holon_policy.baseline import (
     INSTALLED_POLICY_RELATIVE_PATH,
     load_baseline_policy,
 )
+from holon_modules import (
+    CapabilityRegistry,
+    default_catalog_path,
+    load_registry as load_module_registry,
+)
 from holon_wallet_control import (
     AUTHORITY_PIPE_NAME, CONTROL_PIPE_NAME, WalletAuthorityServer,
     WalletControlServer,
@@ -255,6 +260,7 @@ class WalletApplication:
         status_client: WalletStatusClient | None = None,
         policy_control_client=None,
         lending_portfolio_service: object | None = None,
+        module_registry: CapabilityRegistry | None = None,
     ) -> None:
         self.qt_app = qt_app or QGuiApplication.instance()
         if self.qt_app is None:
@@ -297,6 +303,11 @@ class WalletApplication:
             ),
             policy_control_client=policy_control_client,
             lending_portfolio_service=lending_portfolio_service,
+            module_registry=(
+                module_registry
+                if module_registry is not None
+                else load_module_registry(default_catalog_path(), "wallet")
+            ),
         )
         self.window = WalletQuickView(self.controller)
         global _RECOVERY_TYPE_REGISTERED

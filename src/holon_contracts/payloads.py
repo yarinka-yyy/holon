@@ -134,6 +134,10 @@ LENDING_ACTION_CODES = frozenset({
     "LENDING_ACTION_UNAVAILABLE",
 })
 HEX_64_RE = re.compile(r"^[0-9a-f]{64}$")
+MODULE_ID_RE = re.compile(r"^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$")
+MODULE_FORBIDDEN_FIELDS = frozenset({
+    "credential", "mnemonic", "password", "private", "secret", "seed", "signed",
+})
 
 
 def _transfer(payload: Mapping[str, Any]) -> None:
@@ -1058,7 +1062,93 @@ def _response(kind: MessageKind, payload: Mapping[str, Any]) -> None:
             raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid policy version.")
 
 
+def _module_identifier(value: object, label: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) > 64
+        or MODULE_ID_RE.fullmatch(value) is None
+    ):
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, f"Invalid {label}.")
+    return value
+
+
+def _module_json(value: object, *, depth: int = 0) -> None:
+    if depth > 5:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Module data is too deep.")
+    if value is None or isinstance(value, (bool, int)):
+        return
+    if isinstance(value, float):
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Module data cannot use float.")
+    if isinstance(value, str):
+        if len(value) > 2048 or any(ord(character) < 32 for character in value):
+            raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid module text.")
+        return
+    if isinstance(value, list):
+        if len(value) > 64:
+            raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Module list is too large.")
+        for item in value:
+            _module_json(item, depth=depth + 1)
+        return
+    if isinstance(value, Mapping):
+        if len(value) > 64:
+            raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Module object is too large.")
+        for key, item in value.items():
+            if (
+                not isinstance(key, str)
+                or not key
+                or len(key) > 64
+                or any(token in key.casefold() for token in MODULE_FORBIDDEN_FIELDS)
+            ):
+                raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid module field.")
+            _module_json(item, depth=depth + 1)
+        return
+    raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid module data.")
+
+
+def validate_module_read_request(payload: Mapping[str, Any]) -> None:
+    if set(payload) != PAYLOAD_FIELDS[MessageKind.MODULE_READ_REQUEST]:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid module read request.")
+    _module_identifier(payload.get("module_id"), "module id")
+    _module_identifier(payload.get("capability_id"), "capability id")
+    _module_identifier(payload.get("operation"), "module operation")
+    params = payload.get("params")
+    if not isinstance(params, Mapping):
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid module parameters.")
+    _module_json(params)
+
+
+def validate_module_read_response(payload: Mapping[str, Any]) -> None:
+    if set(payload) != PAYLOAD_FIELDS[MessageKind.MODULE_READ_RESPONSE]:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid module read response.")
+    if payload.get("status") not in {"READY", "UNAVAILABLE"}:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid module status.")
+    _module_identifier(payload.get("module_id"), "module id")
+    _module_identifier(payload.get("capability_id"), "capability id")
+    _module_identifier(payload.get("operation"), "module operation")
+    result = payload.get("result")
+    if not isinstance(result, Mapping):
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid module result.")
+    _module_json(result)
+    code = payload.get("code")
+    message = payload.get("message")
+    if not isinstance(code, str) or CODE_RE.fullmatch(code) is None:
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid module code.")
+    if (
+        not isinstance(message, str)
+        or not message
+        or len(message) > 256
+        or any(ord(character) < 32 for character in message)
+    ):
+        raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid module message.")
+
+
 def validate_payload(kind: MessageKind, payload: Mapping[str, Any]) -> None:
+    if kind is MessageKind.MODULE_READ_REQUEST:
+        validate_module_read_request(payload)
+        return
+    if kind is MessageKind.MODULE_READ_RESPONSE:
+        validate_module_read_response(payload)
+        return
     if kind is MessageKind.READ_LENDING_MARKETS:
         if set(payload) not in (set(), {"force_refresh"}) or (
             "force_refresh" in payload and type(payload.get("force_refresh")) is not bool

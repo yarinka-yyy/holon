@@ -6,7 +6,7 @@ import os
 from pathlib import Path, PurePosixPath
 import stat
 
-from .model import ManifestError
+from .model import BASE_SKILL_IDS, ManifestError
 
 MAX_PATH_LENGTH = 240
 ROOT_FILES = frozenset({
@@ -33,21 +33,36 @@ def validate_relative_path(value: str) -> str:
     return value
 
 
-def expected_component(value: str) -> str:
+def expected_component(
+    value: str,
+    module_ids: tuple[str, ...] = (),
+    skill_ids: tuple[str, ...] = BASE_SKILL_IDS,
+) -> str:
     if value == "payload/app/HolonGuard.exe":
         return "guard"
     if value == "payload/app/HolonWallet.exe":
         return "wallet"
+    if value in {
+        "payload/app/module-catalog.json", "payload/plugin/module-catalog.json",
+    }:
+        return "modules"
     if value == "payload/app/holon_policy/baseline-policy.json":
         return "policy"
     if value.startswith(("payload/plugin/holon_contracts/", "payload/plugin/holon_guard_ipc/")):
         return "contracts"
+    if value.startswith("payload/plugin/holon_modules/"):
+        return "modules"
+    if value.startswith("payload/plugin/modules/"):
+        parts = PurePosixPath(value).parts
+        if len(parts) < 5 or parts[2] != "modules" or parts[3] not in module_ids:
+            raise ManifestError("Release module path is outside the composition")
+        return "modules"
     if value.startswith("payload/plugin/"):
         return "plugin"
-    if value.startswith((
-        "payload/skills/crypto/holon/",
-        "payload/skills/crypto/holon-lending/",
-    )):
+    if value.startswith("payload/skills/crypto/"):
+        parts = PurePosixPath(value).parts
+        if len(parts) < 5 or parts[3] not in skill_ids:
+            raise ManifestError("Release skill path is outside the composition")
         return "skills"
     if value.startswith("payload/initial-data/"):
         return "initial-data"

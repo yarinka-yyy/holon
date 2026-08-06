@@ -57,7 +57,7 @@ def test_builder_accepts_distinct_windows_x64_production_artifacts(tmp_path: Pat
     manifest = PackageBuilder(SOURCE_ROOT).build(
         tmp_path / "package", {"guard": guard, "wallet": wallet},
     )
-    assert manifest.manifest_version == "2"
+    assert manifest.manifest_version == "3"
 
 
 @pytest.mark.parametrize("case", ["empty", "mock", "wrong_name", "wrong_arch", "same"])

@@ -13,12 +13,17 @@ def main() -> None:
     parser.add_argument("--destination", required=True, type=Path)
     parser.add_argument("--guard", required=True, type=Path)
     parser.add_argument("--wallet", required=True, type=Path)
+    parser.add_argument("--composition-root", type=Path)
     arguments = parser.parse_args()
     source_root = arguments.source_root.resolve()
     sys.path.insert(0, str(source_root / "src"))
     from holon_installation import PackageBuilder
 
-    manifest = PackageBuilder(source_root).build(
+    composition_root = (
+        arguments.composition_root.resolve()
+        if arguments.composition_root is not None else None
+    )
+    manifest = PackageBuilder(source_root, composition_root).build(
         arguments.destination.resolve(),
         {"guard": arguments.guard.resolve(), "wallet": arguments.wallet.resolve()},
     )

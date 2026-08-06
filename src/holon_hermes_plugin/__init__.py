@@ -18,6 +18,7 @@ def _load_shared(name: str) -> None:
 
 _load_shared("holon_contracts")
 _load_shared("holon_guard_ipc")
+_load_shared("holon_modules")
 
 from .plugin import register  # noqa: E402
 

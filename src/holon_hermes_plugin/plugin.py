@@ -4,10 +4,18 @@ from __future__ import annotations
 
 import json
 from collections import OrderedDict
+from pathlib import Path
 from typing import Any, Optional
 
 from holon_contracts import (
     ContractEnvelope, MessageKind, load_registry, make_envelope, new_action_id,
+)
+from holon_modules import (
+    ModuleLifecycleState,
+    decode_manifest,
+    default_catalog_path,
+    load_registry as load_module_registry,
+    load_toolset,
 )
 
 from .guard import (
@@ -43,6 +51,13 @@ CAPABILITIES = [
 ]
 PROTECTED_TOOL_ALLOWLIST = frozenset({
     HEALTH_TOOL, OPEN_WALLET_TOOL,
+    TRANSFER_STATUS_TOOL, CANCEL_TRANSFER_TOOL, RECOVER_TRANSFER_TOOL,
+    ACTION_STATUS_TOOL, CANCEL_ACTION_TOOL, RECOVER_ACTION_TOOL,
+})
+STATIC_TOOL_NAMES = frozenset({
+    HEALTH_TOOL, OPEN_WALLET_TOOL, WALLET_BALANCES_TOOL,
+    LENDING_COMPARE_TOOL, LENDING_POSITIONS_TOOL, LENDING_PORTFOLIO_TOOL,
+    LENDING_PREPARE_TOOL, LENDING_EXECUTE_TOOL, PREPARE_TRANSFER_TOOL,
     TRANSFER_STATUS_TOOL, CANCEL_TRANSFER_TOOL, RECOVER_TRANSFER_TOOL,
     ACTION_STATUS_TOOL, CANCEL_ACTION_TOOL, RECOVER_ACTION_TOOL,
 })
@@ -368,6 +383,43 @@ class PluginRuntime:
             ensure_ascii=False,
             separators=(",", ":"),
         )
+
+    def handle_module_read(
+        self,
+        module_id: str,
+        capability_id: str,
+        operation: str,
+        params: Optional[dict] = None,
+        **kwargs: Any,
+    ) -> str:
+        values: dict[str, Any] = {}
+        invalid = params is not None and not isinstance(params, dict)
+        if isinstance(params, dict):
+            values.update(params)
+        if set(values).intersection(kwargs):
+            invalid = True
+        values.update(kwargs)
+        try:
+            response = None if invalid else self._connector.module_read(
+                module_id, capability_id, operation, values,
+            )
+            if response is None:
+                raise ValueError("Invalid module parameters")
+            if response.kind is MessageKind.MODULE_READ_RESPONSE:
+                return json.dumps(
+                    response.payload, ensure_ascii=False, separators=(",", ":"),
+                )
+        except Exception:
+            pass
+        return json.dumps({
+            "status": "UNAVAILABLE",
+            "module_id": module_id,
+            "capability_id": capability_id,
+            "operation": operation,
+            "result": {},
+            "code": "CAPABILITY_UNAVAILABLE",
+            "message": "Optional module read is unavailable.",
+        }, ensure_ascii=False, separators=(",", ":"))
 
     def handle_lending_compare(
         self, params: Optional[dict] = None, **kwargs: Any,
@@ -742,6 +794,81 @@ class PluginRuntime:
 _runtime = PluginRuntime(GuardConnector(PipeGuardClient(), production_launcher()))
 
 
+def _optional_module_registry():
+    adjacent = Path(__file__).with_name("module-catalog.json")
+    return load_module_registry(
+        adjacent if adjacent.is_file() else default_catalog_path(), "hermes",
+    )
+
+
+def _optional_tool_declarations():
+    registry = _optional_module_registry()
+    candidates: dict[str, list[object]] = {}
+    for capability in registry.capabilities("hermes_toolset"):
+        module_id = capability.module_id
+        if registry.module_status(module_id).state is not ModuleLifecycleState.READY:
+            continue
+        try:
+            root = Path(capability.resource_root or "")
+            manifest = decode_manifest((root / "module-manifest.json").read_bytes())
+            readers = {
+                item.capability_id: item for item in manifest.capabilities
+                if item.kind == "public_reader"
+            }
+            descriptor_path = str(capability.declaration.descriptor["descriptor_path"])
+            tools = list(load_toolset(root / descriptor_path))
+            if any(
+                tool.capability_id not in readers
+                or tool.operation not in readers[tool.capability_id].descriptor["operations"]
+                or tool.name in STATIC_TOOL_NAMES
+                for tool in tools
+            ):
+                continue
+            candidates[module_id] = tools
+        except Exception:
+            continue
+    owners: dict[str, list[str]] = {}
+    for module_id, tools in candidates.items():
+        for tool in tools:
+            owners.setdefault(tool.name, []).append(module_id)
+    conflicts = {
+        module_id
+        for module_ids in owners.values() if len(module_ids) > 1
+        for module_id in module_ids
+    }
+    return tuple(
+        (module_id, tool)
+        for module_id in sorted(candidates) if module_id not in conflicts
+        for tool in candidates[module_id]
+    )
+
+
+def _register_optional_tools(ctx: Any) -> None:
+    for module_id, tool in _optional_tool_declarations():
+        def handler(
+            params: Optional[dict] = None,
+            _module_id: str = module_id,
+            _capability_id: str = tool.capability_id,
+            _operation: str = tool.operation,
+            **kwargs: Any,
+        ) -> str:
+            return _runtime.handle_module_read(
+                _module_id, _capability_id, _operation, params, **kwargs,
+            )
+
+        ctx.register_tool(
+            name=tool.name,
+            toolset="holon",
+            schema={
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": dict(tool.parameters),
+            },
+            handler=handler,
+            description=tool.description,
+        )
+
+
 def _handle_health(params: Optional[dict] = None, **kwargs: Any) -> str:
     return _runtime.handle_health(params, **kwargs)
 
@@ -1029,5 +1156,6 @@ def register(ctx: Any) -> None:
             schema={"name": name, "description": description, "parameters": action_parameters},
             handler=handler, description=description,
         )
+    _register_optional_tools(ctx)
     ctx.register_hook("on_session_start", _on_session_start)
     ctx.register_hook("pre_tool_call", _on_pre_tool_call)

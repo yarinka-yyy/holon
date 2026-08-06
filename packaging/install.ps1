@@ -57,8 +57,6 @@ $dataRoot = Join-Path $appParent "data"
 $pluginParent = Join-Path $HermesHome "plugins"
 $pluginRoot = Join-Path $pluginParent "holon"
 $skillsParent = Join-Path (Join-Path $HermesHome "skills") "crypto"
-$holonSkillRoot = Join-Path $skillsParent "holon"
-$lendingSkillRoot = Join-Path $skillsParent "holon-lending"
 $token = [Guid]::NewGuid().ToString("N")
 $stageApp = Join-Path $appParent (".app-stage-" + $token)
 $stagePlugin = Join-Path $pluginParent (".plugin-stage-" + $token)
@@ -66,10 +64,8 @@ $stageSkills = Join-Path $skillsParent (".skills-stage-" + $token)
 $stageData = Join-Path $appParent (".data-stage-" + $token)
 $backupApp = Join-Path $appParent (".app-backup-" + $token)
 $backupPlugin = Join-Path $pluginParent (".plugin-backup-" + $token)
-$backupHolonSkill = Join-Path $skillsParent (".holon-skill-backup-" + $token)
-$backupLendingSkill = Join-Path $skillsParent (".lending-skill-backup-" + $token)
 $swappedApp = $false; $swappedPlugin = $false
-$swappedHolonSkill = $false; $swappedLendingSkill = $false
+$skillBackups = @{}; $swappedSkills = @{}; $managedSkillIds = @()
 $committed = $false
 $installStep = "manifest"
 $installCode = "INSTALL_FILESYSTEM_FAILED"
@@ -198,6 +194,13 @@ try {
     $manifest = Read-HolManifest $PackageRoot
     $installStep = "package_integrity"
     Test-HolPackage $PackageRoot $manifest
+    $installStep = "previous_ownership"
+    $previousSkillIds = @(Read-HolInstalledSkillIds $appRoot)
+    $managedSkillIds = @(@($manifest.skill_ids) + $previousSkillIds | Sort-Object -Unique)
+    foreach ($skillId in $managedSkillIds) {
+        $skillBackups[$skillId] = Join-Path $skillsParent (".$skillId-backup-" + $token)
+        $swappedSkills[$skillId] = $false
+    }
     if ($EnableHermesPlugin) {
         $installStep = "hermes_compatibility"
         if (-not (Test-HolHermesCompatibility $HermesVersion $HermesHome $HermesCommand)) {
@@ -230,22 +233,23 @@ try {
     $installStep = "backup_previous"
     if (Test-Path -LiteralPath $appRoot) { Move-Item -LiteralPath $appRoot -Destination $backupApp }
     if (Test-Path -LiteralPath $pluginRoot) { Move-Item -LiteralPath $pluginRoot -Destination $backupPlugin }
-    if (Test-Path -LiteralPath $holonSkillRoot) {
-        Move-Item -LiteralPath $holonSkillRoot -Destination $backupHolonSkill }
-    if (Test-Path -LiteralPath $lendingSkillRoot) {
-        Move-Item -LiteralPath $lendingSkillRoot -Destination $backupLendingSkill }
+    foreach ($skillId in $managedSkillIds) {
+        $skillRoot = Join-Path $skillsParent $skillId
+        if (Test-Path -LiteralPath $skillRoot) {
+            Move-Item -LiteralPath $skillRoot -Destination $skillBackups[$skillId] }
+    }
     $installStep = "activate_app"
     Move-Item -LiteralPath $stageApp -Destination $appRoot
     $swappedApp = $true
     $installStep = "activate_plugin"
     Move-Item -LiteralPath $stagePlugin -Destination $pluginRoot
     $swappedPlugin = $true
-    $installStep = "activate_holon_skill"
-    Move-Item -LiteralPath (Join-Path $stageSkills "holon") -Destination $holonSkillRoot
-    $swappedHolonSkill = $true
-    $installStep = "activate_lending_skill"
-    Move-Item -LiteralPath (Join-Path $stageSkills "holon-lending") -Destination $lendingSkillRoot
-    $swappedLendingSkill = $true
+    foreach ($skillId in @($manifest.skill_ids)) {
+        $installStep = "activate_skill"
+        $skillRoot = Join-Path $skillsParent $skillId
+        Move-Item -LiteralPath (Join-Path $stageSkills $skillId) -Destination $skillRoot
+        $swappedSkills[$skillId] = $true
+    }
     if ($EnableHermesPlugin) {
         $installStep = "enable_plugin"
         $configStampBeforeEnable = Get-HolConfigStamp $HermesHome
@@ -261,29 +265,35 @@ try {
     }
     $installStep = "commit"
     $committed = $true
-    foreach ($backup in @(
-        $backupApp, $backupPlugin, $backupHolonSkill, $backupLendingSkill
-    )) {
+    foreach ($backup in @($backupApp, $backupPlugin) + @($skillBackups.Values)) {
         try {
             if (Test-Path -LiteralPath $backup) {
                 Remove-Item -LiteralPath $backup -Recurse -Force }
         } catch { continue }
     }
-    Stop-HolInstall 0 "INSTALL_OK" "Holon base package installed."
+    Stop-HolInstall 0 "INSTALL_OK" "Holon $($manifest.composition_id) package installed."
 } catch [System.ArgumentException] {
     if (-not $committed) {
         Restore-HolPrevious $appRoot $backupApp $swappedApp
         Restore-HolPrevious $pluginRoot $backupPlugin $swappedPlugin
-        Restore-HolPrevious $holonSkillRoot $backupHolonSkill $swappedHolonSkill
-        Restore-HolPrevious $lendingSkillRoot $backupLendingSkill $swappedLendingSkill
+        foreach ($skillId in $managedSkillIds) {
+            $skillRoot = Join-Path $skillsParent $skillId
+            $skillBackup = [string]$skillBackups[$skillId]
+            $skillSwapped = [bool]$swappedSkills[$skillId]
+            Restore-HolPrevious $skillRoot $skillBackup $skillSwapped
+        }
     }
     Stop-HolInstall 2 "INSTALL_VALIDATION_FAILED" "Package validation or approval failed."
 } catch {
     if (-not $committed) {
         Restore-HolPrevious $appRoot $backupApp $swappedApp
         Restore-HolPrevious $pluginRoot $backupPlugin $swappedPlugin
-        Restore-HolPrevious $holonSkillRoot $backupHolonSkill $swappedHolonSkill
-        Restore-HolPrevious $lendingSkillRoot $backupLendingSkill $swappedLendingSkill
+        foreach ($skillId in $managedSkillIds) {
+            $skillRoot = Join-Path $skillsParent $skillId
+            $skillBackup = [string]$skillBackups[$skillId]
+            $skillSwapped = [bool]$swappedSkills[$skillId]
+            Restore-HolPrevious $skillRoot $skillBackup $skillSwapped
+        }
     }
     if ([string]::IsNullOrWhiteSpace($installMessage)) {
         $installMessage = "Installation could not be completed at $installStep."

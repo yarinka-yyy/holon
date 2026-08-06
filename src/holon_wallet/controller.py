@@ -23,6 +23,7 @@ from holon_lending import (
     LendingAnalyticsStore, LendingPortfolioService, LendingPreflightError,
     LendingPreflightService, LendingReadService, parse_lending_intent,
 )
+from holon_modules import CapabilityRegistry
 
 from .approval import (
     AllowanceReadService,
@@ -61,6 +62,7 @@ from .history import (
 from .lending_view import lending_portfolio_to_map
 from .lending_action import prepare_lending_action
 from .model import ProfileSummary, WalletShellState
+from .module_view import module_page_to_map
 from .public_data import (
     NETWORKS,
     NETWORK_BY_ID,
@@ -221,6 +223,7 @@ class WalletController(QObject):
         lending_preflight_service: LendingPreflightService | None = None,
         public_cache_store: PublicCacheStore | None = None,
         lending_portfolio_service: LendingPortfolioService | None = None,
+        module_registry: CapabilityRegistry | None = None,
     ) -> None:
         super().__init__()
         self._repository = repository or VaultRepository()
@@ -298,6 +301,7 @@ class WalletController(QObject):
         )
         self._owns_receipt_executor = receipt_executor is None
         self._state = WalletShellState()
+        self._module_page = module_page_to_map(module_registry or CapabilityRegistry())
         self._current_screen = "welcome"
         self._flow = "none"
         self._error_message = ""
@@ -453,6 +457,14 @@ class WalletController(QObject):
     @Property(str, notify=currentScreenChanged)
     def currentScreen(self) -> str:
         return self._current_screen
+
+    @Property(bool, constant=True)
+    def modulePageAvailable(self) -> bool:
+        return bool(self._module_page)
+
+    @Property("QVariantMap", constant=True)
+    def modulePageData(self) -> dict[str, object]:
+        return dict(self._module_page)
 
     @Property(str, notify=guardNoticeChanged)
     def guardOpenNotice(self) -> str:
@@ -1928,6 +1940,11 @@ class WalletController(QObject):
         if self._state.profiles and not self._mainnet_in_progress:
             self._set_screen("lending")
             self.refreshLendingData(False)
+
+    @Slot()
+    def showModulePage(self) -> None:
+        if self._state.profiles and not self._mainnet_in_progress and self._module_page:
+            self._set_screen("module")
 
     @Slot(bool, result=bool)
     def refreshLendingData(self, force_refresh: bool = False) -> bool:

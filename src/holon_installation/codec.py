@@ -8,7 +8,8 @@ import stat
 from typing import Any, Mapping
 
 from .model import (
-    COMPONENT_VERSIONS, HERMES_COMPATIBILITY, MANIFEST_FIELDS, MANIFEST_VERSION, PACKAGE_VERSION,
+    BASE_SKILL_IDS, COMPONENT_VERSIONS, CORE_API_VERSION, HERMES_COMPATIBILITY,
+    ID_RE, MANIFEST_FIELDS, MANIFEST_VERSION, PACKAGE_VERSION, SKILL_RE,
     VERSION_FIELDS, ManifestError, ReleaseFile, ReleaseManifest,
 )
 from .paths import expected_component, validate_relative_path
@@ -56,6 +57,46 @@ def parse_manifest(value: Mapping[str, Any]) -> ReleaseManifest:
         raise ManifestError("Invalid component version")
     if dict(versions) != COMPONENT_VERSIONS:
         raise ManifestError("Incompatible component version")
+    composition_id = value.get("composition_id")
+    if (
+        not isinstance(composition_id, str)
+        or len(composition_id) > 64
+        or ID_RE.fullmatch(composition_id) is None
+    ):
+        raise ManifestError("Invalid composition id")
+    if value.get("core_api_version") != CORE_API_VERSION:
+        raise ManifestError("Incompatible Core API version")
+    catalog_digest = value.get("module_catalog_sha256")
+    if (
+        not isinstance(catalog_digest, str)
+        or len(catalog_digest) != 64
+        or any(character not in "0123456789abcdef" for character in catalog_digest)
+    ):
+        raise ManifestError("Invalid module catalog digest")
+    raw_module_ids = value.get("module_ids")
+    if (
+        not isinstance(raw_module_ids, list)
+        or len(raw_module_ids) > 32
+        or any(
+            not isinstance(item, str) or ID_RE.fullmatch(item) is None
+            for item in raw_module_ids
+        )
+        or tuple(sorted(set(raw_module_ids))) != tuple(raw_module_ids)
+    ):
+        raise ManifestError("Invalid module ids")
+    module_ids = tuple(raw_module_ids)
+    raw_skill_ids = value.get("skill_ids")
+    if (
+        not isinstance(raw_skill_ids, list)
+        or not set(BASE_SKILL_IDS).issubset(raw_skill_ids)
+        or any(
+            not isinstance(item, str) or SKILL_RE.fullmatch(item) is None
+            for item in raw_skill_ids
+        )
+        or tuple(sorted(set(raw_skill_ids))) != tuple(raw_skill_ids)
+    ):
+        raise ManifestError("Invalid skill ids")
+    skill_ids = tuple(raw_skill_ids)
     raw_files = value.get("files")
     if not isinstance(raw_files, list) or not raw_files or len(raw_files) > MAX_RELEASE_FILES:
         raise ManifestError("Invalid release files")
@@ -63,9 +104,15 @@ def parse_manifest(value: Mapping[str, Any]) -> ReleaseManifest:
     paths: list[str] = []
     for item in files:
         path = validate_relative_path(item.path)
-        if item.component != expected_component(path):
+        if item.component != expected_component(path, module_ids, skill_ids):
             raise ManifestError("Release component does not match its path")
-        expected_critical = path.startswith(("payload/app/", "payload/plugin/"))
+        parts = path.split("/")
+        optional_skill = (
+            len(parts) >= 5
+            and parts[:3] == ["payload", "skills", "crypto"]
+            and parts[3] not in BASE_SKILL_IDS
+        )
+        expected_critical = path.startswith(("payload/app/", "payload/plugin/")) or optional_skill
         if item.critical is not expected_critical:
             raise ManifestError("Release critical marker does not match its path")
         paths.append(path.casefold())
@@ -73,7 +120,16 @@ def parse_manifest(value: Mapping[str, Any]) -> ReleaseManifest:
         raise ManifestError("Duplicate release path")
     if paths != sorted(paths):
         raise ManifestError("Release files are not canonical")
-    return ReleaseManifest(PACKAGE_VERSION, dict(versions), files)
+    return ReleaseManifest(
+        PACKAGE_VERSION,
+        dict(versions),
+        files,
+        composition_id,
+        CORE_API_VERSION,
+        catalog_digest,
+        module_ids,
+        skill_ids,
+    )
 
 
 def load_manifest(path: Path) -> ReleaseManifest:

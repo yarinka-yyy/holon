@@ -28,6 +28,7 @@ from holon_wallet.application import (
     _wallet_policy_path,
 )
 from holon_policy import Policy, policy_digest
+from holon_modules import ModuleLifecycleState, build_composition, load_registry
 from holon_wallet.broadcast import MainnetTransferCode
 from holon_wallet.approval import UINT256_MAX
 from holon_wallet.history import HistoryStatus, HistoryStore, WalletHistoryRecord
@@ -229,6 +230,7 @@ def make_app(
     mainnet_enabled: bool = True,
     revoke_enabled: bool = True,
     policy_control_client=None,
+    module_registry=None,
 ) -> WalletApplication:
     history = HistoryStore(repository.paths)
     mainnet, tracker, rpc = mainnet_services(
@@ -251,6 +253,7 @@ def make_app(
         price_service=StubPriceService(),
         policy_control_client=policy_control_client,
         lending_portfolio_service=StubLendingPortfolioService(),
+        module_registry=module_registry,
     )
     app._test_mainnet_rpc = rpc
     return app
@@ -295,6 +298,39 @@ def test_lending_tile_settings_gear_and_dashboard_at_minimum_size(
         invoke(child(app, "lendingHeaderBackButton"), "trigger")
         invoke(child(app, "settingsGearButton"), "trigger")
         assert app.controller.currentScreen == "settings"
+        assert app.qml_warnings == []
+    finally:
+        app.close()
+
+
+def test_mock_module_uses_the_single_bounded_wallet_page_slot(
+    tmp_path, qt_app, monkeypatch,
+) -> None:
+    composition = tmp_path / "mock-composition"
+    build_composition(composition, "mock", [Path(__file__).parents[1] / "modules/mock"])
+    monkeypatch.syspath_prepend(str(composition / "modules/holon.mock/src"))
+    registry = load_registry(composition / "module-catalog.json", "wallet")
+    assert registry.module_status("holon.mock").state is ModuleLifecycleState.READY
+    repository = VaultRepository(WalletPaths(tmp_path / "wallet"))
+    repository.create_new(
+        fresh_password(), repository.new_record(generate_mnemonic(), "Main Account"),
+    )
+    app = make_app(qt_app, repository, module_registry=registry)
+    try:
+        assert app.controller.modulePageAvailable
+        assert set(app.controller.modulePageData) == {
+            "available", "iconSource", "label", "model", "moduleId", "qmlUrl", "route",
+        }
+        assert app.controller.modulePageData["model"] == {
+            "body": "This read-only module proves deterministic optional-module loading.",
+            "moduleId": "holon.mock", "title": "Mock Module",
+        }
+        assert child(app, "moduleAction").property("visible")
+        invoke(child(app, "moduleAction"), "trigger")
+        qt_app.processEvents()
+        assert app.controller.currentScreen == "module"
+        assert child(app, "mockModulePage") is not None
+        assert "Mock Module" in child(app, "mockModuleText").property("text")
         assert app.qml_warnings == []
     finally:
         app.close()

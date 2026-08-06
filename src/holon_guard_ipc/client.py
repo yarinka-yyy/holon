@@ -140,6 +140,24 @@ class PipeGuardClient:
             response_timeout=50.0,
         )
 
+    def module_read(
+        self,
+        module_id: str,
+        capability_id: str,
+        operation: str,
+        params: dict[str, object],
+    ) -> ContractEnvelope:
+        return self.client.request(
+            MessageKind.MODULE_READ_REQUEST,
+            {
+                "module_id": module_id,
+                "capability_id": capability_id,
+                "operation": operation,
+                "params": params,
+            },
+            response_timeout=20.0,
+        )
+
     def lending_action_preview(
         self, payload: dict[str, object],
     ) -> ContractEnvelope:
