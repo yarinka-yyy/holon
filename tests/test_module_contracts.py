@@ -147,6 +147,11 @@ def test_earn_provider_descriptor_has_fixed_category_and_sorted_networks() -> No
         {"category": "VAULT", "network_ids": [], "provider_id": "holon.mock.vault"},
         {"category": "VAULT", "network_ids": ["base"], "provider_id": "holon.other.vault"},
         {"category": "VAULT", "network_ids": ["base"], "provider_id": "holon.mock.vault", "extra": True},
+        {
+            "category": "VAULT", "network_ids": ["base"],
+            "presentation": {"badge": "Vault", "logo_path": "wallet/logo.svg", "extra": True},
+            "provider_id": "holon.mock.vault",
+        },
     ):
         invalid = json.loads(raw)
         next(

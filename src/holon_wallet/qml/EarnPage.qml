@@ -347,9 +347,22 @@ PageState {
                         objectName: "lendingProtocolCard-" + modelData.protocol
                         width: protocolColumn.width; height: 194
                         Image {
-                            x: 16; y: 15; width: 88; height: 30
+                            x: 16; y: 16; width: 24; height: 24
                             source: modelData.logo; fillMode: Image.PreserveAspectFit
                             horizontalAlignment: Image.AlignLeft
+                        }
+                        Text {
+                            x: 48; y: 15; width: 220; text: modelData.name
+                            color: Design.text; font.family: Design.fontFamily
+                            font.pixelSize: 16; font.weight: Font.DemiBold; elide: Text.ElideRight
+                        }
+                        Rectangle {
+                            x: 48; y: 40; width: 116; height: 20; radius: 8
+                            color: Design.surfaceSecondary; border.width: 1; border.color: Design.border
+                            Text {
+                                anchors.centerIn: parent; text: "Lending Protocol"
+                                color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 9
+                            }
                         }
                         Text {
                             anchors.right: parent.right; anchors.rightMargin: 16; y: 18
@@ -358,21 +371,21 @@ PageState {
                                 : modelData.dataState === "UNAVAILABLE" ? Design.danger : Design.warning
                             font.family: Design.fontFamily; font.pixelSize: 11; font.weight: Font.Medium
                         }
-                        Rectangle { x: 16; y: 57; width: parent.width - 32; height: 1; color: "#12FFFFFF" }
-                        Text { x: 16; y: 72; text: "Position"; color: Design.textFaint; font.family: Design.fontFamily; font.pixelSize: 11 }
+                        Rectangle { x: 16; y: 72; width: parent.width - 32; height: 1; color: "#12FFFFFF" }
+                        Text { x: 16; y: 86; text: "Position"; color: Design.textFaint; font.family: Design.fontFamily; font.pixelSize: 11 }
                         Text {
-                            x: 16; y: 91; width: 190
+                            x: 16; y: 105; width: 190
                             text: walletController.balancesVisible ? modelData.position : "••••"
                             color: Design.text; font.family: Design.fontFamily; font.pixelSize: 17; font.weight: Font.DemiBold
                         }
-                        Text { x: 16; y: 116; text: walletController.balancesVisible ? modelData.positionUsd : "••••"; color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 11 }
-                        Text { x: 226; y: 72; text: "Confirmed annual total"; color: Design.textFaint; font.family: Design.fontFamily; font.pixelSize: 11 }
-                        Text { x: 226; y: 91; text: modelData.confirmedTotal; color: Design.text; font.family: Design.fontFamily; font.pixelSize: 17; font.weight: Font.DemiBold }
-                        Text { x: 226; y: 116; text: "Base " + modelData.baseYield + " · Bonus " + modelData.incentives; color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 10 }
-                        Rectangle { x: 16; y: 142; width: parent.width - 32; height: 1; color: "#12FFFFFF" }
-                        Text { x: 16; y: 158; text: "Tracked earnings"; color: Design.textFaint; font.family: Design.fontFamily; font.pixelSize: 10 }
-                        Text { x: 118; y: 156; text: walletController.balancesVisible ? modelData.earnings : "••••"; color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 11 }
-                        Text { anchors.right: parent.right; anchors.rightMargin: 16; y: 156; text: modelData.observedAt ? modelData.observedAt.slice(11, 16) + " UTC" : "No current data"; color: Design.textFaint; font.family: Design.fontFamily; font.pixelSize: 10 }
+                        Text { x: 16; y: 130; text: walletController.balancesVisible ? modelData.positionUsd : "••••"; color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 11 }
+                        Text { x: 226; y: 86; text: "Confirmed annual total"; color: Design.textFaint; font.family: Design.fontFamily; font.pixelSize: 11 }
+                        Text { x: 226; y: 105; text: modelData.confirmedTotal; color: Design.text; font.family: Design.fontFamily; font.pixelSize: 17; font.weight: Font.DemiBold }
+                        Text { x: 226; y: 130; text: "Supply " + modelData.baseYield + " · Bonus " + modelData.incentives; color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 10 }
+                        Rectangle { x: 16; y: 151; width: parent.width - 32; height: 1; color: "#12FFFFFF" }
+                        Text { x: 16; y: 166; text: "Tracked earnings"; color: Design.textFaint; font.family: Design.fontFamily; font.pixelSize: 10 }
+                        Text { x: 118; y: 164; text: walletController.balancesVisible ? modelData.earnings : "••••"; color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 11 }
+                        Text { anchors.right: parent.right; anchors.rightMargin: 16; y: 164; text: modelData.observedAt ? modelData.observedAt.slice(11, 16) + " UTC" : "No current data"; color: Design.textFaint; font.family: Design.fontFamily; font.pixelSize: 10 }
                     }
                 }
             }
@@ -389,10 +402,15 @@ PageState {
                         required property var modelData
                         objectName: "earnVaultCard-" + modelData.productId
                         width: vaultColumn.width; height: 188
+                        Image {
+                            x: 16; y: 16; width: 24; height: 24
+                            visible: (modelData.logoSource || "").length > 0
+                            source: modelData.logoSource || ""; fillMode: Image.PreserveAspectFit
+                        }
                         Text {
-                            x: 16; y: 16; width: 300; text: modelData.displayName
+                            x: (modelData.logoSource || "").length > 0 ? 48 : 16; y: 15; width: 268; text: modelData.displayName
                             color: Design.text; font.family: Design.fontFamily
-                            font.pixelSize: 17; font.weight: Font.DemiBold; elide: Text.ElideRight
+                            font.pixelSize: 16; font.weight: Font.DemiBold; elide: Text.ElideRight
                         }
                         Text {
                             anchors.right: parent.right; anchors.rightMargin: 16; y: 19
@@ -401,12 +419,19 @@ PageState {
                                 : modelData.dataState === "UNAVAILABLE" ? Design.danger : Design.warning
                             font.family: Design.fontFamily; font.pixelSize: 11
                         }
-                        Text { x: 16; y: 51; text: modelData.networkId; color: Design.textFaint; font.family: Design.fontFamily; font.pixelSize: 11 }
-                        Rectangle { x: 16; y: 76; width: parent.width - 32; height: 1; color: "#12FFFFFF" }
-                        Text { x: 16; y: 91; text: "Position"; color: Design.textFaint; font.family: Design.fontFamily; font.pixelSize: 10 }
-                        Text { x: 16; y: 110; text: walletController.balancesVisible ? modelData.position : "••••"; color: Design.text; font.family: Design.fontFamily; font.pixelSize: 16; font.weight: Font.DemiBold }
-                        Text { x: 220; y: 91; text: modelData.metricLabel; color: Design.textFaint; font.family: Design.fontFamily; font.pixelSize: 10 }
-                        Text { x: 220; y: 110; text: modelData.metricValue; color: Design.text; font.family: Design.fontFamily; font.pixelSize: 16; font.weight: Font.DemiBold }
+                        Rectangle {
+                            x: (modelData.logoSource || "").length > 0 ? 48 : 16; y: 40; width: 192; height: 20; radius: 8
+                            color: Design.surfaceSecondary; border.width: 1; border.color: Design.border
+                            Text {
+                                anchors.centerIn: parent; text: modelData.badge || "Vault"
+                                color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 9
+                            }
+                        }
+                        Rectangle { x: 16; y: 72; width: parent.width - 32; height: 1; color: "#12FFFFFF" }
+                        Text { x: 16; y: 87; text: "Position"; color: Design.textFaint; font.family: Design.fontFamily; font.pixelSize: 10 }
+                        Text { x: 16; y: 106; text: walletController.balancesVisible ? modelData.position : "••••"; color: Design.text; font.family: Design.fontFamily; font.pixelSize: 16; font.weight: Font.DemiBold }
+                        Text { x: 220; y: 87; text: modelData.metricLabel; color: Design.textFaint; font.family: Design.fontFamily; font.pixelSize: 10 }
+                        Text { x: 220; y: 106; text: modelData.metricValue; color: Design.text; font.family: Design.fontFamily; font.pixelSize: 16; font.weight: Font.DemiBold }
                         Text { x: 16; y: 143; text: "Risk: " + modelData.riskState; color: Design.warning; font.family: Design.fontFamily; font.pixelSize: 10 }
                         Text { x: 16; y: 162; width: parent.width - 32; text: modelData.exitConstraints; color: Design.textFaint; font.family: Design.fontFamily; font.pixelSize: 9; elide: Text.ElideRight }
                     }

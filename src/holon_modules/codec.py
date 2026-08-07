@@ -219,12 +219,9 @@ def _capability(value: Any) -> CapabilityDeclaration:
         ):
             raise _error(code, "Invalid public reader operations")
     elif kind == "earn_provider":
-        descriptor = _object(
-            descriptor,
-            frozenset({"category", "network_ids", "provider_id"}),
-            code,
-            "Earn provider descriptor",
-        )
+        fields = frozenset({"category", "network_ids", "provider_id"})
+        if set(descriptor) not in {fields, fields | {"presentation"}}:
+            raise _error(code, "Invalid Earn provider descriptor fields")
         descriptor["provider_id"] = _identifier(
             descriptor["provider_id"], code=code, label="Earn provider id",
         )
@@ -243,6 +240,19 @@ def _capability(value: Any) -> CapabilityDeclaration:
             or tuple(sorted(set(network_ids))) != tuple(network_ids)
         ):
             raise _error(code, "Invalid Earn provider networks")
+        presentation = descriptor.get("presentation")
+        if presentation is not None:
+            presentation = _object(
+                presentation, frozenset({"badge", "logo_path"}), code,
+                "Earn provider presentation",
+            )
+            presentation["badge"] = _string(
+                presentation["badge"], maximum=96, code=code,
+                label="Earn provider badge",
+            )
+            presentation["logo_path"] = validate_relative_path(
+                presentation["logo_path"], code=code,
+            )
     elif kind == "hermes_toolset":
         descriptor = _object(
             descriptor,
@@ -419,6 +429,14 @@ def decode_manifest(raw: bytes) -> ModuleManifest:
             qml_file = next((file for file in files if file.path == qml_path), None)
             if qml_file is None or "wallet" not in qml_file.targets:
                 raise _error(code, "Wallet page resource is not integrity-covered")
+        elif capability.kind == "earn_provider":
+            presentation = capability.descriptor.get("presentation")
+            if not isinstance(presentation, Mapping):
+                continue
+            logo_path = str(presentation["logo_path"])
+            logo_file = next((file for file in files if file.path == logo_path), None)
+            if logo_file is None or "wallet" not in logo_file.targets:
+                raise _error(code, "Earn provider logo is not integrity-covered")
     manifest = ModuleManifest(
         module_id, module_version, display_name, core_api_version,
         components, capabilities, files,

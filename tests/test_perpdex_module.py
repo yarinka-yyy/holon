@@ -15,7 +15,7 @@ from holon_modules import (
 )
 from holon_wallet.module_view import ModuleViewModel, module_page_to_map
 from holon_earn import EarnPortfolioService, EarnProviderRegistry, register_module_providers
-from holon_wallet.earn_view import earn_portfolio_to_map
+from holon_wallet.earn_view import earn_portfolio_to_map, module_earn_presentations
 from holon_wallet.prices import PriceSnapshot
 
 from test_perpdex_reader import ACCOUNT, FakeInfo
@@ -132,7 +132,8 @@ class _ModuleActionClient:
             "status": "PREVIEW_READY", "authority_available": True,
             "execution_available": True, "module_id": module_id,
             "capability_id": capability_id, "action_type": action_type,
-            "account": ACCOUNT, "preview": {"amount_usdc": params["amount_usdc"]},
+            "account": ACCOUNT,
+            "preview": {"amount_usdc": params.get("amount_usdc", params.get("notional_usdc"))},
             "preview_digest": "a" * 64, "expires_at": "2099-01-01T00:00:00.000Z",
             "checks": ["HLP_IDENTITY_VERIFIED"], "caveats": ["RISK_NOT_ASSESSED"],
             "code": "MODULE_ACTION_PREVIEW_READY", "message": "Preview ready.",
@@ -181,6 +182,11 @@ def test_wallet_module_view_model_has_only_fixed_reads_and_prepared_execute(
     assert model.prepared == {}
     assert len(client.executions) == 1
     assert not model.executePrepared()
+    assert model.prepareOpenPosition("BTC", "LONG", "250", 40, "CROSS")
+    assert client.previews[-1][2:] == ("OPEN_POSITION", {
+        "market": "BTC", "side": "LONG", "notional_usdc": "250",
+        "leverage": 40, "margin_mode": "CROSS",
+    })
 
 
 def test_extended_hlp_contributes_one_labelled_vault_position_to_earn(
@@ -202,6 +208,7 @@ def test_extended_hlp_contributes_one_labelled_vault_position_to_earn(
     assert product.network_id == "hyperliquid-mainnet"
     mapped = earn_portfolio_to_map(
         snapshot, PriceSnapshot.unavailable(0, "NOT_NEEDED"), "vaults",
+        module_earn_presentations(module_registry),
     )
     assert [item["id"] for item in mapped["availableFilters"]] == [
         "all", "lending", "vaults",
@@ -209,3 +216,34 @@ def test_extended_hlp_contributes_one_labelled_vault_position_to_earn(
     assert len(mapped["vaultProducts"]) == 1
     assert mapped["vaultProducts"][0]["metricLabel"] == "Protocol APR"
     assert mapped["vaultProducts"][0]["riskState"] == "Not assessed"
+    assert mapped["vaultProducts"][0]["badge"] == "PerpDEX Vault · Hyperliquid"
+    assert mapped["vaultProducts"][0]["logoSource"].endswith("hyperliquid-blob.svg")
+
+
+def test_base_has_no_perpdex_resource_or_earn_presentation(tmp_path: Path) -> None:
+    composition = tmp_path / "base"
+    build_composition(composition, "base")
+    registry = load_registry(composition / "module-catalog.json", "wallet")
+
+    assert not (composition / "modules" / "holon.perpdex").exists()
+    assert module_earn_presentations(registry) == {}
+
+
+def test_perpdex_qml_exposes_live_margin_controls_and_clean_module_header() -> None:
+    page = (PERPDEX_ROOT / "wallet" / "PerpDexPage.qml").read_text(encoding="utf-8")
+    review = (ROOT / "src" / "holon_wallet" / "qml" / "ProtectedActionReviewPage.qml").read_text(
+        encoding="utf-8",
+    )
+    host = (ROOT / "src" / "holon_wallet" / "qml" / "ModulePageHost.qml").read_text(
+        encoding="utf-8",
+    )
+
+    assert 'property string marginMode: "ISOLATED"' in page
+    assert 'label: "Isolated"' in page and 'label: "Cross"' in page
+    assert "Slider {" in page and "currentMaxLeverage" in page
+    assert "return 2" in page
+    assert 'text: "Spread "' in page and "Funding " not in page
+    assert "(maximum 100)" not in page
+    assert "prepareOpenPosition(" in page and "root.marginMode" in page
+    assert "Cross margin shares PerpDEX collateral" in review
+    assert "ScreenHeader" in host and "y: 126" in host

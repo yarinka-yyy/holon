@@ -4,19 +4,14 @@ import "."
 PageState {
     id: page
 
-    BackButton {
-        x: 28; y: 72
-        onTriggered: walletController.showMain()
-    }
-    Text {
-        x: 76; y: 74
-        text: walletController.modulePageData.label || "Module"
-        color: Design.text; font.family: Design.fontFamily
-        font.pixelSize: 22; font.weight: Font.DemiBold
+    ScreenHeader {
+        objectName: "moduleHeader"; x: 28; y: 42; width: parent.width - 56
+        title: walletController.modulePageData.label || "Module"
+        onBackRequested: walletController.showMain()
     }
     Loader {
         id: moduleLoader
-        x: 0; y: 120; width: parent.width; height: parent.height - 120
+        x: 0; y: 126; width: parent.width; height: parent.height - 126
         active: page.active && walletController.modulePageAvailable
         source: active ? walletController.modulePageData.qmlUrl : ""
         onLoaded: {

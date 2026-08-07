@@ -70,7 +70,7 @@ from .history import (
     lending_cashflows,
 )
 from .lending_view import lending_portfolio_to_map
-from .earn_view import earn_portfolio_to_map
+from .earn_view import earn_portfolio_to_map, module_earn_presentations
 from .lending_action import prepare_lending_action
 from .model import ProfileSummary, WalletShellState
 from .module_view import module_page_to_map
@@ -268,6 +268,9 @@ class WalletController(QObject):
             LendingAnalyticsStore(self._repository.paths.lending_analytics),
         )
         self._module_registry = module_registry or CapabilityRegistry()
+        self._earn_provider_presentations = module_earn_presentations(
+            self._module_registry,
+        )
         self._perpdex_adapter = None
         try:
             capability = self._module_registry.resolve("holon.perpdex.action.wallet")
@@ -899,6 +902,7 @@ class WalletController(QObject):
     def earnData(self) -> dict[str, object]:
         return earn_portfolio_to_map(
             self._earn_portfolio, self._market_price_snapshot, self._earn_filter,
+            self._earn_provider_presentations,
         )
 
     @Property("QVariantMap", notify=publicDataChanged)

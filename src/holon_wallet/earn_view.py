@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_HALF_UP
+from pathlib import Path
+from collections.abc import Mapping
 
 from holon_contracts.registry import load_registry
 from holon_earn import (
@@ -21,6 +23,7 @@ def earn_portfolio_to_map(
     snapshot: EarnPortfolioSnapshot,
     prices: MarketPriceSnapshot | PriceSnapshot,
     selected_filter: str,
+    provider_presentations: Mapping[str, Mapping[str, str]] | None = None,
 ) -> dict[str, object]:
     filters = [{"id": "all", "label": "All"}, {"id": "lending", "label": "Lending"}]
     if any(provider.category is ProductCategory.VAULT for provider in snapshot.providers):
@@ -33,7 +36,11 @@ def earn_portfolio_to_map(
         or current == "lending" and product.category is ProductCategory.LENDING
         or current == "vaults" and product.category is ProductCategory.VAULT
     )
-    mapped = [_product_to_map(item, prices) for item in products]
+    presentations = provider_presentations or {}
+    mapped = [
+        _product_to_map(item, prices, presentations.get(item.provider_id, {}))
+        for item in products
+    ]
     sources = {provider.source for provider in snapshot.providers}
     updated = (
         "Live provider data"
@@ -63,6 +70,7 @@ def earn_portfolio_to_map(
 def _product_to_map(
     product: YieldProduct,
     prices: MarketPriceSnapshot | PriceSnapshot,
+    presentation: Mapping[str, str],
 ) -> dict[str, object]:
     metric = product.metrics[0] if product.metrics else None
     metric_label = (
@@ -87,12 +95,14 @@ def _product_to_map(
     exit_text = _exit_constraints_text(product)
     return {
         "availability": product.availability.value,
+        "badge": presentation.get("badge", ""),
         "category": product.category.value,
         "dataState": product.freshness.value,
         "displayName": product.display_name,
         "exitConstraints": exit_text,
         "metricLabel": metric_label,
         "metricValue": metric_value,
+        "logoSource": presentation.get("logoSource", ""),
         "networkId": product.network_id,
         "position": position,
         "positionUsd": f"${_rounded(usd, 2)}" if usd is not None else "Data unavailable",
@@ -102,6 +112,33 @@ def _product_to_map(
         "riskBand": "",
         "riskState": "Not assessed",
     }
+
+
+def module_earn_presentations(module_registry: object) -> dict[str, dict[str, str]]:
+    """Map only verified active module artwork into Wallet presentation data."""
+    capabilities = getattr(module_registry, "capabilities", None)
+    if not callable(capabilities):
+        return {}
+    mapped: dict[str, dict[str, str]] = {}
+    for capability in capabilities("earn_provider"):
+        descriptor = getattr(getattr(capability, "declaration", None), "descriptor", None)
+        root_value = getattr(capability, "resource_root", None)
+        if not isinstance(descriptor, Mapping) or not isinstance(root_value, str):
+            continue
+        provider_id = descriptor.get("provider_id")
+        presentation = descriptor.get("presentation")
+        if not isinstance(provider_id, str) or not isinstance(presentation, Mapping):
+            continue
+        badge = presentation.get("badge")
+        logo_path = presentation.get("logo_path")
+        if not isinstance(badge, str) or not isinstance(logo_path, str):
+            continue
+        root = Path(root_value).resolve()
+        logo = root.joinpath(*logo_path.split("/")).resolve()
+        if not logo.is_file() or root not in logo.parents:
+            continue
+        mapped[provider_id] = {"badge": badge, "logoSource": logo.as_uri()}
+    return mapped
 
 
 def _position_usd(
