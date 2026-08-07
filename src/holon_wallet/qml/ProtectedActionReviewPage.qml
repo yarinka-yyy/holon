@@ -14,7 +14,8 @@ TransactionFlowShell {
         let value = phase.semantic || {}
         if (phase.phaseType === "SET_REFERRER") return "Assign referral code " + value.code
         if (phase.phaseType === "SET_ISOLATED_LEVERAGE")
-            return value.market + " · isolated · " + value.leverage + "x"
+            return value.market + " · " + (value.is_cross ? "cross" : "isolated")
+                + " · " + value.leverage + "x"
         if (phase.phaseType === "CANCEL_MARKET_ORDERS")
             return value.market + " · cancel " + (value.order_ids || []).length + " order(s)"
         if (phase.phaseType === "PLACE_IOC_ORDER")
@@ -76,6 +77,16 @@ TransactionFlowShell {
                         text: root.phaseSummary(modelData)
                         color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 11
                     }
+                }
+            }
+            Rectangle {
+                visible: !!root.action.intent && root.action.intent.margin_mode === "CROSS"
+                width: 458; height: visible ? 78 : 0; radius: 12
+                color: "#332C261B"; border.width: 1; border.color: "#66D5AA64"
+                Text {
+                    anchors.fill: parent; anchors.margins: 14; wrapMode: Text.Wrap
+                    text: "Cross margin shares PerpDEX collateral with other cross positions. This operation can expose account-wide collateral to liquidation risk."
+                    color: Design.warning; font.family: Design.fontFamily; font.pixelSize: 11
                 }
             }
             Rectangle {

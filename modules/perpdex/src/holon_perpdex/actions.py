@@ -11,7 +11,7 @@ import time
 
 from .contracts import (
     ActionType, AmountMode, ContractError, PerpDexActionIntent,
-    PerpDexActionPreview, PhaseType, PositionSide, ProtectedActionBundle,
+    MarginMode, PerpDexActionPreview, PhaseType, PositionSide, ProtectedActionBundle,
     ProtectedActionPhase, digest_json,
 )
 from .persistence import PerpDexNonceStore
@@ -101,7 +101,7 @@ def phase_action(phase: ProtectedActionPhase) -> dict[str, object]:
     if phase.phase_type is PhaseType.SET_ISOLATED_LEVERAGE:
         return {
             "type": "updateLeverage", "asset": semantic["asset_index"],
-            "isCross": False, "leverage": semantic["leverage"],
+            "isCross": semantic["is_cross"], "leverage": semantic["leverage"],
         }
     if phase.phase_type is PhaseType.CANCEL_MARKET_ORDERS:
         return {
@@ -227,6 +227,7 @@ class HyperliquidActionBuilder:
             "asset_index": market["asset_index"], "best_ask": market["best_ask"],
             "best_bid": market["best_bid"], "book_time_ms": market["book_time_ms"],
             "market": market["market"], "orders": [dict(item) for item in orders],
+            "max_exchange_leverage": market["max_exchange_leverage"],
             "position": dict(position) if position is not None else None,
             "sz_decimals": market["sz_decimals"],
             "withdrawable_usdc": portfolio["withdrawable_usdc"],
@@ -250,6 +251,8 @@ class HyperliquidActionBuilder:
             raise AdapterError("PERPDEX_POSITION_NOT_FLAT", "Open requires a zero position")
         if orders:
             raise AdapterError("PERPDEX_OPEN_ORDERS_EXIST", "Open requires no market orders")
+        if intent.leverage is None or intent.leverage > int(market["max_exchange_leverage"]):
+            raise AdapterError("PERPDEX_LEVERAGE_UNAVAILABLE", "Selected leverage is unavailable")
         buy = intent.side is PositionSide.LONG
         reference, limit = self._order_prices(market, buy)
         notional = _decimal(intent.notional_usdc, "notional")
@@ -284,7 +287,8 @@ class HyperliquidActionBuilder:
             specs.append((PhaseType.SET_REFERRER, {"code": REFERRAL_CODE}, None))
         specs.extend((
             (PhaseType.SET_ISOLATED_LEVERAGE, {
-                "asset_index": market["asset_index"], "is_cross": False,
+                "asset_index": market["asset_index"],
+                "is_cross": intent.margin_mode is MarginMode.CROSS,
                 "leverage": intent.leverage, "market": intent.market,
             }, None),
             (PhaseType.PLACE_IOC_ORDER, order_semantic, "IOC"),
@@ -295,7 +299,7 @@ class HyperliquidActionBuilder:
             "action_type": intent.action_type.value,
             "estimated_margin_usdc": _text(notional / Decimal(intent.leverage or 1)),
             "leverage": intent.leverage, "limit_price": _text(limit),
-            "margin_mode": "ISOLATED", "market": intent.market,
+            "margin_mode": intent.margin_mode.value if intent.margin_mode else None,
             "max_slippage_percent": MAX_SLIPPAGE_PERCENT,
             "notional_usdc": intent.notional_usdc,
             "phase_types": [item[0].value for item in specs],
@@ -306,7 +310,9 @@ class HyperliquidActionBuilder:
         return BuiltPreview(
             intent, account, preview, digest_json(snapshot),
             ("MARKET_VERIFIED", "FLAT_POSITION_VERIFIED", "NO_OPEN_ORDERS", "COLLATERAL_VERIFIED", "REFERRAL_STATE_VERIFIED"),
-            ("IOC_PARTIAL_FILL_POSSIBLE",) + (("REFERRAL_ASSIGNMENT_REQUIRED",) if referral else ()),
+            ("IOC_PARTIAL_FILL_POSSIBLE",)
+            + (("CROSS_MARGIN_RISK",) if intent.margin_mode is MarginMode.CROSS else ())
+            + (("REFERRAL_ASSIGNMENT_REQUIRED",) if referral else ()),
             referral, tuple(specs),
         )
 

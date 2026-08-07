@@ -68,7 +68,8 @@ def fixture(tmp_path: Path):
     guard = GuardProtectedActionAdapter(reader, clock=lambda: CLOCK)
     guard.configure(repository.paths.data_dir)
     params = {
-        "leverage": 2, "market": "BTC", "notional_usdc": "100", "side": "LONG",
+        "leverage": 2, "margin_mode": "ISOLATED", "market": "BTC",
+        "notional_usdc": "100", "side": "LONG",
     }
     preview = guard.preview("OPEN_POSITION", params, account)
     bundle = guard.prepare(

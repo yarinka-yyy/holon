@@ -15,11 +15,8 @@ SUPPORTED_MARKETS = ("BTC", "ETH", "SOL")
 ACTION_TYPES = (
     "CLOSE_POSITION", "HLP_DEPOSIT", "HLP_WITHDRAW", "OPEN_POSITION",
 )
-MAX_OPEN_NOTIONAL_USDC = "100"
-MAX_HLP_DEPOSIT_USDC = "100"
 MAX_SLIPPAGE_PERCENT = "1"
 MIN_LEVERAGE = 1
-MAX_LEVERAGE = 3
 DEFAULT_LEVERAGE = 2
 MARKET_REVIEW_SECONDS = 90
 HLP_REVIEW_SECONDS = 300
@@ -37,9 +34,6 @@ PROFILE = {
     "hlp_address": HLP_ADDRESS,
     "hlp_lockup_days": HLP_LOCKUP_DAYS,
     "hlp_name": HLP_NAME,
-    "max_hlp_deposit_usdc": MAX_HLP_DEPOSIT_USDC,
-    "max_leverage": MAX_LEVERAGE,
-    "max_open_notional_usdc": MAX_OPEN_NOTIONAL_USDC,
     "max_slippage_percent": MAX_SLIPPAGE_PERCENT,
     "min_leverage": MIN_LEVERAGE,
     "profile_id": PROFILE_ID,

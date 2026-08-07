@@ -101,6 +101,7 @@ def test_reader_returns_supported_markets_and_all_positions_without_float() -> N
     reader = HyperliquidReader(transport)
     markets = reader("markets", {})
     assert [item["market"] for item in markets["markets"]] == ["BTC", "ETH", "SOL"]
+    assert markets["markets"][0]["spread_percent"] == "0.0033"
     portfolio = reader("portfolio", {"active_account": ACCOUNT})
     assert portfolio["status"] == "READY"
     assert [item["market"] for item in portfolio["positions"]] == ["BTC", "DOGE"]

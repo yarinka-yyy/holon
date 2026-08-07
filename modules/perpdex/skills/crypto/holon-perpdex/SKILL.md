@@ -17,9 +17,11 @@ metadata:
 2. Use `holon_perpdex_markets` and `holon_perpdex_portfolio` only for current public data.
 3. Never choose a market, direction, leverage, position size, close percentage, or vault
    amount for the user. Ask for every missing choice instead of filling it in.
-4. Call `holon_perpdex_prepare` only with the user's exact parameters. Explain the returned
-   account, action, price/slippage, size, leverage/reduce-only state, HLP lock-up, checks,
-   caveats, and referral disclosure when present. A preview is not an executed action.
+4. Call `holon_perpdex_prepare` only with the user's exact parameters. For an open position,
+   the user must choose `ISOLATED` or `CROSS` and an integer leverage supported by current
+   Hyperliquid metadata. Explain the returned account, action, price/slippage, size,
+   margin mode, leverage/reduce-only state, HLP lock-up, checks, caveats, and referral
+   disclosure when present. A preview is not an executed action.
 5. End the turn and wait for an explicit confirmation in a later user message. Only then
    call `holon_perpdex_execute` once with that preview's exact `preview_digest`. Never call
    execute in the same turn as prepare and never substitute or reconstruct a digest.

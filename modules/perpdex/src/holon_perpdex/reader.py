@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import json
 import re
 from typing import Any
@@ -167,9 +167,19 @@ class HyperliquidReader:
             index, asset, context = by_name[market]
             sz_decimals = asset.get("szDecimals")
             max_leverage = asset.get("maxLeverage")
-            if type(sz_decimals) is not int or not 0 <= sz_decimals <= 8 or type(max_leverage) is not int or max_leverage < 3:
+            if (
+                type(sz_decimals) is not int or not 0 <= sz_decimals <= 8
+                or type(max_leverage) is not int or max_leverage < 1
+            ):
                 raise ReaderError("HYPERLIQUID_METADATA_INVALID", "Invalid supported market limits")
             book = self._book(market)
+            bid = Decimal(book["best_bid"])
+            ask = Decimal(book["best_ask"])
+            spread_percent = _format_decimal(
+                ((ask - bid) / ((ask + bid) / Decimal(2)) * Decimal(100)).quantize(
+                    Decimal("0.0001"), rounding=ROUND_HALF_UP,
+                )
+            )
             markets.append({
                 "asset_index": index,
                 "best_ask": book["best_ask"],
@@ -182,6 +192,7 @@ class HyperliquidReader:
                 "open_interest_asset": _number(context.get("openInterest"), "open interest", signed=False),
                 "oracle_price": _number(context.get("oraclePx"), "oracle price", signed=False),
                 "supported": True,
+                "spread_percent": spread_percent,
                 "sz_decimals": sz_decimals,
             })
         return {

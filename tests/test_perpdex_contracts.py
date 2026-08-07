@@ -24,7 +24,8 @@ from holon_perpdex import (  # noqa: E402
 
 def test_perpdex_intents_are_closed_decimal_string_contracts() -> None:
     opened = PerpDexActionIntent.from_mapping("OPEN_POSITION", {
-        "leverage": 2, "market": "BTC", "notional_usdc": "100", "side": "LONG",
+        "leverage": 2, "margin_mode": "ISOLATED", "market": "BTC",
+        "notional_usdc": "1000000", "side": "LONG",
     })
     assert opened.action_type is ActionType.OPEN_POSITION
     assert opened.side is PositionSide.LONG
@@ -48,13 +49,14 @@ def test_perpdex_intents_are_closed_decimal_string_contracts() -> None:
 @pytest.mark.parametrize(
     ("action", "params"),
     [
-        ("OPEN_POSITION", {"leverage": 4, "market": "BTC", "notional_usdc": "10", "side": "LONG"}),
-        ("OPEN_POSITION", {"leverage": 2, "market": "DOGE", "notional_usdc": "10", "side": "LONG"}),
-        ("OPEN_POSITION", {"leverage": 2, "market": "BTC", "notional_usdc": "100.000001", "side": "LONG"}),
-        ("OPEN_POSITION", {"leverage": 2, "market": "BTC", "notional_usdc": 10.0, "side": "LONG"}),
+        ("OPEN_POSITION", {"leverage": 0, "margin_mode": "ISOLATED", "market": "BTC", "notional_usdc": "10", "side": "LONG"}),
+        ("OPEN_POSITION", {"leverage": 2, "margin_mode": "ISOLATED", "market": "DOGE", "notional_usdc": "10", "side": "LONG"}),
+        ("OPEN_POSITION", {"leverage": 2, "margin_mode": "ISOLATED", "market": "BTC", "notional_usdc": "10.0000001", "side": "LONG"}),
+        ("OPEN_POSITION", {"leverage": 2, "margin_mode": "ISOLATED", "market": "BTC", "notional_usdc": 10.0, "side": "LONG"}),
+        ("OPEN_POSITION", {"leverage": 2, "margin_mode": "UNIFIED", "market": "BTC", "notional_usdc": "10", "side": "LONG"}),
         ("CLOSE_POSITION", {"amount_mode": "PERCENT", "market": "SOL", "percent": "100"}),
         ("CLOSE_POSITION", {"amount_mode": "FULL", "market": "SOL", "percent": "50"}),
-        ("HLP_DEPOSIT", {"amount_usdc": "101"}),
+        ("HLP_DEPOSIT", {"amount_usdc": "10.0000001"}),
         ("HLP_WITHDRAW", {"amount_mode": "ALL", "amount_usdc": "1"}),
         ("HLP_WITHDRAW", {"amount_mode": "EXACT", "amount_usdc": None}),
     ],
@@ -65,7 +67,10 @@ def test_perpdex_intents_refuse_unsafe_or_ambiguous_values(action, params) -> No
 
 
 def test_shared_module_action_envelopes_are_strict_and_secret_free() -> None:
-    params = {"leverage": 2, "market": "BTC", "notional_usdc": "25", "side": "SHORT"}
+    params = {
+        "leverage": 2, "margin_mode": "ISOLATED", "market": "BTC",
+        "notional_usdc": "25", "side": "SHORT",
+    }
     preview = make_envelope(MessageKind.MODULE_ACTION_INTENT, {
         "action_type": "OPEN_POSITION",
         "capability_id": "holon.perpdex.action.guard",

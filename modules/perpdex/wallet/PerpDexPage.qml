@@ -9,6 +9,7 @@ Item {
     property string market: "BTC"
     property string side: "LONG"
     property int leverage: 2
+    property string marginMode: "ISOLATED"
     property string tradeMode: "OPEN"
     property string closeMode: "FULL"
     property string withdrawMode: "ALL"
@@ -21,19 +22,34 @@ Item {
         if (root.moduleViewModel && !root.moduleViewModel.busy)
             root.moduleViewModel.refresh()
     }
+    function marketMaxLeverage() {
+        const markets = root.moduleViewModel ? root.moduleViewModel.markets : []
+        for (let index = 0; index < markets.length; ++index)
+            if (markets[index].market === root.market)
+                return Math.max(1, Number(markets[index].max_exchange_leverage || 1))
+        // Keep the intended 2x default while market metadata is still loading.
+        // Once it arrives, onCurrentMaxLeverageChanged clamps it to the live limit.
+        return 2
+    }
+    property int currentMaxLeverage: marketMaxLeverage()
+    function clampLeverage(value) {
+        return Math.max(1, Math.min(root.currentMaxLeverage, Math.round(value)))
+    }
+    onMarketChanged: root.leverage = root.clampLeverage(root.leverage)
+    onCurrentMaxLeverageChanged: root.leverage = root.clampLeverage(root.leverage)
     Component.onCompleted: refresh()
 
     Flickable {
         anchors.fill: parent
         clip: true
         contentWidth: width
-        contentHeight: content.height + 36
+        contentHeight: content.height + 46
         boundsBehavior: Flickable.StopAtBounds
         ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
         Column {
             id: content
-            x: 28; width: parent.width - 56; spacing: 14
+            x: 28; y: 10; width: parent.width - 56; spacing: 14
 
             Row {
                 width: parent.width; height: 38; spacing: 12
@@ -100,7 +116,8 @@ Item {
                             color: Design.accent; font.family: Design.fontFamily; font.pixelSize: 14
                         }
                         Text {
-                            x: 12; y: 67; text: "Funding " + modelData.funding_rate
+                            x: 12; y: 67
+                            text: "Spread " + (modelData.spread_percent || "—") + "%"
                             color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 10
                         }
                     }
@@ -148,7 +165,7 @@ Item {
             }
             SurfaceCard {
                 objectName: "perpDexTradeCard"; width: parent.width
-                height: root.tradeMode === "OPEN" ? 430 : 360
+                height: root.tradeMode === "OPEN" ? 616 : 360
                 Column {
                     x: 16; y: 16; width: parent.width - 32; spacing: 12
                     Row {
@@ -196,24 +213,76 @@ Item {
                         visible: root.tradeMode === "OPEN"
                         DraftField {
                             id: openNotional; objectName: "perpDexOpenNotional"
-                            width: parent.width; height: 70; label: "Notional in USDC (maximum 100)"
+                            width: parent.width; height: 70; label: "Notional in USDC"
                             placeholderText: "25"
                         }
                     }
                     Item {
-                        width: parent.width; height: root.tradeMode === "OPEN" ? 46 : 0
+                        width: parent.width; height: root.tradeMode === "OPEN" ? 62 : 0
                         visible: root.tradeMode === "OPEN"
-                        Row {
-                            spacing: 8
-                            Repeater {
-                                model: [1, 2, 3]
-                                delegate: FormButton {
-                                    required property int modelData
-                                    width: 132; height: 38; label: modelData + "x isolated"
-                                    primary: root.leverage === modelData
-                                    onTriggered: root.leverage = modelData
+                        Column {
+                            spacing: 7
+                            Text {
+                                text: "Margin mode"; color: Design.textMuted
+                                font.family: Design.fontFamily; font.pixelSize: 11
+                            }
+                            Row {
+                                spacing: 8
+                                FormButton {
+                                    width: 202; height: 38; label: "Isolated"
+                                    primary: root.marginMode === "ISOLATED"
+                                    onTriggered: root.marginMode = "ISOLATED"
+                                }
+                                FormButton {
+                                    width: 202; height: 38; label: "Cross"
+                                    primary: root.marginMode === "CROSS"
+                                    onTriggered: root.marginMode = "CROSS"
                                 }
                             }
+                        }
+                    }
+                    Item {
+                        width: parent.width; height: root.tradeMode === "OPEN" ? 112 : 0
+                        visible: root.tradeMode === "OPEN"
+                        Text {
+                            text: "Leverage · 1x–" + root.currentMaxLeverage + "x"
+                            color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 11
+                        }
+                        Slider {
+                            id: leverageSlider
+                            x: 0; y: 22; width: parent.width - 98; height: 32
+                            from: 1; to: root.currentMaxLeverage; stepSize: 1
+                            value: root.leverage
+                            onMoved: root.leverage = root.clampLeverage(value)
+                        }
+                        Rectangle {
+                            x: parent.width - 86; y: 18; width: 86; height: 40; radius: Design.controlRadius
+                            color: Design.surface; border.width: leverageInput.activeFocus ? 2 : 1
+                            border.color: leverageInput.activeFocus ? Design.accent : Design.border
+                            TextInput {
+                                id: leverageInput; x: 12; width: parent.width - 24
+                                anchors.verticalCenter: parent.verticalCenter
+                                text: root.leverage + "x"; color: Design.text
+                                font.family: Design.fontFamily; font.pixelSize: 13
+                                validator: RegularExpressionValidator { regularExpression: /[1-9][0-9]*x?/ }
+                                onEditingFinished: {
+                                    root.leverage = root.clampLeverage(Number(text.replace("x", "")))
+                                    text = root.leverage + "x"
+                                }
+                            }
+                            Connections {
+                                target: root
+                                function onLeverageChanged() {
+                                    if (!leverageInput.activeFocus)
+                                        leverageInput.text = root.leverage + "x"
+                                }
+                            }
+                        }
+                        Text {
+                            y: 70; width: parent.width; wrapMode: Text.Wrap
+                            visible: root.marginMode === "CROSS"
+                            text: "Cross shares your PerpDEX collateral with cross positions. Review the account-wide risk before continuing."
+                            color: Design.warning; font.family: Design.fontFamily; font.pixelSize: 10
                         }
                     }
                     Item {
@@ -255,7 +324,10 @@ Item {
                         controlEnabled: root.moduleViewModel && !root.moduleViewModel.busy
                         onTriggered: {
                             if (root.tradeMode === "OPEN")
-                                root.moduleViewModel.prepareOpenPosition(root.market, root.side, openNotional.text, root.leverage)
+                                root.moduleViewModel.prepareOpenPosition(
+                                    root.market, root.side, openNotional.text,
+                                    root.leverage, root.marginMode,
+                                )
                             else
                                 root.moduleViewModel.prepareClosePosition(root.market, root.closeMode, closePercent.text)
                         }
@@ -326,7 +398,7 @@ Item {
                 DraftField {
                     id: hlpDeposit; objectName: "perpDexHlpDepositAmount"
                     x: 16; y: 138; width: parent.width - 32; height: 70
-                    label: "Deposit USDC (maximum 100)"; placeholderText: "25"
+                    label: "Deposit USDC"; placeholderText: "25"
                 }
                 FormButton {
                     objectName: "perpDexHlpDepositPrepareButton"

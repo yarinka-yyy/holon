@@ -340,7 +340,7 @@ def test_module_authority_protocol_carries_only_exact_bundle_hashes_and_semantic
         "expires_at": "2026-08-06T12:01:30.000Z",
         "bundle_digest": "b" * 64,
         "intent": {
-            "leverage": 2, "market": "BTC", "notional_usdc": "25",
+            "leverage": 2, "margin_mode": "ISOLATED", "market": "BTC", "notional_usdc": "25",
             "side": "LONG",
         },
         "phases": [{

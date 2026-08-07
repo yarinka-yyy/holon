@@ -47,7 +47,7 @@ class GuardCodecTests(unittest.TestCase):
                     "capability_id": "holon.perpdex.action.guard",
                     "action_type": "OPEN_POSITION",
                     "params": {
-                        "leverage": 2, "market": "BTC",
+                        "leverage": 2, "margin_mode": "ISOLATED", "market": "BTC",
                         "notional_usdc": "10", "side": "LONG",
                     },
                     "preview_digest": "a" * 64,

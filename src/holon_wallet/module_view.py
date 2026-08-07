@@ -219,13 +219,15 @@ class ModuleViewModel(QObject):
         )
         return True
 
-    @Slot(str, str, str, int, result=bool)
+    @Slot(str, str, str, int, str, result=bool)
     def prepareOpenPosition(
         self, market: str, side: str, notional_usdc: str, leverage: int,
+        margin_mode: str,
     ) -> bool:
         return self._prepare("OPEN_POSITION", {
             "market": market, "side": side,
             "notional_usdc": notional_usdc, "leverage": leverage,
+            "margin_mode": margin_mode,
         })
 
     @Slot(str, str, str, result=bool)

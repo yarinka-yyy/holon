@@ -17,9 +17,6 @@ from .profile import (
     HLP_REVIEW_SECONDS,
     HLP_ADDRESS,
     MARKET_REVIEW_SECONDS,
-    MAX_HLP_DEPOSIT_USDC,
-    MAX_LEVERAGE,
-    MAX_OPEN_NOTIONAL_USDC,
     MIN_LEVERAGE,
     PROFILE_DIGEST,
     PROFILE_ID,
@@ -57,6 +54,11 @@ class ActionType(str, Enum):
 class PositionSide(str, Enum):
     LONG = "LONG"
     SHORT = "SHORT"
+
+
+class MarginMode(str, Enum):
+    ISOLATED = "ISOLATED"
+    CROSS = "CROSS"
 
 
 class AmountMode(str, Enum):
@@ -148,6 +150,7 @@ class PerpDexActionIntent:
     side: PositionSide | None = None
     notional_usdc: str | None = None
     leverage: int | None = None
+    margin_mode: MarginMode | None = None
     amount_mode: AmountMode | None = None
     percent: str | None = None
     amount_usdc: str | None = None
@@ -163,7 +166,11 @@ class PerpDexActionIntent:
         if not isinstance(value, Mapping):
             raise ContractError("Invalid action parameters")
         if action is ActionType.OPEN_POSITION:
-            _exact(value, {"leverage", "market", "notional_usdc", "side"}, "open position")
+            _exact(
+                value,
+                {"leverage", "margin_mode", "market", "notional_usdc", "side"},
+                "open position",
+            )
             market = value["market"]
             if market not in SUPPORTED_MARKETS:
                 raise ContractError("Unsupported market")
@@ -171,13 +178,20 @@ class PerpDexActionIntent:
                 side = PositionSide(value["side"])
             except (TypeError, ValueError) as exc:
                 raise ContractError("Invalid position side") from exc
+            try:
+                margin_mode = MarginMode(value["margin_mode"])
+            except (TypeError, ValueError) as exc:
+                raise ContractError("Invalid margin mode") from exc
             amount = _decimal(value["notional_usdc"], "open notional", scale=6)
             leverage = value["leverage"]
-            if amount <= 0 or amount > Decimal(MAX_OPEN_NOTIONAL_USDC):
-                raise ContractError("Open notional exceeds the Holon bound")
-            if type(leverage) is not int or not MIN_LEVERAGE <= leverage <= MAX_LEVERAGE:
+            if amount <= 0:
+                raise ContractError("Invalid open notional")
+            if type(leverage) is not int or leverage < MIN_LEVERAGE:
                 raise ContractError("Invalid leverage")
-            return cls(action, str(market), side, str(value["notional_usdc"]), leverage)
+            return cls(
+                action, str(market), side, str(value["notional_usdc"]), leverage,
+                margin_mode,
+            )
         if action is ActionType.CLOSE_POSITION:
             _exact(value, {"amount_mode", "market", "percent"}, "close position")
             market = value["market"]
@@ -198,8 +212,8 @@ class PerpDexActionIntent:
         if action is ActionType.HLP_DEPOSIT:
             _exact(value, {"amount_usdc"}, "HLP deposit")
             amount = _decimal(value["amount_usdc"], "HLP deposit amount", scale=6)
-            if amount <= 0 or amount > Decimal(MAX_HLP_DEPOSIT_USDC):
-                raise ContractError("HLP deposit exceeds the Holon bound")
+            if amount <= 0:
+                raise ContractError("Invalid HLP deposit amount")
             return cls(action, amount_usdc=str(value["amount_usdc"]))
         _exact(value, {"amount_mode", "amount_usdc"}, "HLP withdrawal")
         try:
@@ -227,7 +241,13 @@ class PerpDexActionIntent:
 
     def to_mapping(self) -> dict[str, object]:
         if self.action_type is ActionType.OPEN_POSITION:
-            return {"leverage": self.leverage, "market": self.market, "notional_usdc": self.notional_usdc, "side": self.side.value if self.side else None}
+            return {
+                "leverage": self.leverage,
+                "margin_mode": self.margin_mode.value if self.margin_mode else None,
+                "market": self.market,
+                "notional_usdc": self.notional_usdc,
+                "side": self.side.value if self.side else None,
+            }
         if self.action_type is ActionType.CLOSE_POSITION:
             return {"amount_mode": self.amount_mode.value if self.amount_mode else None, "market": self.market, "percent": self.percent}
         if self.action_type is ActionType.HLP_DEPOSIT:
@@ -278,8 +298,8 @@ class ProtectedActionPhase:
                 or value["asset_index"] < 0
                 or value["market"] not in SUPPORTED_MARKETS
                 or type(value["leverage"]) is not int
-                or not MIN_LEVERAGE <= value["leverage"] <= MAX_LEVERAGE
-                or value["is_cross"] is not False
+                or value["leverage"] < MIN_LEVERAGE
+                or type(value["is_cross"]) is not bool
                 or self.cloid is not None
             ):
                 raise ContractError("Invalid leverage phase")

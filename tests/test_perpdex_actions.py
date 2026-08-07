@@ -50,6 +50,7 @@ class ActionInfo:
             "BTC": ("59999", "60001"), "ETH": ("2999", "3001"),
             "SOL": ("149", "151"),
         }
+        self.max_leverages = {"BTC": 40, "ETH": 25, "SOL": 20}
 
     def __call__(self, payload: Mapping[str, object]) -> object:
         self.calls.append(dict(payload))
@@ -57,9 +58,9 @@ class ActionInfo:
         if kind == "metaAndAssetCtxs":
             return [
                 {"universe": [
-                    {"maxLeverage": 40, "name": "BTC", "szDecimals": 5},
-                    {"maxLeverage": 25, "name": "ETH", "szDecimals": 4},
-                    {"maxLeverage": 20, "name": "SOL", "szDecimals": 2},
+                    {"maxLeverage": self.max_leverages["BTC"], "name": "BTC", "szDecimals": 5},
+                    {"maxLeverage": self.max_leverages["ETH"], "name": "ETH", "szDecimals": 4},
+                    {"maxLeverage": self.max_leverages["SOL"], "name": "SOL", "szDecimals": 2},
                 ]},
                 [
                     {"funding": "0.00001", "markPx": "60000", "openInterest": "10", "oraclePx": "60000"},
@@ -140,10 +141,11 @@ def test_open_builds_referral_leverage_and_ioc_exact_bundle(tmp_path: Path) -> N
     info = ActionInfo()
     action_builder = builder(tmp_path, info)
     built = action_builder.preview("OPEN_POSITION", {
-        "leverage": 2, "market": "BTC", "notional_usdc": "100", "side": "LONG",
+        "leverage": 2, "margin_mode": "ISOLATED", "market": "BTC",
+        "notional_usdc": "150", "side": "LONG",
     }, ACCOUNT)
     assert built.preview["limit_price"] == "60601"
-    assert built.preview["size_asset"] == "0.00165"
+    assert built.preview["size_asset"] == "0.00247"
     assert [item[0] for item in built.phase_specs] == [
         PhaseType.SET_REFERRER, PhaseType.SET_ISOLATED_LEVERAGE,
         PhaseType.PLACE_IOC_ORDER,
@@ -161,6 +163,8 @@ def test_open_builds_referral_leverage_and_ioc_exact_bundle(tmp_path: Path) -> N
     wire = phase_action(bundle.phases[-1])
     assert wire["orders"][0]["r"] is False
     assert wire["orders"][0]["t"] == {"limit": {"tif": "Ioc"}}
+    leverage = phase_action(bundle.phases[-2])
+    assert leverage == {"type": "updateLeverage", "asset": 0, "isCross": False, "leverage": 2}
 
     wrong_type = bundle.to_mapping()
     wrong_type["phases"][0]["nonce"] = int(bundle.phases[0].nonce)
@@ -168,27 +172,65 @@ def test_open_builds_referral_leverage_and_ioc_exact_bundle(tmp_path: Path) -> N
         ProtectedActionBundle.from_mapping(wrong_type)
 
 
-def test_price_rounding_keeps_five_significant_figures_and_notional_cap(
+def test_price_rounding_keeps_five_significant_figures_without_holon_notional_cap(
     tmp_path: Path,
 ) -> None:
     info = ActionInfo(referred_by={"code": "EXISTING"})
     info.prices["BTC"] = ("123455", "123456")
     built = builder(tmp_path, info).preview("OPEN_POSITION", {
-        "leverage": 2, "market": "BTC", "notional_usdc": "100", "side": "LONG",
+        "leverage": 2, "margin_mode": "ISOLATED", "market": "BTC",
+        "notional_usdc": "150", "side": "LONG",
     }, ACCOUNT)
     assert built.preview["limit_price"] == "124690"
     assert Decimal(built.preview["size_asset"]) * Decimal(
         built.preview["limit_price"]
-    ) <= Decimal("100")
+    ) <= Decimal("150")
 
 
 def test_existing_referrer_is_preserved_and_open_never_assigns_it(tmp_path: Path) -> None:
     info = ActionInfo(referred_by={"code": "SOMEONE"})
     built = builder(tmp_path, info).preview("OPEN_POSITION", {
-        "leverage": 1, "market": "ETH", "notional_usdc": "10", "side": "SHORT",
+        "leverage": 1, "margin_mode": "ISOLATED", "market": "ETH",
+        "notional_usdc": "10", "side": "SHORT",
     }, ACCOUNT)
     assert built.referral_assignment is False
     assert PhaseType.SET_REFERRER not in [item[0] for item in built.phase_specs]
+
+
+def test_cross_uses_live_market_leverage_and_exact_wire_flag(tmp_path: Path) -> None:
+    info = ActionInfo(referred_by={"code": "EXISTING"})
+    built = builder(tmp_path, info).preview("OPEN_POSITION", {
+        "leverage": 40, "margin_mode": "CROSS", "market": "BTC",
+        "notional_usdc": "100", "side": "SHORT",
+    }, ACCOUNT)
+    assert built.preview["margin_mode"] == "CROSS"
+    assert "CROSS_MARGIN_RISK" in built.caveats
+    bundle = builder(tmp_path, info).bundle(operation_id(), built)
+    assert phase_action(bundle.phases[0]) == {
+        "type": "updateLeverage", "asset": 0, "isCross": True, "leverage": 40,
+    }
+
+    with pytest.raises(AdapterError) as error:
+        builder(tmp_path, info).preview("OPEN_POSITION", {
+            "leverage": 41, "margin_mode": "CROSS", "market": "BTC",
+            "notional_usdc": "100", "side": "SHORT",
+        }, ACCOUNT)
+    assert error.value.code == "PERPDEX_LEVERAGE_UNAVAILABLE"
+
+
+def test_live_leverage_change_invalidates_the_exact_bundle(tmp_path: Path) -> None:
+    info = ActionInfo(referred_by={"code": "EXISTING"})
+    action_builder = builder(tmp_path, info)
+    bundle = action_builder.bundle(operation_id(), action_builder.preview(
+        "OPEN_POSITION", {
+            "leverage": 40, "margin_mode": "ISOLATED", "market": "BTC",
+            "notional_usdc": "100", "side": "LONG",
+        }, ACCOUNT,
+    ))
+    info.max_leverages["BTC"] = 20
+    with pytest.raises(AdapterError) as error:
+        action_builder.verify(bundle.to_mapping(), ACCOUNT)
+    assert error.value.code == "PERPDEX_LEVERAGE_UNAVAILABLE"
 
 
 @pytest.mark.parametrize(
@@ -202,7 +244,8 @@ def test_existing_referrer_is_preserved_and_open_never_assigns_it(tmp_path: Path
 def test_open_live_preconditions_fail_closed(tmp_path: Path, info: ActionInfo, code: str) -> None:
     with pytest.raises(AdapterError) as error:
         builder(tmp_path, info).preview("OPEN_POSITION", {
-            "leverage": 2, "market": "BTC", "notional_usdc": "100", "side": "LONG",
+            "leverage": 2, "margin_mode": "ISOLATED", "market": "BTC",
+            "notional_usdc": "100", "side": "LONG",
         }, ACCOUNT)
     assert error.value.code == code
 
@@ -241,6 +284,19 @@ def test_deposit_referral_and_withdrawal_are_independent(tmp_path: Path) -> None
     assert withdrawal.preview["amount_usdc"] == "20"
     assert withdrawal.referral_assignment is False
     assert all(call["type"] != "referral" for call in info.calls[before:])
+
+
+def test_hlp_deposit_is_limited_only_by_live_withdrawable_balance(tmp_path: Path) -> None:
+    info = ActionInfo(referred_by={"code": "EXISTING"}, withdrawable="200")
+    deposit = builder(tmp_path, info).preview(
+        "HLP_DEPOSIT", {"amount_usdc": "150"}, ACCOUNT,
+    )
+    assert deposit.preview["amount_usdc"] == "150"
+    with pytest.raises(AdapterError) as error:
+        builder(tmp_path, info).preview(
+            "HLP_DEPOSIT", {"amount_usdc": "200.000001"}, ACCOUNT,
+        )
+    assert error.value.code == "HLP_BALANCE_INSUFFICIENT"
 
 
 def test_wallet_verify_rejects_tamper_price_move_and_position_change(tmp_path: Path) -> None:
@@ -374,7 +430,8 @@ def test_interrupted_submitting_phase_becomes_unknown_without_resubmission(
     action_builder = builder(tmp_path, ActionInfo(referred_by={"code": "EXISTING"}))
     bundle = action_builder.bundle(operation_id(), action_builder.preview(
         "OPEN_POSITION", {
-            "leverage": 2, "market": "BTC", "notional_usdc": "10", "side": "LONG",
+            "leverage": 2, "margin_mode": "ISOLATED", "market": "BTC",
+            "notional_usdc": "10", "side": "LONG",
         }, ACCOUNT,
     ))
     store = PerpDexOperationStore(
