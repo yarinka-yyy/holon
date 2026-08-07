@@ -12,7 +12,7 @@ Item {
     property string marginMode: "ISOLATED"
     property string tradeMode: "OPEN"
     property string closeMode: "FULL"
-    property string withdrawMode: "ALL"
+    property var liveMarkets: []
 
     function choose(current, value) { return current === value }
     function money(value) {
@@ -22,11 +22,16 @@ Item {
         if (root.moduleViewModel && !root.moduleViewModel.busy)
             root.moduleViewModel.refresh()
     }
+    function selectedMarketData() {
+        for (let index = 0; index < root.liveMarkets.length; ++index)
+            if (root.liveMarkets[index].market === root.market)
+                return root.liveMarkets[index]
+        return null
+    }
     function marketMaxLeverage() {
-        const markets = root.moduleViewModel ? root.moduleViewModel.markets : []
-        for (let index = 0; index < markets.length; ++index)
-            if (markets[index].market === root.market)
-                return Math.max(1, Number(markets[index].max_exchange_leverage || 1))
+        const current = root.selectedMarketData()
+        if (current)
+            return Math.max(1, Number(current.max_exchange_leverage || 1))
         // Keep the intended 2x default while market metadata is still loading.
         // Once it arrives, onCurrentMaxLeverageChanged clamps it to the live limit.
         return 2
@@ -35,17 +40,54 @@ Item {
     function clampLeverage(value) {
         return Math.max(1, Math.min(root.currentMaxLeverage, Math.round(value)))
     }
+    function positiveDecimal(value) {
+        return /^(?:0|[1-9][0-9]*)(?:\.[0-9]{1,6})?$/.test(value)
+            && !/^0(?:\.0+)?$/.test(value)
+    }
+    function validClosePercent(value) {
+        return root.positiveDecimal(value) && value.split(".")[0].length < 3
+    }
+    function selectedMarketHasPosition() {
+        const positions = root.moduleViewModel ? (root.moduleViewModel.portfolio.positions || []) : []
+        return positions.some(item => item.market === root.market && item.supported)
+    }
+    function selectedMarketHasOrders() {
+        const orders = root.moduleViewModel ? (root.moduleViewModel.portfolio.orders || []) : []
+        return orders.some(item => item.market === root.market)
+    }
+    function canPrepareTrade() {
+        if (!root.moduleViewModel || root.moduleViewModel.busy || !root.selectedMarketData())
+            return false
+        if (root.tradeMode === "OPEN")
+            return root.positiveDecimal(openNotional.text)
+                && !root.selectedMarketHasPosition() && !root.selectedMarketHasOrders()
+        return root.selectedMarketHasPosition()
+            && (root.closeMode === "FULL" || root.validClosePercent(closePercent.text))
+    }
     onMarketChanged: root.leverage = root.clampLeverage(root.leverage)
     onCurrentMaxLeverageChanged: root.leverage = root.clampLeverage(root.leverage)
-    Component.onCompleted: refresh()
+    onLiveMarketsChanged: root.leverage = root.clampLeverage(root.leverage)
+    onModuleViewModelChanged: root.liveMarkets = root.moduleViewModel
+        ? root.moduleViewModel.markets : []
+    Connections {
+        target: root.moduleViewModel
+        function onChanged() {
+            root.liveMarkets = root.moduleViewModel ? root.moduleViewModel.markets : []
+        }
+    }
+    Component.onCompleted: {
+        root.liveMarkets = root.moduleViewModel ? root.moduleViewModel.markets : []
+        root.refresh()
+    }
 
     Flickable {
+        id: scroll
         anchors.fill: parent
         clip: true
         contentWidth: width
         contentHeight: content.height + 46
         boundsBehavior: Flickable.StopAtBounds
-        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AlwaysOff }
 
         Column {
             id: content
@@ -77,7 +119,7 @@ Item {
                 }
                 Text {
                     x: 16; y: 47; text: "Account equity"
-                    color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 11
+                    color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 12
                 }
                 Text {
                     x: 16; y: 68
@@ -86,7 +128,7 @@ Item {
                 }
                 Text {
                     x: 242; y: 47; text: "Available collateral"
-                    color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 11
+                    color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 12
                 }
                 Text {
                     x: 242; y: 68
@@ -118,7 +160,7 @@ Item {
                         Text {
                             x: 12; y: 67
                             text: "Spread " + (modelData.spread_percent || "—") + "%"
-                            color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 10
+                            color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 11
                         }
                     }
                 }
@@ -148,7 +190,7 @@ Item {
                     Text {
                         x: 14; y: 42
                         text: "Size " + modelData.size_asset + " · Entry " + (modelData.entry_price || "—")
-                        color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 11
+                        color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 12
                     }
                     Text {
                         x: 14; y: 64
@@ -165,8 +207,9 @@ Item {
             }
             SurfaceCard {
                 objectName: "perpDexTradeCard"; width: parent.width
-                height: root.tradeMode === "OPEN" ? 616 : 360
+                height: tradeForm.height + 32
                 Column {
+                    id: tradeForm
                     x: 16; y: 16; width: parent.width - 32; spacing: 12
                     Row {
                         spacing: 8
@@ -180,13 +223,17 @@ Item {
                             }
                         }
                     }
-                    Text { text: "Market"; color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 11 }
+                    Text {
+                        text: "Market"; color: Design.textMuted
+                        font.family: Design.fontFamily; font.pixelSize: 12; font.weight: Font.Medium
+                    }
                     Row {
                         spacing: 8
                         Repeater {
                             model: ["BTC", "ETH", "SOL"]
                             delegate: FormButton {
                                 required property string modelData
+                                objectName: "perpDexMarket-" + modelData
                                 width: 132; height: 38; label: modelData
                                 primary: root.market === modelData
                                 onTriggered: root.market = modelData
@@ -224,7 +271,7 @@ Item {
                             spacing: 7
                             Text {
                                 text: "Margin mode"; color: Design.textMuted
-                                font.family: Design.fontFamily; font.pixelSize: 11
+                                font.family: Design.fontFamily; font.pixelSize: 12; font.weight: Font.Medium
                             }
                             Row {
                                 spacing: 8
@@ -242,18 +289,58 @@ Item {
                         }
                     }
                     Item {
-                        width: parent.width; height: root.tradeMode === "OPEN" ? 112 : 0
+                        width: parent.width
+                        height: root.tradeMode === "OPEN"
+                            ? (root.marginMode === "CROSS" ? 112 : 70) : 0
                         visible: root.tradeMode === "OPEN"
                         Text {
                             text: "Leverage · 1x–" + root.currentMaxLeverage + "x"
-                            color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 11
+                            color: Design.textMuted; font.family: Design.fontFamily
+                            font.pixelSize: 12; font.weight: Font.Medium
                         }
-                        Slider {
-                            id: leverageSlider
-                            x: 0; y: 22; width: parent.width - 98; height: 32
-                            from: 1; to: root.currentMaxLeverage; stepSize: 1
-                            value: root.leverage
-                            onMoved: root.leverage = root.clampLeverage(value)
+                        Item {
+                            id: leverageSlider; objectName: "perpDexLeverageSlider"
+                            x: 0; y: 20; width: parent.width - 98; height: 38
+                            property int from: 1
+                            property int to: root.currentMaxLeverage
+                            property int value: root.leverage
+                            Rectangle {
+                                anchors.verticalCenter: parent.verticalCenter
+                                width: parent.width; height: 4; radius: 2
+                                color: Design.border
+                                Rectangle {
+                                    width: (root.leverage - leverageSlider.from)
+                                        / Math.max(1, leverageSlider.to - leverageSlider.from) * parent.width
+                                    height: parent.height; radius: parent.radius; color: Design.accent
+                                }
+                            }
+                            Rectangle {
+                                x: (root.leverage - leverageSlider.from)
+                                    / Math.max(1, leverageSlider.to - leverageSlider.from) * (parent.width - width)
+                                anchors.verticalCenter: parent.verticalCenter
+                                width: 20; height: 20; radius: 10
+                                color: Design.accent; border.width: 2; border.color: Design.surface
+                                Rectangle {
+                                    anchors.centerIn: parent; width: 5; height: 5; radius: 3
+                                    color: Design.textOnAccent
+                                }
+                            }
+                            MouseArea {
+                                anchors.fill: parent; hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                function updateValue(position) {
+                                    const fraction = Math.max(0, Math.min(1, position / width))
+                                    root.leverage = root.clampLeverage(
+                                        leverageSlider.from + fraction
+                                        * (leverageSlider.to - leverageSlider.from),
+                                    )
+                                }
+                                onPressed: event => updateValue(event.x)
+                                onPositionChanged: event => {
+                                    if (pressed)
+                                        updateValue(event.x)
+                                }
+                            }
                         }
                         Rectangle {
                             x: parent.width - 86; y: 18; width: 86; height: 40; radius: Design.controlRadius
@@ -282,7 +369,7 @@ Item {
                             y: 70; width: parent.width; wrapMode: Text.Wrap
                             visible: root.marginMode === "CROSS"
                             text: "Cross shares your PerpDEX collateral with cross positions. Review the account-wide risk before continuing."
-                            color: Design.warning; font.family: Design.fontFamily; font.pixelSize: 10
+                            color: Design.warning; font.family: Design.fontFamily; font.pixelSize: 11
                         }
                     }
                     Item {
@@ -316,12 +403,12 @@ Item {
                         text: root.tradeMode === "OPEN"
                             ? "Market IOC · maximum slippage 1% · flat position only · no open orders"
                             : "Reduce-only · current market orders are shown and cancelled in Review"
-                        color: Design.warning; font.family: Design.fontFamily; font.pixelSize: 10
+                        color: Design.warning; font.family: Design.fontFamily; font.pixelSize: 11
                     }
                     FormButton {
                         objectName: "perpDexTradePrepareButton"; width: parent.width; height: 46
                         label: "Build fresh preview"
-                        controlEnabled: root.moduleViewModel && !root.moduleViewModel.busy
+                        controlEnabled: root.canPrepareTrade()
                         onTriggered: {
                             if (root.tradeMode === "OPEN")
                                 root.moduleViewModel.prepareOpenPosition(
@@ -365,74 +452,6 @@ Item {
                 FormButton {
                     x: 300; y: 158; width: 142; height: 42; label: "Cancel"; primary: false
                     onTriggered: root.moduleViewModel.cancelPrepared()
-                }
-            }
-
-            Text {
-                text: "Official HLP"; color: Design.text
-                font.family: Design.fontFamily; font.pixelSize: 17; font.weight: Font.DemiBold
-            }
-            SurfaceCard {
-                objectName: "perpDexHlpCard"; width: parent.width; height: 398
-                Text {
-                    x: 16; y: 14; text: "Hyperliquidity Provider (parent vault)"
-                    color: Design.text; font.family: Design.fontFamily
-                    font.pixelSize: 15; font.weight: Font.DemiBold
-                }
-                Text {
-                    x: 16; y: 48
-                    text: "Equity " + root.money(root.moduleViewModel ? root.moduleViewModel.hlp.equity_usdc : null)
-                    color: Design.accent; font.family: Design.fontFamily; font.pixelSize: 14
-                }
-                Text {
-                    x: 16; y: 74
-                    text: "PnL " + root.money(root.moduleViewModel ? root.moduleViewModel.hlp.pnl_usdc : null)
-                        + " · Protocol APR " + (root.moduleViewModel ? (root.moduleViewModel.hlp.protocol_apr_percent || "—") : "—") + "%"
-                    color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 11
-                }
-                Text {
-                    x: 16; y: 101; width: parent.width - 32; wrapMode: Text.Wrap
-                    text: "Risk: NOT ASSESSED · Four-day lock-up; every new deposit restarts it."
-                    color: Design.warning; font.family: Design.fontFamily; font.pixelSize: 10
-                }
-                DraftField {
-                    id: hlpDeposit; objectName: "perpDexHlpDepositAmount"
-                    x: 16; y: 138; width: parent.width - 32; height: 70
-                    label: "Deposit USDC"; placeholderText: "25"
-                }
-                FormButton {
-                    objectName: "perpDexHlpDepositPrepareButton"
-                    x: 16; y: 216; width: parent.width - 32; height: 42
-                    label: "Build deposit preview"
-                    controlEnabled: root.moduleViewModel && !root.moduleViewModel.busy
-                    onTriggered: root.moduleViewModel.prepareHlpDeposit(hlpDeposit.text)
-                }
-                Row {
-                    x: 16; y: 274; spacing: 8
-                    FormButton {
-                        width: 202; height: 38; label: "Withdraw all"
-                        primary: root.withdrawMode === "ALL"
-                        onTriggered: root.withdrawMode = "ALL"
-                    }
-                    FormButton {
-                        width: 202; height: 38; label: "Withdraw exact"
-                        primary: root.withdrawMode === "EXACT"
-                        onTriggered: root.withdrawMode = "EXACT"
-                    }
-                }
-                DraftField {
-                    id: hlpWithdraw; objectName: "perpDexHlpWithdrawAmount"
-                    x: 16; y: 320; width: 240; height: 70
-                    visible: root.withdrawMode === "EXACT"
-                    label: "Exact unlocked USDC"; placeholderText: "10"
-                }
-                FormButton {
-                    objectName: "perpDexHlpWithdrawPrepareButton"
-                    x: root.withdrawMode === "EXACT" ? 266 : 16; y: 334
-                    width: root.withdrawMode === "EXACT" ? 176 : parent.width - 32
-                    height: 46; label: "Build withdraw preview"
-                    controlEnabled: root.moduleViewModel && !root.moduleViewModel.busy
-                    onTriggered: root.moduleViewModel.prepareHlpWithdraw(root.withdrawMode, hlpWithdraw.text)
                 }
             }
 
@@ -495,5 +514,13 @@ Item {
                 }
             }
         }
+    }
+
+    ScrollCue {
+        objectName: "perpDexScrollCue"
+        anchors.right: parent.right; anchors.rightMargin: 12
+        anchors.bottom: parent.bottom; anchors.bottomMargin: 12
+        suggested: scroll.contentHeight > scroll.height
+            && scroll.contentY < scroll.contentHeight - scroll.height - 2
     }
 }

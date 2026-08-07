@@ -14,11 +14,11 @@ Item {
         onTriggered: root.trigger()
     }
     Image {
-        anchors.horizontalCenter: parent.horizontalCenter; y: 19
-        width: 28; height: 28; source: root.iconSource; sourceSize: Qt.size(56, 56)
+        anchors.horizontalCenter: parent.horizontalCenter; y: 14
+        width: 34; height: 34; source: root.iconSource; sourceSize: Qt.size(68, 68)
     }
     Text {
-        anchors.horizontalCenter: parent.horizontalCenter; y: 60
+        anchors.horizontalCenter: parent.horizontalCenter; y: 63
         text: root.label; color: Design.text
         font.family: Design.fontFamily; font.pixelSize: 15; font.weight: Font.Medium
     }

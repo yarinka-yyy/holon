@@ -1,12 +1,13 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 28 28" fill="none">
-  <g stroke="#F2F3F1" stroke-width="1.55" stroke-linecap="round">
-    <path d="M4 6v10M8 4v13M12 8v11M16 5v13"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" fill="none">
+  <g stroke="#F2F3F1" stroke-width="2.7" stroke-linecap="round">
+    <path d="M7 13v17M15 8v20M23 16v18M31 10v20"/>
   </g>
   <g fill="#F2F3F1">
-    <rect x="2.4" y="9" width="3.2" height="4.8" rx=".55"/>
-    <rect x="6.4" y="7" width="3.2" height="5.1" rx=".55"/>
-    <rect x="10.4" y="11" width="3.2" height="4.5" rx=".55"/>
-    <rect x="14.4" y="8" width="3.2" height="4.6" rx=".55"/>
+    <rect x="4.2" y="18" width="5.6" height="7.5" rx="1"/>
+    <rect x="12.2" y="13" width="5.6" height="9" rx="1"/>
+    <rect x="20.2" y="22" width="5.6" height="7" rx="1"/>
+    <rect x="28.2" y="15" width="5.6" height="8.5" rx="1"/>
   </g>
-  <path d="M4 22l5.2-4.2 4.1 1.8L24 8.2M19.5 8.2H24v4.5" stroke="#84C7BA" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="m6 39 9.4-7.5 7.3 3.1L42 17.2M34.4 17.2H42v7.6" stroke="#84C7BA"
+        stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>

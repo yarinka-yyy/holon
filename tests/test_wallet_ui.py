@@ -448,8 +448,20 @@ def test_perpdex_module_page_loads_live_cards_and_forms(
         assert child(app, "perpDexModulePage") is not None
         assert child(app, "perpDexAccountCard") is not None
         assert child(app, "perpDexTradeCard") is not None
-        assert child(app, "perpDexHlpCard") is not None
+        assert app.window.findChild(QObject, "perpDexHlpCard") is None
         assert child(app, "perpDexExecutePreparedButton") is not None
+        assert not child(app, "perpDexTradePrepareButton").property("enabled")
+        assert child(app, "perpDexLeverageSlider").property("to") == 40
+        assert child(app, "perpDexModulePage").setProperty("market", "ETH")
+        qt_app.processEvents()
+        assert child(app, "perpDexLeverageSlider").property("to") == 25
+        assert not child(app, "perpDexTradePrepareButton").property("enabled")
+        set_text(app, "perpDexOpenNotional", "25")
+        qt_app.processEvents()
+        assert child(app, "perpDexTradePrepareButton").property("enabled")
+        assert child(app, "perpDexModulePage").setProperty("market", "SOL")
+        qt_app.processEvents()
+        assert child(app, "perpDexLeverageSlider").property("to") == 20
         assert [item["market"] for item in app.controller.modulePageData["model"].markets] == [
             "BTC", "ETH", "SOL",
         ]
@@ -1482,6 +1494,22 @@ def test_compound_logo_uses_original_mark_with_white_wordmark() -> None:
     assert 'fill="white"' in asset
     assert ">Compound</text>" in asset
     assert "<circle" not in asset
+
+
+def test_dashboard_actions_use_one_sized_two_tone_icon_language() -> None:
+    qml = Path(__file__).parents[1] / "src" / "holon_wallet" / "qml"
+    card = (qml / "ActionCard.qml").read_text(encoding="utf-8")
+    history = (qml / "HistoryPage.qml").read_text(encoding="utf-8")
+    module_icon = (
+        Path(__file__).parents[1] / "modules" / "perpdex" / "wallet" / "assets" / "perpdex.svg"
+    ).read_text(encoding="utf-8")
+
+    assert "width: 34; height: 34" in card
+    assert 'objectName: "historyScrollCue"' in history
+    assert "#84C7BA" in module_icon and "#F2F3F1" in module_icon
+    for name in ("send.svg", "clock.svg", "lending.svg"):
+        asset = (qml / "assets" / name).read_text(encoding="utf-8")
+        assert "#84C7BA" in asset and "#F2F3F1" in asset
 
 
 def test_network_icons_are_accessible_but_new_networks_do_not_enter_send() -> None:

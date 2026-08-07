@@ -47,6 +47,13 @@ PageState {
             onDetailsRequested: actionId => walletController.showTransactionDetails(actionId)
         }
     }
+    ScrollCue {
+        objectName: "historyScrollCue"
+        anchors.right: historyList.right; anchors.rightMargin: 8
+        anchors.bottom: historyList.bottom; anchors.bottomMargin: 8
+        suggested: historyList.contentHeight > historyList.height
+            && historyList.contentY < historyList.contentHeight - historyList.height - 2
+    }
     AccountSelector {
         anchors.fill: parent; z: 30; open: root.selectorOpen
         onDismissRequested: root.selectorOpen = false

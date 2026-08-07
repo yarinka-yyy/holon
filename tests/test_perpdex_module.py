@@ -240,10 +240,15 @@ def test_perpdex_qml_exposes_live_margin_controls_and_clean_module_header() -> N
 
     assert 'property string marginMode: "ISOLATED"' in page
     assert 'label: "Isolated"' in page and 'label: "Cross"' in page
-    assert "Slider {" in page and "currentMaxLeverage" in page
+    assert "currentMaxLeverage" in page
+    assert 'objectName: "perpDexLeverageSlider"' in page
+    assert "Slider {" not in page and "function updateValue(position)" in page
     assert "return 2" in page
     assert 'text: "Spread "' in page and "Funding " not in page
     assert "(maximum 100)" not in page
     assert "prepareOpenPosition(" in page and "root.marginMode" in page
+    assert "canPrepareTrade()" in page
+    assert 'objectName: "perpDexHlpCard"' not in page
+    assert "ScrollBar.AlwaysOff" in page and 'objectName: "perpDexScrollCue"' in page
     assert "Cross margin shares PerpDEX collateral" in review
     assert "ScreenHeader" in host and "y: 126" in host
