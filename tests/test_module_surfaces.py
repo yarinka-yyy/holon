@@ -130,7 +130,9 @@ def test_hermes_registers_only_catalog_backed_declarative_mock_tool(
             "required": [], "type": "object",
         },
     }
-    result = json.loads(optional["handler"]({}))
+    result = json.loads(optional["handler"](
+        {}, task_id="task", session_id="session", user_task="read status",
+    ))
     assert result["status"] == "READY"
     assert result["result"] == {"module_id": "holon.mock", "status": "READY"}
 
@@ -194,35 +196,38 @@ def test_hermes_perpdex_prepare_then_execute_consumes_preview_once(
         "holon_perpdex_portfolio", "holon_perpdex_prepare",
         "holon_perpdex_fund_prepare", "holon_perpdex_fund_execute",
     }
+    dispatch_context = {
+        "task_id": "task", "session_id": "session", "user_task": "perpdex",
+    }
     closed = json.loads(optional["holon_perpdex_prepare"]["handler"]({
         "action_type": "CLOSE_POSITION", "amount_mode": "FULL", "market": "BTC",
-    }))
+    }, **dispatch_context))
     assert closed["status"] == "PREVIEW_READY"
     assert connector.previews[-1][2:] == (
         "CLOSE_POSITION", {"amount_mode": "FULL", "market": "BTC", "percent": None},
     )
     withdrawn = json.loads(optional["holon_perpdex_prepare"]["handler"]({
         "action_type": "HLP_WITHDRAW", "amount_mode": "ALL",
-    }))
+    }, **dispatch_context))
     assert withdrawn["status"] == "PREVIEW_READY"
     assert connector.previews[-1][2:] == (
         "HLP_WITHDRAW", {"amount_mode": "ALL", "amount_usdc": None},
     )
     prepared = json.loads(optional["holon_perpdex_prepare"]["handler"]({
         "action_type": "HLP_DEPOSIT", "amount_usdc": "25",
-    }))
+    }, **dispatch_context))
     assert prepared["status"] == "PREVIEW_READY"
     assert prepared["confirmation_required"] is True
     assert connector.previews[-1][2:] == ("HLP_DEPOSIT", {"amount_usdc": "25"})
 
     executed = json.loads(optional["holon_perpdex_execute"]["handler"]({
         "preview_digest": prepared["preview_digest"],
-    }))
+    }, **dispatch_context))
     assert executed["status"] == "AWAITING_LOCAL_CONFIRMATION"
     assert len(connector.executions) == 1
     repeated = json.loads(optional["holon_perpdex_execute"]["handler"]({
         "preview_digest": prepared["preview_digest"],
-    }))
+    }, **dispatch_context))
     assert repeated["code"] == "MODULE_ACTION_PREVIEW_UNKNOWN"
     assert len(connector.executions) == 1
 
@@ -233,11 +238,11 @@ def test_hermes_perpdex_prepare_then_execute_consumes_preview_once(
     funding_tools = {item["name"]: item for item in funding_context.tools}
     invalid_funding = json.loads(funding_tools["holon_perpdex_fund_prepare"]["handler"]({
         "amount_usdc": 25.0,
-    }))
+    }, **dispatch_context))
     assert invalid_funding["code"] == "MODULE_ACTION_PREVIEW_INVALID"
     funding = json.loads(funding_tools["holon_perpdex_fund_prepare"]["handler"]({
         "amount_usdc": "25",
-    }))
+    }, **dispatch_context))
     assert funding["status"] == "PREVIEW_READY"
     assert connector.previews[-1] == (
         "holon.perpdex", "holon.perpdex.funding.guard",
@@ -245,7 +250,7 @@ def test_hermes_perpdex_prepare_then_execute_consumes_preview_once(
     )
     funded = json.loads(funding_tools["holon_perpdex_fund_execute"]["handler"]({
         "preview_digest": funding["preview_digest"],
-    }))
+    }, **dispatch_context))
     assert funded["status"] == "AWAITING_LOCAL_CONFIRMATION"
     assert connector.executions[-1][1:4] == (
         "holon.perpdex.funding.guard", "FUND_TRADING_ACCOUNT", {"amount_usdc": "25"},

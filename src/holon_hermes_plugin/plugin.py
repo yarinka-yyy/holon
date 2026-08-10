@@ -1124,24 +1124,27 @@ def _register_optional_tools(ctx: Any) -> None:
             _is_funding: bool = tool.capability_id == "holon.perpdex.funding.guard",
             **kwargs: Any,
         ) -> str:
+            # Hermes supplies dispatch context here; module contracts accept
+            # only schema-bound user parameters from the positional dictionary.
+            del kwargs
             if _capability_kind == "protected_action_adapter":
                 if _operation == "prepare":
                     if _is_funding:
                         return _runtime.handle_module_funding_prepare(
-                            _module_id, _capability_id, params, **kwargs,
+                            _module_id, _capability_id, params,
                         )
                     return _runtime.handle_module_action_prepare(
-                        _module_id, _capability_id, params, **kwargs,
+                        _module_id, _capability_id, params,
                     )
                 if _is_funding:
                     return _runtime.handle_module_funding_execute(
-                        _module_id, _capability_id, params, **kwargs,
+                        _module_id, _capability_id, params,
                     )
                 return _runtime.handle_module_action_execute(
-                    _module_id, _capability_id, params, **kwargs,
+                    _module_id, _capability_id, params,
                 )
             return _runtime.handle_module_read(
-                _module_id, _capability_id, _operation, params, **kwargs,
+                _module_id, _capability_id, _operation, params,
             )
 
         ctx.register_tool(
