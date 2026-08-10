@@ -51,7 +51,7 @@ class FundingGuardAdapter:
             "chain_id": 42161,
             "max_total_fee_wei": str(action.max_total_fee_wei),
             "network": "Arbitrum One",
-            "token_contract": NATIVE_USDC,
+            "native_usdc_address": NATIVE_USDC,
         }
         digest = digest_json({"account": account["address"].lower(), "intent": intent.to_mapping(), "preview": preview})
         expires = self._timestamp(self._clock() + REVIEW_SECONDS)

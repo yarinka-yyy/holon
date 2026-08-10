@@ -9,6 +9,8 @@ import time
 
 import pytest
 
+from holon_contracts import ContractViolation, MessageKind, make_envelope
+from holon_guard.authority import AuthorityService
 from holon_wallet.broadcast import MainnetTransferCode
 from holon_wallet.model import ProfileSummary
 from holon_wallet.transfer import PreparedTransferAction, UnsignedTransaction
@@ -76,6 +78,27 @@ def test_funding_bundle_pins_only_native_usdc_arbitrum_bridge2(tmp_path: Path) -
     tampered["phases"][0]["semantic"]["bridge_address"] = "0x" + "22" * 20
     with pytest.raises(Exception):
         FundingBundle.from_mapping(tampered)
+
+
+def test_funding_preview_serializes_without_raw_contract_fields(tmp_path: Path) -> None:
+    guard = FundingGuardAdapter(Preflight())
+    guard.configure(tmp_path)
+    preview = guard.preview(
+        "FUND_TRADING_ACCOUNT", {"amount_usdc": "6"},
+        {"address": ACCOUNT, "label": "Main"},
+    )
+    payload = AuthorityService._module_preview_payload(
+        "holon.perpdex", "holon.perpdex.funding.guard", "FUND_TRADING_ACCOUNT",
+        preview=preview, execution_available=True,
+    )
+    envelope = make_envelope(MessageKind.MODULE_ACTION_PREVIEW, payload)
+
+    assert envelope.payload["preview"]["native_usdc_address"] == NATIVE_USDC
+    with pytest.raises(ContractViolation):
+        make_envelope(MessageKind.MODULE_ACTION_PREVIEW, {
+            **payload,
+            "preview": {**payload["preview"], "token_contract": NATIVE_USDC},
+        })
 
 
 def test_wallet_rechecks_fixed_route_and_fee_before_review(tmp_path: Path) -> None:
