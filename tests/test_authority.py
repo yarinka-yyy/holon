@@ -253,15 +253,24 @@ class AuthorityTests(unittest.TestCase):
         self.assertEqual(opened_disabled.payload["guard_state"], "SIGNING_DISABLED")
         self.assertEqual(self.wallet.open_calls, 2)
 
-    def test_public_open_failure_is_generic_and_keeps_authority_untouched(self) -> None:
+    def test_public_open_failure_has_safe_internal_code_and_audit(self) -> None:
         def fail():
             raise RuntimeError("private path and process detail")
 
         self.wallet.open_public = fail  # type: ignore[method-assign]
         response = self.service.handle(make_envelope(MessageKind.OPEN_WALLET, {}), None)
         self.assertEqual(response.kind, MessageKind.ERROR)
-        self.assertEqual(response.payload["code"], "WALLET_UNAVAILABLE")
-        self.assertNotIn("private", str(response.to_dict()).lower())
+        self.assertEqual(response.payload["code"], "WALLET_OPEN_INTERNAL_FAILURE")
+        serialized = str(response.to_dict()).lower()
+        for value in ("private", "path", "process", "detail"):
+            self.assertNotIn(value, serialized)
+        events = [
+            event for event in self.audit.journal.events()
+            if event.event_type is EventType.TECHNICAL_ERROR
+        ]
+        self.assertEqual([event.code for event in events], [
+            "WALLET_OPEN_INTERNAL_FAILURE",
+        ])
         self.assertEqual(self.lifecycle.snapshot.state.value, "NORMAL")
         self.assertIsNone(self.lifecycle.ledger.snapshot.current)
 

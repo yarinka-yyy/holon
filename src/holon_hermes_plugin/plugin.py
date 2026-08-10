@@ -11,6 +11,7 @@ from typing import Any, Optional
 from holon_contracts import (
     ContractEnvelope, MessageKind, load_registry, make_envelope, new_action_id,
 )
+from holon_guard_ipc import PipeProtocolError, PipeUnavailable
 from holon_modules import (
     ModuleLifecycleState,
     decode_manifest,
@@ -26,6 +27,7 @@ from .guard import (
     GuardConnector,
     GuardHealth,
     GuardState,
+    GuardUnavailableError,
     PipeGuardClient,
     production_launcher,
 )
@@ -71,7 +73,38 @@ WALLET_OPEN_FAILURE_CODES = frozenset({
     "WALLET_INITIALIZATION_FAILED", "WALLET_EXITED",
     "WALLET_INSTANCE_UNREACHABLE", "WALLET_STARTUP_TIMEOUT",
     "CONTROL_PROTOCOL_FAILED", "WALLET_PROCESS_VERIFICATION_FAILED",
+    "WALLET_OPEN_INTERNAL_FAILURE", "WALLET_UNAVAILABLE",
 })
+WALLET_OPEN_FAILURE_MESSAGES = {
+    "WALLET_EXECUTABLE_MISSING": "Wallet executable is missing.",
+    "WALLET_START_FAILED": "Wallet could not be started.",
+    "WALLET_INITIALIZATION_FAILED": "Wallet could not initialize.",
+    "WALLET_EXITED": "Wallet exited before it became ready.",
+    "WALLET_INSTANCE_UNREACHABLE": "The existing Wallet instance could not be reached.",
+    "WALLET_STARTUP_TIMEOUT": "Wallet did not become ready in time.",
+    "CONTROL_PROTOCOL_FAILED": "Wallet control protocol failed.",
+    "WALLET_PROCESS_VERIFICATION_FAILED": "Wallet process verification failed.",
+    "WALLET_OPEN_INTERNAL_FAILURE": "Wallet launch failed inside Guard.",
+    "WALLET_UNAVAILABLE": "Wallet is unavailable.",
+    "WALLET_GUARD_UNAVAILABLE": "Guard is unavailable.",
+    "WALLET_GUARD_RESPONSE_TIMEOUT": "Guard did not respond in time.",
+    "WALLET_GUARD_IPC_FAILED": "Guard communication failed.",
+    "WALLET_OPEN_RESPONSE_INVALID": "Wallet launch response was invalid.",
+}
+
+
+def _wallet_open_failure(code: str) -> str:
+    return json.dumps(
+        {
+            "status": "DEGRADED",
+            "capabilities": CAPABILITIES,
+            "authority_available": False,
+            "code": code,
+            "message": WALLET_OPEN_FAILURE_MESSAGES[code],
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
 
 
 def _validated_fallback(kind: MessageKind, value: dict[str, Any]) -> dict[str, Any]:
@@ -341,41 +374,44 @@ class PluginRuntime:
             response = self._connector.open_wallet()
             payload = response.payload
             if response.kind.value == "wallet_opened":
+                wallet_state = payload.get("wallet_state")
+                code = payload.get("code")
+                if (
+                    wallet_state not in {"OPENED", "ACTIVATED"}
+                    or code not in {"WALLET_OPENED", "WALLET_ACTIVATED"}
+                    or not isinstance(payload.get("message"), str)
+                ):
+                    return _wallet_open_failure("WALLET_OPEN_RESPONSE_INVALID")
                 return json.dumps(
                     {
-                        "status": payload["wallet_state"],
+                        "status": wallet_state,
                         "capabilities": CAPABILITIES,
                         "authority_available": False,
-                        "code": payload["code"],
-                        "message": payload["message"],
+                        "code": code,
+                        "message": (
+                            "Wallet activation was requested."
+                            if wallet_state == "ACTIVATED"
+                            else "Wallet launch was verified."
+                        ),
                     },
                     ensure_ascii=False,
                     separators=(",", ":"),
                 )
-            if (
-                response.kind.value == "error"
-                and payload.get("code") in WALLET_OPEN_FAILURE_CODES
-                and isinstance(payload.get("message"), str)
-            ):
-                code = str(payload["code"])
-                message = str(payload["message"])
-            else:
-                code = "WALLET_UNAVAILABLE"
-                message = "Wallet could not be opened."
+            if response.kind.value == "error" and payload.get("code") in WALLET_OPEN_FAILURE_CODES:
+                return _wallet_open_failure(str(payload["code"]))
+            return _wallet_open_failure("WALLET_OPEN_RESPONSE_INVALID")
+        except GuardUnavailableError:
+            return _wallet_open_failure("WALLET_GUARD_UNAVAILABLE")
+        except PipeUnavailable:
+            return _wallet_open_failure("WALLET_GUARD_UNAVAILABLE")
+        except PipeProtocolError as error:
+            code = (
+                "WALLET_GUARD_RESPONSE_TIMEOUT"
+                if error.code == "RESPONSE_TIMEOUT" else "WALLET_GUARD_IPC_FAILED"
+            )
+            return _wallet_open_failure(code)
         except Exception:
-            code = "WALLET_UNAVAILABLE"
-            message = "Wallet could not be opened."
-        return json.dumps(
-            {
-                "status": "DEGRADED",
-                "capabilities": CAPABILITIES,
-                "authority_available": False,
-                "code": code,
-                "message": message,
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
+            return _wallet_open_failure("WALLET_GUARD_IPC_FAILED")
 
     def handle_wallet_balances(
         self, params: Optional[dict] = None, **kwargs: Any,

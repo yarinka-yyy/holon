@@ -132,6 +132,10 @@ class UnavailableGuardClient:
         raise RuntimeError("Guard is unavailable")
 
 
+class GuardUnavailableError(RuntimeError):
+    """Guard cannot service a public Wallet open request."""
+
+
 class GuardConnector:
     """Probe, optionally launch once, then probe once more."""
 
@@ -173,7 +177,7 @@ class GuardConnector:
     def open_wallet(self) -> ContractEnvelope:
         health = self.ensure_available()
         if health.availability is not GuardAvailability.AVAILABLE:
-            raise RuntimeError("Guard is unavailable")
+            raise GuardUnavailableError()
         return self._client.open_wallet()
 
     def wallet_balances(self) -> ContractEnvelope:

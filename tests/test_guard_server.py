@@ -156,8 +156,9 @@ class GuardServerTests(unittest.TestCase):
         thread = threading.Thread(target=slow_server, daemon=True)
         thread.start()
         ready.wait(1.0)
-        with self.assertRaises(PipeProtocolError):
+        with self.assertRaises(PipeProtocolError) as raised:
             PipeClient(slow_pipe, 0.5, 0.02).request(MessageKind.HEALTH_REQUEST)
+        self.assertEqual(raised.exception.code, "RESPONSE_TIMEOUT")
         thread.join(timeout=1.0)
 
     def test_silent_connection_does_not_stall_guard(self) -> None:

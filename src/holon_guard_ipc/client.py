@@ -21,7 +21,11 @@ class PipeUnavailable(ConnectionError):
 
 
 class PipeProtocolError(RuntimeError):
-    pass
+    """Safe classification for a bounded Guard pipe failure."""
+
+    def __init__(self, message: str, code: str = "PROTOCOL_FAILED") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 WALLET_OPEN_RESPONSE_TIMEOUT = 15.0
@@ -66,7 +70,7 @@ class PipeClient:
                 if not connection.poll(
                     self.response_timeout if response_timeout is None else response_timeout,
                 ):
-                    raise PipeProtocolError("Guard response timed out")
+                    raise PipeProtocolError("Guard response timed out", "RESPONSE_TIMEOUT")
                 response = decode_message(connection.recv_bytes(MAX_MESSAGE_BYTES + 1))
         except PipeProtocolError:
             raise

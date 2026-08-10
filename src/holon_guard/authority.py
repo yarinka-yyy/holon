@@ -323,7 +323,12 @@ class AuthorityService(ResponseMixin):
             try:
                 result = self.lifecycle.wallet.open_public()
             except Exception:
-                result = None
+                if not self.audit_system(
+                    EventType.TECHNICAL_ERROR, "WALLET_OPEN_INTERNAL_FAILURE",
+                ):
+                    return self.security_response(request)
+                failure = wallet_open_failure("WALLET_OPEN_INTERNAL_FAILURE")
+                return self.error(request, failure.code, failure.message)
             if (
                 result is None
                 or not result.ok

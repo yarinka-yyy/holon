@@ -22,6 +22,7 @@ from holon_guard.request_store import RequestStateStore
 from holon_guard.store import SnapshotStore
 from holon_journal import JournalStore
 from holon_lending import AAVE_CONTRACTS, BASE_USDC
+from holon_wallet_control import WalletControlClient
 from holon_wallet_control.lending_operation import LendingOperationStore
 from holon_wallet.settings import SettingsStore
 from holon_wallet.prices import AssetPrice, PriceSnapshot, PriceStatus
@@ -185,6 +186,101 @@ def test_packaged_wallet_boots_offline_with_public_cache(tmp_path: Path) -> None
                 timeout=10,
             )
         process.wait(timeout=10)
+
+
+def _terminate_test_tree(process: subprocess.Popen[object]) -> None:
+    if process.poll() is not None:
+        return
+    terminated = subprocess.run(
+        ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+        check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
+    )
+    if terminated.returncode != 0:
+        raise RuntimeError("Test process tree could not be terminated")
+    process.wait(timeout=10)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Packaged Windows executables")
+def test_packaged_guard_cold_starts_and_reactivates_wallet(tmp_path: Path) -> None:
+    if os.environ.get("HOLON_TEST_PACKAGED_E2E") != "1":
+        pytest.skip("Dedicated packaged Wallet E2E was not requested")
+    guard = Path(os.environ.get("HOLON_TEST_GUARD_EXE", ""))
+    wallet = Path(os.environ.get("HOLON_TEST_WALLET_EXE", ""))
+    if not guard.is_file() or not wallet.is_file():
+        pytest.skip("Packaged Guard and Wallet paths were not provided")
+
+    local_root = tmp_path / "cold-start-local"
+    paths = WalletPaths(local_root / "Holon" / "data")
+    repository = VaultRepository(paths)
+    record = repository.new_record(generate_mnemonic(), "Cold Start Fixture")
+    repository.create_new("fixture-password", record)
+    SettingsStore(paths).save_active_id(record.summary.profile_id)
+    data_dir = paths.data_dir
+    first_pipe = rf"\\.\pipe\Holon.Guard.cold-start.{uuid.uuid4()}"
+    second_pipe = rf"\\.\pipe\Holon.Guard.cold-start-second.{uuid.uuid4()}"
+    third_pipe = rf"\\.\pipe\Holon.Guard.cold-start-third.{uuid.uuid4()}"
+    environment = dict(os.environ)
+    environment.update({
+        "LOCALAPPDATA": str(local_root),
+        "QT_QPA_PLATFORM": "offscreen",
+        "HOLON_ETHEREUM_RPC_URL": "http://127.0.0.1:9",
+        "HOLON_BASE_RPC_URL": "http://127.0.0.1:9",
+    })
+
+    def start(pipe: str) -> subprocess.Popen[object]:
+        return subprocess.Popen(
+            [
+                str(guard.resolve()), "--data-dir", str(data_dir),
+                "--pipe-name", pipe, "--wallet-path", str(wallet.resolve()),
+                "--wallet-status-pipe-name", f"{pipe}.status",
+                "--policy-control-pipe-name", f"{pipe}.policy",
+            ],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            env=environment, creationflags=0x08000000,
+        )
+
+    first = start(first_pipe)
+    second: subprocess.Popen[object] | None = None
+    third: subprocess.Popen[object] | None = None
+    wallet_pid: int | None = None
+    try:
+        wait_for_pipe(first_pipe, 20.0)
+        started_at = time.monotonic()
+        opened = PipeClient(first_pipe, 2.0, 20.0).request(MessageKind.OPEN_WALLET)
+        assert time.monotonic() - started_at < 16.0
+        assert opened.kind is MessageKind.WALLET_OPENED
+        assert opened.payload["wallet_state"] == "OPENED"
+        assert opened.payload["code"] == "WALLET_OPENED"
+        wallet_pid = WalletControlClient().activate(
+            str(uuid.uuid4()), wallet.resolve(), 2.0,
+        )
+        activated = PipeClient(first_pipe, 2.0, 20.0).request(MessageKind.OPEN_WALLET)
+        assert activated.kind is MessageKind.WALLET_OPENED
+        assert activated.payload["wallet_state"] == "ACTIVATED"
+        assert activated.payload["code"] == "WALLET_ACTIVATED"
+        assert WalletControlClient().activate(
+            str(uuid.uuid4()), wallet.resolve(), 2.0,
+        ) == wallet_pid
+        assert not (data_dir / "action-state.json").exists()
+
+        second = start(second_pipe)
+        assert second.wait(timeout=10) == 3
+        _terminate_test_tree(first)
+
+        third = start(third_pipe)
+        wait_for_pipe(third_pipe, 20.0)
+        health = PipeClient(third_pipe, 2.0, 2.0).request(MessageKind.HEALTH_REQUEST)
+        assert health.payload["guard_state"] in {"NORMAL", "SIGNING_DISABLED"}
+    finally:
+        for process in (third, second, first):
+            if process is not None:
+                _terminate_test_tree(process)
+        if wallet_pid is not None:
+            subprocess.run(
+                ["taskkill", "/PID", str(wallet_pid), "/T", "/F"],
+                check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=10,
+            )
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Packaged Windows executables")

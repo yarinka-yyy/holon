@@ -31,6 +31,7 @@ WALLET_OPEN_FAILURE_MESSAGES = {
     "WALLET_STARTUP_TIMEOUT": "Wallet did not become ready in time.",
     "CONTROL_PROTOCOL_FAILED": "Wallet control protocol failed.",
     "WALLET_PROCESS_VERIFICATION_FAILED": "Wallet process verification failed.",
+    "WALLET_OPEN_INTERNAL_FAILURE": "Wallet launch failed inside Guard.",
 }
 
 

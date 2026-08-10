@@ -1,0 +1,71 @@
+name: Windows packaged Wallet E2E
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'src/holon_guard/**'
+      - 'src/holon_guard_ipc/**'
+      - 'src/holon_hermes_plugin/**'
+      - 'src/holon_wallet/**'
+      - 'src/holon_wallet_control/**'
+      - 'packaging/**'
+      - 'modules/**'
+      - 'tests/test_guard_process.py'
+      - 'tests/test_packaged_lending_preview.py'
+      - 'tests/test_packaged_plugin.py'
+      - 'pyproject.toml'
+      - 'uv.lock'
+
+permissions:
+  contents: read
+
+jobs:
+  packaged-wallet-e2e:
+    runs-on: windows-2025
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        id: python313
+        with:
+          python-version: '3.13.14'
+      - uses: actions/setup-python@v5
+        id: python311
+        with:
+          python-version: '3.11'
+      - uses: astral-sh/setup-uv@v6
+      - name: Restore locked build environment
+        shell: pwsh
+        run: uv sync --locked --extra perpdex --python '${{ steps.python313.outputs.python-path }}'
+      - name: Build Extended binaries and package
+        shell: pwsh
+        run: |
+          $python = '${{ steps.python313.outputs.python-path }}'
+          & $python packaging/build_composition.py --destination build/ci-composition --composition-id extended --module-root modules/perpdex
+          if ($LASTEXITCODE -ne 0) { throw 'Composition build failed' }
+          & packaging/build-guard.ps1 -PythonPath $python -CompositionRoot build/ci-composition
+          if ($LASTEXITCODE -ne 0) { throw 'Guard build failed' }
+          & packaging/build-wallet.ps1 -PythonPath $python -CompositionRoot build/ci-composition
+          if ($LASTEXITCODE -ne 0) { throw 'Wallet build failed' }
+          $packageArgs = @(
+            'packaging/build_package.py', '--source-root', '.',
+            '--destination', 'build/ci-package', '--guard', 'dist/HolonGuard.exe',
+            '--wallet', 'dist/HolonWallet.exe',
+            '--composition-root', 'build/ci-composition'
+          )
+          & $python @packageArgs
+          if ($LASTEXITCODE -ne 0) { throw 'Package build failed' }
+      - name: Run real Guard and Wallet E2E
+        shell: pwsh
+        run: |
+          $env:PYTHONPATH = ''
+          $env:HOLON_TEST_GUARD_EXE = (Resolve-Path dist/HolonGuard.exe)
+          $env:HOLON_TEST_WALLET_EXE = (Resolve-Path dist/HolonWallet.exe)
+          $env:HOLON_TEST_HERMES_PYTHON = '${{ steps.python311.outputs.python-path }}'
+          $env:HOLON_TEST_PACKAGED_E2E = '1'
+          & .\.venv\Scripts\python.exe -m pytest -q `
+            tests/test_guard_process.py `
+            tests/test_packaged_lending_preview.py::test_packaged_guard_cold_starts_and_reactivates_wallet `
+            tests/test_packaged_plugin.py

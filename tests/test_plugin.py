@@ -6,8 +6,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from holon_hermes_plugin import plugin
-from holon_hermes_plugin.guard import GuardHealth, GuardState
+from holon_hermes_plugin.guard import GuardHealth, GuardState, GuardUnavailableError
 from holon_contracts import MessageKind, make_envelope
+from holon_guard_ipc import PipeProtocolError, PipeUnavailable
 
 
 class StaticConnector:
@@ -274,10 +275,10 @@ class PluginTests(unittest.TestCase):
         for field in ("pid", "path", "pipe", "launch_id"):
             self.assertNotIn(field, serialized.lower())
 
-    def test_old_or_unavailable_guard_returns_wallet_unavailable(self) -> None:
+    def test_unexpected_guard_connector_failure_is_safe_ipc_failure(self) -> None:
         payload = json.loads(plugin.PluginRuntime(RaisingConnector()).handle_open_wallet())
         self.assertEqual(payload["status"], "DEGRADED")
-        self.assertEqual(payload["code"], "WALLET_UNAVAILABLE")
+        self.assertEqual(payload["code"], "WALLET_GUARD_IPC_FAILED")
 
     def test_safe_wallet_startup_code_passes_from_guard_to_hermes(self) -> None:
         connector = StaticConnector(GuardHealth.available(GuardState.NORMAL))
@@ -298,9 +299,46 @@ class PluginTests(unittest.TestCase):
 
                 self.assertEqual(payload["status"], "DEGRADED")
                 self.assertEqual(payload["code"], code)
-                self.assertEqual(payload["message"], "Safe startup diagnostic.")
+                self.assertEqual(
+                    payload["message"], plugin.WALLET_OPEN_FAILURE_MESSAGES[code],
+                )
                 for field in ("pid", "path", "pipe", "launch_id"):
                     self.assertNotIn(field, json.dumps(payload).lower())
+
+    def test_wallet_open_transport_failure_codes_are_safe(self) -> None:
+        cases = [
+            (GuardUnavailableError("private"), "WALLET_GUARD_UNAVAILABLE"),
+            (PipeUnavailable("private path pipe"), "WALLET_GUARD_UNAVAILABLE"),
+            (
+                PipeProtocolError("private timeout", "RESPONSE_TIMEOUT"),
+                "WALLET_GUARD_RESPONSE_TIMEOUT",
+            ),
+            (PipeProtocolError("private protocol"), "WALLET_GUARD_IPC_FAILED"),
+        ]
+        for error, expected_code in cases:
+            with self.subTest(expected_code=expected_code):
+                connector = StaticConnector(GuardHealth.available(GuardState.NORMAL))
+                connector.open_wallet = lambda error=error: (_ for _ in ()).throw(error)  # type: ignore[method-assign]
+                payload = json.loads(plugin.PluginRuntime(connector).handle_open_wallet())
+                self.assertEqual(payload["code"], expected_code)
+                self.assertEqual(
+                    payload["message"],
+                    plugin.WALLET_OPEN_FAILURE_MESSAGES[expected_code],
+                )
+                for private in ("private", "path", "pipe"):
+                    self.assertNotIn(private, json.dumps(payload).lower())
+
+    def test_wallet_open_invalid_guard_response_is_safe(self) -> None:
+        class InvalidConnector:
+            def open_wallet(self):
+                return type("Response", (), {
+                    "kind": MessageKind.ERROR,
+                    "payload": {"code": "PRIVATE_PID", "message": "private path"},
+                })()
+
+        payload = json.loads(plugin.PluginRuntime(InvalidConnector()).handle_open_wallet())
+        self.assertEqual(payload["code"], "WALLET_OPEN_RESPONSE_INVALID")
+        self.assertNotIn("private", json.dumps(payload).lower())
 
     def test_balance_tool_returns_public_snapshot_without_echoing_arguments(self) -> None:
         runtime = plugin.PluginRuntime(StaticConnector(GuardHealth.available(GuardState.NORMAL)))
