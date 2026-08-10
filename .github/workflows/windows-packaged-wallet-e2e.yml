@@ -45,7 +45,7 @@ jobs:
         shell: pwsh
         run: |
           git config core.autocrlf false
-          git checkout -- modules/perpdex/module-manifest.json
+          git checkout -- modules/perpdex
           $raw = [IO.File]::ReadAllBytes('modules/perpdex/module-manifest.json')
           if ($raw -contains 13) { throw 'Module manifest contains CRLF' }
       - name: Build Extended binaries and package

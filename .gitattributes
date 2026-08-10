@@ -1,2 +1,6 @@
-# Module manifests are byte-canonical and must not acquire CRLF on Windows.
+# Manifest-covered module payloads are byte-exact.  Do not apply Git's text
+# conversion to them on Windows: their SHA-256 values cover the stored bytes.
+modules/** -text
+
+# The manifest itself is canonical UTF-8 JSON and must retain LF line endings.
 module-manifest.json text eol=lf
