@@ -45,9 +45,11 @@ jobs:
         shell: pwsh
         run: |
           git config core.autocrlf false
-          git checkout -- modules/perpdex src/holon_wallet/qml/assets
+          git checkout -- modules/perpdex src/holon_wallet/qml/assets src/holon_modules/module-catalog.json
           $raw = [IO.File]::ReadAllBytes('modules/perpdex/module-manifest.json')
           if ($raw -contains 13) { throw 'Module manifest contains CRLF' }
+          $catalog = [IO.File]::ReadAllBytes('src/holon_modules/module-catalog.json')
+          if ($catalog -contains 13) { throw 'Module catalog contains CRLF' }
           $python = (Resolve-Path -LiteralPath '.venv\Scripts\python.exe').Path
           & $python -m pytest -q tests/test_network_asset_registry.py::test_official_icon_files_match_pinned_sha256
           if ($LASTEXITCODE -ne 0) { throw 'Integrity input validation failed' }

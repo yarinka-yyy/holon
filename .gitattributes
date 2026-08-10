@@ -5,5 +5,6 @@ modules/** -text
 # The network registry also pins the original bytes of its Wallet icon assets.
 src/holon_wallet/qml/assets/** -text
 
-# The manifest itself is canonical UTF-8 JSON and must retain LF line endings.
+# Canonical module JSON must retain LF line endings.
+src/holon_modules/module-catalog.json text eol=lf
 module-manifest.json text eol=lf

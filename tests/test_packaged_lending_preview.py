@@ -405,6 +405,11 @@ def test_packaged_funding_reaches_review_with_bounded_fee_drift(tmp_path: Path) 
     environment.update({
         "LOCALAPPDATA": str(local_root),
         "HOLON_ARBITRUM_RPC_URL": f"http://127.0.0.1:{server.server_port}",
+        "HOLON_ETHEREUM_RPC_URL": "http://127.0.0.1:9",
+        "HOLON_BASE_RPC_URL": "http://127.0.0.1:9",
+        "HOLON_OPTIMISM_RPC_URL": "http://127.0.0.1:9",
+        "HOLON_POLYGON_RPC_URL": "http://127.0.0.1:9",
+        "HOLON_BSC_RPC_URL": "http://127.0.0.1:9",
         "QT_QPA_PLATFORM": "offscreen",
     })
     process = subprocess.Popen(
