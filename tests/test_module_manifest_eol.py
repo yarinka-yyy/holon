@@ -11,3 +11,4 @@ def test_module_manifests_are_pinned_to_lf_and_trigger_windows_ci() -> None:
     )
     assert "module-manifest.json text eol=lf" in attributes
     assert "- '.gitattributes'" in workflow
+    assert "Verify canonical module manifest checkout" in workflow

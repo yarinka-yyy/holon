@@ -41,6 +41,13 @@ jobs:
       - name: Restore locked build environment
         shell: pwsh
         run: uv sync --locked --extra perpdex --python '${{ steps.python313.outputs.python-path }}'
+      - name: Verify canonical module manifest checkout
+        shell: pwsh
+        run: |
+          git config core.autocrlf false
+          git checkout -- modules/perpdex/module-manifest.json
+          $raw = [IO.File]::ReadAllBytes('modules/perpdex/module-manifest.json')
+          if ($raw -contains 13) { throw 'Module manifest contains CRLF' }
       - name: Build Extended binaries and package
         shell: pwsh
         run: |
