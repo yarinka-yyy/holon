@@ -52,11 +52,13 @@ def test_perpdex_manifest_is_canonical_and_registers_only_by_component(
     assert [item.declaration.capability_id for item in guard.capabilities()] == [
         "holon.perpdex.action.guard",
         "holon.perpdex.earn.hlp",
+        "holon.perpdex.funding.guard",
         "holon.perpdex.read",
     ]
     assert [item.declaration.capability_id for item in wallet.capabilities()] == [
         "holon.perpdex.action.wallet",
         "holon.perpdex.earn.hlp.wallet",
+        "holon.perpdex.funding.wallet",
         "holon.perpdex.read.wallet",
         "holon.perpdex.wallet",
     ]
@@ -227,6 +229,9 @@ def test_base_has_no_perpdex_resource_or_earn_presentation(tmp_path: Path) -> No
 
     assert not (composition / "modules" / "holon.perpdex").exists()
     assert module_earn_presentations(registry) == {}
+    assert b"2df1c51e09aecf9cacb7bc98cb1742757f163df7" not in (
+        composition / "module-catalog.json"
+    ).read_bytes()
 
 
 def test_perpdex_qml_exposes_live_margin_controls_and_clean_module_header() -> None:
@@ -251,4 +256,5 @@ def test_perpdex_qml_exposes_live_margin_controls_and_clean_module_header() -> N
     assert 'objectName: "perpDexHlpCard"' not in page
     assert "ScrollBar.AlwaysOff" in page and 'objectName: "perpDexScrollCue"' in page
     assert "Cross margin shares PerpDEX collateral" in review
+    assert "native USDC only" in review and "Bridge2:" in review
     assert "ScreenHeader" in host and "y: 126" in host

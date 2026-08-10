@@ -20,6 +20,7 @@ from holon_contracts.registry import DeploymentRecord, load_registry
 _REGISTRY = load_registry()
 ETHEREUM_USDC = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
 BASE_USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+ARBITRUM_USDC = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
 USDC_ABI = (
     {
         "inputs": ({"internalType": "address", "name": "account", "type": "address"},),

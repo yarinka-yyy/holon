@@ -82,7 +82,7 @@ function Read-HolManifest([string]$Root) {
         "composition_id", "core_api_version", "module_catalog_sha256", "module_ids",
         "skill_ids", "files"
     ))) { throw [System.ArgumentException]::new("Invalid manifest fields") }
-    if ($manifest.manifest_version -cne "3" -or $manifest.package_version -cne "0.1.0a0" -or
+    if ($manifest.manifest_version -cne "3" -or $manifest.package_version -cne "0.2.0a0" -or
         $manifest.hermes_compatibility -cne ">=0.18.2,<0.19.0") {
         throw [System.ArgumentException]::new("Incompatible package") }
     if ($null -eq $manifest.component_versions -or -not (Test-HolFields `
@@ -95,7 +95,7 @@ function Read-HolManifest([string]$Root) {
         $manifest.component_versions.wallet, $manifest.component_versions.contracts,
         $manifest.component_versions.policy, $manifest.component_versions.skills,
         $manifest.component_versions.modules)
-    if (($versions -join "|") -cne "0.1.0a0|0.1.0a0|0.1.0a0|1|1|0.1.0a0|1") {
+    if (($versions -join "|") -cne "0.2.0a0|0.2.0a0|0.2.0a0|1|1|0.2.0a0|1") {
         throw [System.ArgumentException]::new("Incompatible component versions") }
     if ($manifest.composition_id -isnot [string] -or
         $manifest.composition_id -cnotmatch "^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$" -or

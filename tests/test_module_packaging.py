@@ -79,6 +79,9 @@ def test_base_mock_and_disabled_packages_have_exact_optional_surface(tmp_path: P
         base / "payload/plugin/plugin.yaml"
     ).read_text(encoding="utf-8")
     assert not (base / "payload/plugin/modules").exists()
+    assert b"2df1c51e09aecf9cacb7bc98cb1742757f163df7" not in b"".join(
+        path.read_bytes() for path in base.rglob("*") if path.is_file()
+    )
 
     assert mock_manifest.module_ids == ("holon.mock",)
     assert mock_manifest.skill_ids == (
@@ -115,6 +118,7 @@ def test_extended_package_has_only_declared_perpdex_surfaces(tmp_path: Path) -> 
     assert all(name in yaml for name in (
         "holon_perpdex_execute", "holon_perpdex_markets",
         "holon_perpdex_portfolio", "holon_perpdex_prepare",
+        "holon_perpdex_fund_prepare", "holon_perpdex_fund_execute",
     ))
     module = plugin / "modules/holon.perpdex"
     assert {path.name for path in module.iterdir()} == {

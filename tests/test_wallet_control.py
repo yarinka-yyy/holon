@@ -381,6 +381,21 @@ def test_module_authority_protocol_carries_only_exact_bundle_hashes_and_semantic
     with pytest.raises(ControlProtocolError):
         validate_authority_response({**response, "bundle_digest": "e" * 64}, checked, 202)
 
+    funding_bundle = {
+        **bundle, "profile_id": "hyperliquid-arbitrum-funding-v1",
+        "action_type": "FUND_TRADING_ACCOUNT", "intent": {"amount_usdc": "5"},
+    }
+    funding_request = {
+        **request, "capability_id": "holon.perpdex.funding.wallet",
+        "profile_id": "hyperliquid-arbitrum-funding-v1",
+        "action_type": "FUND_TRADING_ACCOUNT", "bundle": funding_bundle,
+    }
+    assert validate_authority_request(funding_request) == funding_request
+    with pytest.raises(ControlProtocolError):
+        validate_authority_request({
+            **funding_request, "capability_id": "holon.perpdex.action.wallet",
+        })
+
 
 def test_wallet_status_accepts_module_bundle_partial_without_transaction_payload() -> None:
     update = {

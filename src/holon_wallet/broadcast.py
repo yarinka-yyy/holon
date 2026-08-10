@@ -1341,6 +1341,12 @@ def _evaluate_policy(
     revoke_policy: RevokePolicy,
     action: PreparedTransactionAction,
 ) -> MainnetTransferCode | None:
+    if (
+        isinstance(action, PreparedTransferAction)
+        and action.action_type == "perpdex_funding"
+        and action.protocol_id == "hyperliquid-bridge2"
+    ):
+        return None
     if not isinstance(action, PreparedRevokeAction):
         return transfer_policy.evaluate(action)
     code = revoke_policy.evaluate(action)

@@ -192,6 +192,7 @@ def test_hermes_perpdex_prepare_then_execute_consumes_preview_once(
     assert set(optional) == {
         "holon_perpdex_execute", "holon_perpdex_markets",
         "holon_perpdex_portfolio", "holon_perpdex_prepare",
+        "holon_perpdex_fund_prepare", "holon_perpdex_fund_execute",
     }
     closed = json.loads(optional["holon_perpdex_prepare"]["handler"]({
         "action_type": "CLOSE_POSITION", "amount_mode": "FULL", "market": "BTC",
@@ -224,3 +225,28 @@ def test_hermes_perpdex_prepare_then_execute_consumes_preview_once(
     }))
     assert repeated["code"] == "MODULE_ACTION_PREVIEW_UNKNOWN"
     assert len(connector.executions) == 1
+
+    runtime = plugin.PluginRuntime(connector)
+    monkeypatch.setattr(plugin, "_runtime", runtime)
+    funding_context = _Context()
+    plugin.register(funding_context)
+    funding_tools = {item["name"]: item for item in funding_context.tools}
+    invalid_funding = json.loads(funding_tools["holon_perpdex_fund_prepare"]["handler"]({
+        "amount_usdc": 25.0,
+    }))
+    assert invalid_funding["code"] == "MODULE_ACTION_PREVIEW_INVALID"
+    funding = json.loads(funding_tools["holon_perpdex_fund_prepare"]["handler"]({
+        "amount_usdc": "25",
+    }))
+    assert funding["status"] == "PREVIEW_READY"
+    assert connector.previews[-1] == (
+        "holon.perpdex", "holon.perpdex.funding.guard",
+        "FUND_TRADING_ACCOUNT", {"amount_usdc": "25"},
+    )
+    funded = json.loads(funding_tools["holon_perpdex_fund_execute"]["handler"]({
+        "preview_digest": funding["preview_digest"],
+    }))
+    assert funded["status"] == "AWAITING_LOCAL_CONFIRMATION"
+    assert connector.executions[-1][1:4] == (
+        "holon.perpdex.funding.guard", "FUND_TRADING_ACCOUNT", {"amount_usdc": "25"},
+    )

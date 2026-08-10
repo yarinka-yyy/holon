@@ -40,6 +40,11 @@ def test_perpdex_intents_are_closed_decimal_string_contracts() -> None:
 
     deposit = PerpDexActionIntent.from_mapping("HLP_DEPOSIT", {"amount_usdc": "10.25"})
     assert deposit.review_seconds == 300
+    funding = PerpDexActionIntent.from_mapping(
+        "FUND_TRADING_ACCOUNT", {"amount_usdc": "5.000001"},
+    )
+    assert funding.action_type is ActionType.FUND_TRADING_ACCOUNT
+    assert funding.is_entry and funding.review_seconds == 300
     withdrawal = PerpDexActionIntent.from_mapping(
         "HLP_WITHDRAW", {"amount_mode": "ALL", "amount_usdc": None},
     )
@@ -57,6 +62,10 @@ def test_perpdex_intents_are_closed_decimal_string_contracts() -> None:
         ("CLOSE_POSITION", {"amount_mode": "PERCENT", "market": "SOL", "percent": "100"}),
         ("CLOSE_POSITION", {"amount_mode": "FULL", "market": "SOL", "percent": "50"}),
         ("HLP_DEPOSIT", {"amount_usdc": "10.0000001"}),
+        ("FUND_TRADING_ACCOUNT", {"amount_usdc": "4.999999"}),
+        ("FUND_TRADING_ACCOUNT", {"amount_usdc": "5.0000001"}),
+        ("FUND_TRADING_ACCOUNT", {"amount_usdc": 5.0}),
+        ("FUND_TRADING_ACCOUNT", {"amount_usdc": "5", "asset": "USDC.e"}),
         ("HLP_WITHDRAW", {"amount_mode": "ALL", "amount_usdc": "1"}),
         ("HLP_WITHDRAW", {"amount_mode": "EXACT", "amount_usdc": None}),
     ],

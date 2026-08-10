@@ -1,7 +1,7 @@
 ---
 name: holon-earn
 description: "Use for any Holon Earn, yield, APY, return, Lending-versus-Vault, provider freshness, exit-condition, or risk-state request."
-version: "0.1.0-alpha"
+version: "0.2.0-alpha"
 author: Holon
 license: Apache-2.0
 platforms: [windows]

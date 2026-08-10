@@ -179,11 +179,19 @@ def validate_request(value: Mapping[str, object]) -> dict[str, object]:
                 or MODULE_ID_RE.fullmatch(value[field]) is None
             ):
                 raise ControlProtocolError("Invalid module authority request")
+        profiles = {
+            "hyperliquid-mainnet-v1": (
+                "holon.perpdex.action.wallet",
+                {"OPEN_POSITION", "CLOSE_POSITION", "HLP_DEPOSIT", "HLP_WITHDRAW"},
+            ),
+            "hyperliquid-arbitrum-funding-v1": (
+                "holon.perpdex.funding.wallet", {"FUND_TRADING_ACCOUNT"},
+            ),
+        }
+        profile = profiles.get(value.get("profile_id"))
         if (
-            value.get("profile_id") != "hyperliquid-mainnet-v1"
-            or value.get("action_type") not in {
-                "OPEN_POSITION", "CLOSE_POSITION", "HLP_DEPOSIT", "HLP_WITHDRAW",
-            }
+            profile is None or value.get("capability_id") != profile[0]
+            or value.get("action_type") not in profile[1]
             or not isinstance(value.get("bundle"), Mapping)
         ):
             raise ControlProtocolError("Invalid module authority request")

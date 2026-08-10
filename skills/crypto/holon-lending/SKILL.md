@@ -1,7 +1,7 @@
 ---
 name: holon-lending
 description: "Use for any Holon Lending, Aave, Compound, Morpho, or Base USDC request. Covers yield, positions, earnings, supply, withdraw, approval, status, cancellation, and recovery."
-version: "0.1.0-alpha"
+version: "0.2.0-alpha"
 author: Holon
 license: Apache-2.0
 platforms: [windows]

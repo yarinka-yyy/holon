@@ -16,6 +16,7 @@ $buildRoot = Join-Path $projectRoot "build\guard"
 $distRoot = Join-Path $projectRoot "dist"
 $sourceRoot = Join-Path $projectRoot "src"
 $entryPoint = Join-Path $sourceRoot "holon_guard_app.py"
+$qmlRoot = Join-Path $sourceRoot "holon_wallet\qml"
 $lendingProfile = Join-Path $sourceRoot "holon_lending\read-profiles.json"
 $lendingActionProfile = Join-Path $sourceRoot "holon_lending\action-profiles.json"
 $baselinePolicy = Join-Path $sourceRoot "holon_policy\baseline-policy.json"
@@ -89,6 +90,7 @@ try {
         --add-data "$lendingActionProfile;holon_lending" `
         --add-data "$baselinePolicy;holon_policy" `
         --add-data "$networkAssets;holon_contracts" `
+        --add-data "$qmlRoot;holon_wallet/qml" `
         @moduleBuildArguments `
         --collect-data web3 `
         --distpath $distRoot `

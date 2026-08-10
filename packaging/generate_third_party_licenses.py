@@ -116,7 +116,7 @@ def render() -> str:
         "HOLON THIRD-PARTY LICENSES",
         "",
         "This file covers the locked runtime dependency set and the build",
-        "bootloader distributed in Holon 0.1.0-alpha.",
+        "bootloader distributed in Holon 0.2.0-alpha.",
         "",
     ]
     lines.extend(_section(

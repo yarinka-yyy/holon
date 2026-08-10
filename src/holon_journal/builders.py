@@ -11,7 +11,7 @@ from .model import EventType, JournalEvent
 from .templates import description_for
 from .validation import parse_event
 
-COMPONENT_VERSION = "0.1.0a0"
+COMPONENT_VERSION = "0.2.0a0"
 
 
 def utc_now() -> str:

@@ -5,10 +5,12 @@ import "."
 TransactionFlowShell {
     id: root
     title: "Protected Action Result"
-    subtitle: "Public reconciliation · no automatic retry"
+    subtitle: result.status === "PENDING_CREDIT"
+        ? "Broadcast is not a Hyperliquid credit · refresh portfolio"
+        : "Public reconciliation · no automatic retry"
     activeStep: 3; backVisible: false
     property var result: walletController.perpDexResult
-    property bool positive: result.status === "COMPLETED"
+    property bool positive: result.status === "COMPLETED" || result.status === "PENDING_CREDIT"
 
     SurfaceCard {
         x: 0; y: 0; width: 458; height: 154

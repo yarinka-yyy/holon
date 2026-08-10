@@ -22,6 +22,8 @@ TransactionFlowShell {
             return value.market + " · " + (value.is_buy ? "BUY" : "SELL")
                 + " " + value.size_asset + " · limit " + value.limit_price
                 + (value.reduce_only ? " · reduce-only" : "")
+        if (phase.phaseType === "ARBITRUM_USDC_TRANSFER")
+            return "Deposit " + value.amount_usdc + " native USDC · Arbitrum One"
         return (value.is_deposit ? "Deposit " : "Withdraw ")
             + value.amount_usdc + " USDC · official HLP"
     }
@@ -96,6 +98,20 @@ TransactionFlowShell {
                 Text {
                     anchors.fill: parent; anchors.margins: 14; wrapMode: Text.Wrap
                     text: root.action.disclosure || ""
+                    color: Design.warning; font.family: Design.fontFamily; font.pixelSize: 11
+                }
+            }
+            Rectangle {
+                visible: root.action.actionType === "FUND_TRADING_ACCOUNT"
+                width: 458; height: visible ? 136 : 0; radius: 12
+                color: "#332C261B"; border.width: 1; border.color: "#66D5AA64"
+                Text {
+                    anchors.fill: parent; anchors.margins: 14; wrapMode: Text.Wrap
+                    text: "Arbitrum One (42161) · native USDC only\n"
+                        + "Token: " + (root.action.funding || {}).tokenContract + "\n"
+                        + "Bridge2: " + (root.action.funding || {}).recipient + "\n"
+                        + "Maximum gas: " + (root.action.funding || {}).maxTotalFeeWei
+                        + " wei\nMinimum credit: 5 USDC. Wrong token or network may be irreversible."
                     color: Design.warning; font.family: Design.fontFamily; font.pixelSize: 11
                 }
             }

@@ -180,7 +180,10 @@ class PackageBuilder:
                         or item.operation not in {"prepare", "execute"}
                         or targets[item.capability_id].descriptor.get("adapter_version") != "1"
                         or targets[item.capability_id].descriptor.get("profile_id")
-                        != "hyperliquid-mainnet-v1"
+                        not in {
+                            "hyperliquid-arbitrum-funding-v1",
+                            "hyperliquid-mainnet-v1",
+                        }
                     )
                 )
                 for item in declarations

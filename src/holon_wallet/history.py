@@ -354,7 +354,9 @@ def history_record_to_map(record: WalletHistoryRecord) -> dict[str, object]:
         "profileId": record.profile_id,
         "actionType": record.action_type,
         "network": record.network,
-        "networkLabel": "Ethereum" if record.network == "ethereum" else "Base",
+        "networkLabel": {
+            "arbitrum": "Arbitrum One", "ethereum": "Ethereum", "base": "Base",
+        }.get(record.network, record.network),
         "chainId": record.chain_id,
         "sender": record.sender,
         "recipient": record.recipient,
@@ -494,7 +496,7 @@ def _validate_record(record: WalletHistoryRecord) -> None:
         "lending_withdraw", "lending_withdraw_all",
     }:
         raise HistoryValidationError("History action type is invalid")
-    expected_chain = {"ethereum": 1, "base": 8453}.get(record.network)
+    expected_chain = {"ethereum": 1, "base": 8453, "arbitrum": 42161}.get(record.network)
     if expected_chain is None or type(record.chain_id) is not int or record.chain_id != expected_chain:
         raise HistoryValidationError("History network is invalid")
     if not _address(record.sender) or not _address(record.recipient):

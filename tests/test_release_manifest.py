@@ -22,7 +22,7 @@ def test_manifest_is_canonical_and_records_required_versions(tmp_path: Path) -> 
     package, manifest = build_fixture(tmp_path)
     raw = (package / "release-manifest.json").read_bytes()
     assert encode_manifest(decode_manifest(raw)) == raw
-    assert manifest.package_version == "0.1.0a0"
+    assert manifest.package_version == "0.2.0a0"
     assert manifest.manifest_version == "3"
     assert set(manifest.component_versions) == {
         "plugin", "guard", "wallet", "contracts", "policy", "skills", "modules",

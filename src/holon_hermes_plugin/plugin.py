@@ -454,6 +454,10 @@ class PluginRuntime:
                 {"action_type", "amount_mode"},
                 {"action_type", "amount_mode", "amount_usdc"},
             ),
+            "FUND_TRADING_ACCOUNT": (
+                {"action_type", "amount_usdc"},
+                {"action_type", "amount_usdc"},
+            ),
         }.get(action_type, (set(), set()))
         if not required or not required.issubset(values) or not set(values).issubset(allowed):
             raise ValueError("Invalid protected module parameters")
@@ -487,7 +491,7 @@ class PluginRuntime:
             if not isinstance(values["amount_usdc"], str):
                 raise ValueError("Invalid HLP deposit parameters")
             params = {"amount_usdc": values["amount_usdc"]}
-        else:
+        elif action_type == "HLP_WITHDRAW":
             amount_usdc = values.get("amount_usdc")
             if (
                 values["amount_mode"] not in {"EXACT", "ALL"}
@@ -500,6 +504,10 @@ class PluginRuntime:
                 "amount_mode": values["amount_mode"],
                 "amount_usdc": amount_usdc,
             }
+        else:
+            if not isinstance(values["amount_usdc"], str):
+                raise ValueError("Invalid funding parameters")
+            params = {"amount_usdc": values["amount_usdc"]}
         return str(action_type), params
 
     def handle_module_action_prepare(
@@ -511,6 +519,29 @@ class PluginRuntime:
             return self._module_action_failure("MODULE_ACTION_PREVIEW_INVALID")
         values.update(params)
         values.update(kwargs)
+        return self._prepare_module_action(module_id, capability_id, values)
+
+    def handle_module_funding_prepare(
+        self, module_id: str, capability_id: str,
+        params: Optional[dict] = None, **kwargs: Any,
+    ) -> str:
+        values: dict[str, Any] = {}
+        if not isinstance(params, dict) or set(params).intersection(kwargs):
+            return self._module_action_failure("MODULE_ACTION_PREVIEW_INVALID")
+        values.update(params)
+        values.update(kwargs)
+        if set(values) != {"amount_usdc"} or not isinstance(values["amount_usdc"], str):
+            return self._module_action_failure("MODULE_ACTION_PREVIEW_INVALID")
+        return self._prepare_module_action(
+            module_id, capability_id,
+            {"action_type": "FUND_TRADING_ACCOUNT", **values},
+            execute_tool="holon_perpdex_fund_execute",
+        )
+
+    def _prepare_module_action(
+        self, module_id: str, capability_id: str, values: dict[str, Any], *,
+        execute_tool: str = "holon_perpdex_execute",
+    ) -> str:
         try:
             action_type, semantic = self._module_action_params(values)
             response = self._connector.module_action_preview(
@@ -538,7 +569,7 @@ class PluginRuntime:
                 "confirmation_required": True,
                 "next_step": (
                     "Explain the exact preview and risks. Only after explicit confirmation "
-                    "in a later user message call holon_perpdex_execute once with preview_digest."
+                    f"in a later user message call {execute_tool} once with preview_digest."
                 ),
             })
             return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
@@ -611,6 +642,14 @@ class PluginRuntime:
             "code": response.payload.get("code", "MODULE_ACTION_REFUSED"),
             "message": response.payload.get("message", "Protected module action was refused."),
         }, ensure_ascii=False, separators=(",", ":"))
+
+    def handle_module_funding_execute(
+        self, module_id: str, capability_id: str,
+        params: Optional[dict] = None, **kwargs: Any,
+    ) -> str:
+        return self.handle_module_action_execute(
+            module_id, capability_id, params, **kwargs,
+        )
 
     def handle_lending_compare(
         self, params: Optional[dict] = None, **kwargs: Any,
@@ -1043,7 +1082,10 @@ def _optional_tool_declarations():
                         or tool.operation not in {"prepare", "execute"}
                         or targets[tool.capability_id].descriptor.get("adapter_version") != "1"
                         or targets[tool.capability_id].descriptor.get("profile_id")
-                        != "hyperliquid-mainnet-v1"
+                        not in {
+                            "hyperliquid-arbitrum-funding-v1",
+                            "hyperliquid-mainnet-v1",
+                        }
                     )
                 )
                 or tool.name in STATIC_TOOL_NAMES
@@ -1079,11 +1121,20 @@ def _register_optional_tools(ctx: Any) -> None:
             _capability_id: str = tool.capability_id,
             _operation: str = tool.operation,
             _capability_kind: str = capability_kind,
+            _is_funding: bool = tool.capability_id == "holon.perpdex.funding.guard",
             **kwargs: Any,
         ) -> str:
             if _capability_kind == "protected_action_adapter":
                 if _operation == "prepare":
+                    if _is_funding:
+                        return _runtime.handle_module_funding_prepare(
+                            _module_id, _capability_id, params, **kwargs,
+                        )
                     return _runtime.handle_module_action_prepare(
+                        _module_id, _capability_id, params, **kwargs,
+                    )
+                if _is_funding:
+                    return _runtime.handle_module_funding_execute(
                         _module_id, _capability_id, params, **kwargs,
                     )
                 return _runtime.handle_module_action_execute(

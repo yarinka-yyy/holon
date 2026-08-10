@@ -13,6 +13,16 @@ def test_wallet_build_bundles_both_lending_profile_files() -> None:
     assert '--add-data "$networkAssets;holon_contracts"' in script
 
 
+def test_guard_build_bundles_registry_icon_assets() -> None:
+    script = (
+        Path(__file__).parents[1] / "packaging" / "build-guard.ps1"
+    ).read_text(encoding="utf-8")
+
+    assert 'holon_wallet\\qml' in script
+    assert '--add-data "$networkAssets;holon_contracts"' in script
+    assert '--add-data "$qmlRoot;holon_wallet/qml"' in script
+
+
 def test_wallet_build_embeds_the_holon_application_icon() -> None:
     script = (
         Path(__file__).parents[1] / "packaging" / "build-wallet.ps1"
@@ -36,7 +46,7 @@ def test_installer_build_is_single_production_pipeline() -> None:
     assert '--check' in script
     assert 'NOTICE_FILE' in script
     assert 'installer.iss' in script
-    assert 'Holon-0.1.0-alpha-Setup.exe' in script
+    assert 'Holon-0.2.0-alpha-Setup.exe' in script
     assert 'winget' not in script.lower()
 
 
@@ -58,9 +68,9 @@ def test_m8_installer_defaults_to_explicit_extended_module_root() -> None:
 def test_guard_and_wallet_use_the_fixed_windows_version_resource() -> None:
     packaging = Path(__file__).parents[1] / "packaging"
     version = (packaging / "windows-version.txt").read_text(encoding="utf-8")
-    assert "filevers=(0, 1, 0, 0)" in version
-    assert "prodvers=(0, 1, 0, 0)" in version
-    assert "StringStruct('ProductVersion', '0.1.0-alpha')" in version
+    assert "filevers=(0, 2, 0, 0)" in version
+    assert "prodvers=(0, 2, 0, 0)" in version
+    assert "StringStruct('ProductVersion', '0.2.0-alpha')" in version
     for name in ("build-guard.ps1", "build-wallet.ps1"):
         script = (packaging / name).read_text(encoding="utf-8")
         assert 'windows-version.txt' in script

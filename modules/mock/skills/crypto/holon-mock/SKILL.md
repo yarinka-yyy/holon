@@ -1,7 +1,7 @@
 ---
 name: holon-mock
 description: "Read the harmless M7 mock module status when this acceptance-only module is installed."
-version: "0.1.0-alpha"
+version: "0.2.0-alpha"
 author: Holon
 license: Apache-2.0
 platforms: [windows]

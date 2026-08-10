@@ -167,6 +167,7 @@ def test_amount_parser_rejects_noncanonical_or_inexact_input(value, decimals) ->
         ("ethereum", "usdc", 2_500_001),
         ("base", "eth", 10**15),
         ("base", "usdc", 1_250_000),
+        ("arbitrum", "usdc", 5_000_000),
     ],
 )
 def test_all_allowlisted_routes_build_exact_type2_transactions(

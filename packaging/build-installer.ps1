@@ -112,7 +112,7 @@ New-Item -ItemType Directory -Force -Path $distRoot | Out-Null
     (Join-Path $PSScriptRoot "installer.iss")
 if ($LASTEXITCODE -ne 0) { throw "Inno Setup compilation failed" }
 
-$setupPath = Join-Path $distRoot "Holon-0.1.0-alpha-Setup.exe"
+$setupPath = Join-Path $distRoot "Holon-0.2.0-alpha-Setup.exe"
 if (-not (Test-Path -LiteralPath $setupPath -PathType Leaf)) {
     throw "Installer artifact was not created"
 }

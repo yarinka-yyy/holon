@@ -47,6 +47,7 @@ class ContractError(ValueError):
 class ActionType(str, Enum):
     OPEN_POSITION = "OPEN_POSITION"
     CLOSE_POSITION = "CLOSE_POSITION"
+    FUND_TRADING_ACCOUNT = "FUND_TRADING_ACCOUNT"
     HLP_DEPOSIT = "HLP_DEPOSIT"
     HLP_WITHDRAW = "HLP_WITHDRAW"
 
@@ -69,6 +70,7 @@ class AmountMode(str, Enum):
 
 
 class PhaseType(str, Enum):
+    ARBITRUM_USDC_TRANSFER = "ARBITRUM_USDC_TRANSFER"
     SET_REFERRER = "SET_REFERRER"
     SET_ISOLATED_LEVERAGE = "SET_ISOLATED_LEVERAGE"
     CANCEL_MARKET_ORDERS = "CANCEL_MARKET_ORDERS"
@@ -209,11 +211,14 @@ class PerpDexActionIntent:
             if percent <= 0 or percent >= 100:
                 raise ContractError("Invalid close percent")
             return cls(action, str(market), amount_mode=mode, percent=str(value["percent"]))
-        if action is ActionType.HLP_DEPOSIT:
-            _exact(value, {"amount_usdc"}, "HLP deposit")
-            amount = _decimal(value["amount_usdc"], "HLP deposit amount", scale=6)
-            if amount <= 0:
-                raise ContractError("Invalid HLP deposit amount")
+        if action in {ActionType.FUND_TRADING_ACCOUNT, ActionType.HLP_DEPOSIT}:
+            label = "funding" if action is ActionType.FUND_TRADING_ACCOUNT else "HLP deposit"
+            _exact(value, {"amount_usdc"}, label)
+            amount = _decimal(value["amount_usdc"], f"{label} amount", scale=6)
+            if amount <= 0 or (
+                action is ActionType.FUND_TRADING_ACCOUNT and amount < 5
+            ):
+                raise ContractError(f"Invalid {label} amount")
             return cls(action, amount_usdc=str(value["amount_usdc"]))
         _exact(value, {"amount_mode", "amount_usdc"}, "HLP withdrawal")
         try:
@@ -237,7 +242,10 @@ class PerpDexActionIntent:
 
     @property
     def is_entry(self) -> bool:
-        return self.action_type in {ActionType.OPEN_POSITION, ActionType.HLP_DEPOSIT}
+        return self.action_type in {
+            ActionType.FUND_TRADING_ACCOUNT, ActionType.OPEN_POSITION,
+            ActionType.HLP_DEPOSIT,
+        }
 
     def to_mapping(self) -> dict[str, object]:
         if self.action_type is ActionType.OPEN_POSITION:
@@ -250,7 +258,7 @@ class PerpDexActionIntent:
             }
         if self.action_type is ActionType.CLOSE_POSITION:
             return {"amount_mode": self.amount_mode.value if self.amount_mode else None, "market": self.market, "percent": self.percent}
-        if self.action_type is ActionType.HLP_DEPOSIT:
+        if self.action_type in {ActionType.FUND_TRADING_ACCOUNT, ActionType.HLP_DEPOSIT}:
             return {"amount_usdc": self.amount_usdc}
         return {"amount_mode": self.amount_mode.value if self.amount_mode else None, "amount_usdc": self.amount_usdc}
 
@@ -286,6 +294,30 @@ class ProtectedActionPhase:
             _exact(value, {"code"}, "referral phase")
             if value["code"] != REFERRAL_CODE or self.cloid is not None:
                 raise ContractError("Invalid referral phase")
+            return
+        if self.phase_type is PhaseType.ARBITRUM_USDC_TRANSFER:
+            _exact(
+                value,
+                {
+                    "amount_usdc", "bridge_address", "chain_id",
+                    "max_total_fee_wei", "token_contract", "usd_atomic",
+                },
+                "Arbitrum funding phase",
+            )
+            if (
+                type(value["chain_id"]) is not int or value["chain_id"] != 42161
+                or _decimal(value["amount_usdc"], "funding amount", scale=6) < 5
+                or not isinstance(value["usd_atomic"], str) or not value["usd_atomic"].isdigit()
+                or int(value["usd_atomic"]) < 5_000_000
+                or not isinstance(value["max_total_fee_wei"], str)
+                or not value["max_total_fee_wei"].isdigit()
+                or not isinstance(value["bridge_address"], str)
+                or _ADDRESS_RE.fullmatch(value["bridge_address"]) is None
+                or not isinstance(value["token_contract"], str)
+                or _ADDRESS_RE.fullmatch(value["token_contract"]) is None
+                or self.cloid is not None
+            ):
+                raise ContractError("Invalid Arbitrum funding phase")
             return
         if self.phase_type is PhaseType.SET_ISOLATED_LEVERAGE:
             _exact(

@@ -73,20 +73,25 @@ class AuthorityService(ResponseMixin):
         status = self.module_registry.module_status(module_id)
         capability = self.module_registry.resolve(capability_id)
         descriptor = capability.declaration.descriptor
+        profiles = {
+            "hyperliquid-mainnet-v1": f"{module_id}.action.wallet",
+            "hyperliquid-arbitrum-funding-v1": f"{module_id}.funding.wallet",
+        }
+        profile_id = descriptor.get("profile_id")
         if (
             status.state is not ModuleLifecycleState.READY
             or capability.module_id != module_id
             or capability.declaration.kind != "protected_action_adapter"
             or descriptor.get("adapter_version") != "1"
-            or descriptor.get("profile_id") != "hyperliquid-mainnet-v1"
+            or profile_id not in profiles
             or action_type not in descriptor.get("action_types", ())
             or getattr(capability.contribution, "adapter_version", None) != "1"
-            or getattr(capability.contribution, "profile_id", None) != descriptor["profile_id"]
+            or getattr(capability.contribution, "profile_id", None) != profile_id
             or not isinstance(
                 getattr(capability.contribution, "wallet_capability_id", None), str,
             )
             or getattr(capability.contribution, "wallet_capability_id", None)
-            != f"{module_id}.action.wallet"
+            != profiles[profile_id]
         ):
             raise RuntimeError("Module action adapter is unavailable")
         return capability, capability.contribution
@@ -466,7 +471,7 @@ class AuthorityService(ResponseMixin):
                     caveat = str(getattr(exc, "code", "CAPABILITY_UNAVAILABLE"))
                     status = (
                         "REFUSED"
-                        if caveat.startswith(("PERPDEX_", "HLP_"))
+                        if caveat.startswith(("FUNDING_", "HLP_", "PERPDEX_"))
                         and not caveat.endswith(("UNAVAILABLE", "INVALID"))
                         else "UNAVAILABLE"
                     )
@@ -484,9 +489,17 @@ class AuthorityService(ResponseMixin):
             module_id = str(request.payload["module_id"])
             capability_id = str(request.payload["capability_id"])
             try:
-                _capability, adapter = self.module_action_adapter(
-                    module_id, capability_id, "HLP_WITHDRAW",
-                )
+                adapter = None
+                for action_type in ("HLP_WITHDRAW", "FUND_TRADING_ACCOUNT"):
+                    try:
+                        _capability, adapter = self.module_action_adapter(
+                            module_id, capability_id, action_type,
+                        )
+                        break
+                    except RuntimeError:
+                        continue
+                if adapter is None:
+                    raise RuntimeError("Module action adapter is unavailable")
                 operation = adapter.status(request.action_id or "")
                 if not isinstance(operation, Mapping):
                     raise RuntimeError("Operation is unavailable")

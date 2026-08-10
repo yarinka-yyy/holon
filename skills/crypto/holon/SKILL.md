@@ -1,7 +1,7 @@
 ---
 name: holon
 description: "Use for any Holon, wallet, crypto, transfer, Earn, or Lending request. Covers setup, balances, yield routing, approvals, action status, cancellation, and recovery."
-version: "0.1.0-alpha"
+version: "0.2.0-alpha"
 author: Holon
 license: Apache-2.0
 platforms: [windows]

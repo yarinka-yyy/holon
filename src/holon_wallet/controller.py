@@ -73,6 +73,7 @@ from .lending_view import lending_portfolio_to_map
 from .earn_view import earn_portfolio_to_map, module_earn_presentations
 from .lending_action import prepare_lending_action
 from .model import ProfileSummary, WalletShellState
+from .module_funding import ModuleFundingExecutor
 from .module_view import module_page_to_map
 from .perpdex_action import PerpDexExecutionResult, PerpDexExecutor
 from .public_data import (
@@ -289,6 +290,25 @@ class WalletController(QObject):
                 self._perpdex_adapter = candidate
         except Exception:
             self._perpdex_adapter = None
+        self._funding_adapter = None
+        try:
+            capability = self._module_registry.resolve("holon.perpdex.funding.wallet")
+            descriptor = capability.declaration.descriptor
+            candidate = capability.contribution
+            if (
+                capability.declaration.kind == "protected_action_adapter"
+                and descriptor.get("adapter_version") == "1"
+                and descriptor.get("profile_id") == "hyperliquid-arbitrum-funding-v1"
+                and getattr(candidate, "adapter_version", None) == "1"
+                and getattr(candidate, "profile_id", None)
+                == "hyperliquid-arbitrum-funding-v1"
+            ):
+                configure = getattr(candidate, "configure", None)
+                if callable(configure):
+                    configure(self._repository.paths.data_dir)
+                self._funding_adapter = candidate
+        except Exception:
+            self._funding_adapter = None
         self._perpdex_executor = (
             perpdex_executor
             if perpdex_executor is not None
@@ -325,6 +345,10 @@ class WalletController(QObject):
             self._repository,
             self._history_store,
             policy=transfer_policy,
+        )
+        self._funding_executor = (
+            ModuleFundingExecutor(self._mainnet_executor, self._funding_adapter)
+            if self._funding_adapter is not None else None
         )
         revoke_policy = getattr(
             self._mainnet_executor, "revoke_policy", RevokePolicy.from_environment(),
@@ -388,6 +412,7 @@ class WalletController(QObject):
         self._perpdex_completion: Callable[[dict[str, object]], None] | None = None
         self._perpdex_begin_delivery: Callable[[], bool] | None = None
         self._perpdex_bundle = None
+        self._perpdex_active_adapter = None
         self._perpdex_result: PerpDexExecutionResult | None = None
         self._perpdex_in_progress = False
         self._perpdex_generation = 0
@@ -565,7 +590,7 @@ class WalletController(QObject):
         bundle = self._perpdex_bundle
         if bundle is None:
             return {}
-        return {
+        action = {
             "operationId": bundle.operation_id,
             "actionType": bundle.intent.action_type.value,
             "account": bundle.account,
@@ -578,6 +603,16 @@ class WalletController(QObject):
                 "semantic": dict(phase.semantic),
             } for phase in bundle.phases],
         }
+        prepared = getattr(bundle, "action", None)
+        if prepared is not None:
+            action["funding"] = {
+                "amountAtomic": str(prepared.amount_atomic),
+                "chainId": prepared.chain_id,
+                "maxTotalFeeWei": str(prepared.max_total_fee_wei),
+                "recipient": prepared.recipient,
+                "tokenContract": prepared.token_contract or "",
+            }
+        return action
 
     @Property("QVariantMap", notify=perpDexChanged)
     def perpDexResult(self) -> dict[str, object]:
@@ -1533,16 +1568,25 @@ class WalletController(QObject):
         begin_delivery: Callable[[], bool] | None = None,
     ) -> None:
         active = self._state.active_profile
+        is_l1 = (
+            request.get("capability_id") == "holon.perpdex.action.wallet"
+            and request.get("profile_id") == "hyperliquid-mainnet-v1"
+        )
+        is_funding = (
+            request.get("capability_id") == "holon.perpdex.funding.wallet"
+            and request.get("profile_id") == "hyperliquid-arbitrum-funding-v1"
+        )
+        adapter = self._perpdex_adapter if is_l1 else self._funding_adapter
         if (
             active is None or self._closed or self._flow != "none"
-            or self._perpdex_adapter is None or self._perpdex_executor is None
+            or adapter is None or (is_l1 and self._perpdex_executor is None)
+            or (is_funding and self._funding_executor is None)
             or self._perpdex_external is not None or self._perpdex_bundle is not None
             or self._transfer_flow.pending is not None
             or self._transfer_flow.current is not None
             or self._mainnet_in_progress or self._perpdex_in_progress
             or request.get("module_id") != "holon.perpdex"
-            or request.get("capability_id") != "holon.perpdex.action.wallet"
-            or request.get("profile_id") != "hyperliquid-mainnet-v1"
+            or not (is_l1 or is_funding)
         ):
             completion(self._external_refusal(request, "WALLET_BUSY"))
             return
@@ -1556,13 +1600,20 @@ class WalletController(QObject):
         self._perpdex_external = dict(request)
         self._perpdex_completion = completion
         self._perpdex_begin_delivery = begin_delivery
+        self._perpdex_active_adapter = adapter
         self._perpdex_generation += 1
         generation = self._perpdex_generation
         account = {"address": active.address, "label": active.label}
         self.perpDexChanged.emit()
-        future = self._transfer_executor.submit(
-            self._perpdex_adapter.verify, dict(bundle), account,
-        )
+        if is_funding:
+            future = self._transfer_executor.submit(
+                adapter.prepare, dict(bundle), account, active,
+                self._transfer_preflight_service,
+            )
+        else:
+            future = self._transfer_executor.submit(
+                adapter.verify, dict(bundle), account,
+            )
         future.add_done_callback(
             lambda completed, current=generation: self._perpDexPrepareReady.emit(
                 current, completed,
@@ -1607,7 +1658,7 @@ class WalletController(QObject):
                 return False
             operation_id = str(context.get("action_id", ""))
             try:
-                self._perpdex_adapter.mark_operation(operation_id, "EXPIRED")
+                self._perpdex_active_adapter.mark_operation(operation_id, "EXPIRED")
             except Exception:
                 pass
             self._clear_perpdex_action()
@@ -1918,10 +1969,18 @@ class WalletController(QObject):
     @Slot(str, result=bool)
     def submitPerpDexExecution(self, password: str) -> bool:
         active = self._state.active_profile
+        is_funding = (
+            self._perpdex_external is not None
+            and self._perpdex_external.get("profile_id")
+            == "hyperliquid-arbitrum-funding-v1"
+        )
         if (
             len(password) < MIN_PASSWORD_LENGTH or active is None
             or self._perpdex_bundle is None or self._perpdex_external is None
-            or self._perpdex_executor is None or self._perpdex_in_progress
+            or self._perpdex_active_adapter is None
+            or (is_funding and self._funding_executor is None)
+            or (not is_funding and self._perpdex_executor is None)
+            or self._perpdex_in_progress
             or self._closed or self._current_screen != "perpdex_password"
             or active.address.lower() != self._perpdex_bundle.account.lower()
         ):
@@ -1931,14 +1990,19 @@ class WalletController(QObject):
         self._perpdex_result = None
         self._perpdex_generation += 1
         generation = self._perpdex_generation
-        bundle = self._perpdex_bundle.to_mapping()
+        bundle = self._perpdex_bundle
         account = {"address": active.address, "label": active.label}
         self.perpDexChanged.emit()
         self._set_screen("perpdex_submit")
-        future = self._transfer_executor.submit(
-            self._perpdex_executor.execute,
-            bundle, password, active.profile_id, account,
-        )
+        if is_funding:
+            future = self._transfer_executor.submit(
+                self._funding_executor.execute, bundle, password,
+            )
+        else:
+            future = self._transfer_executor.submit(
+                self._perpdex_executor.execute,
+                bundle.to_mapping(), password, active.profile_id, account,
+            )
         del password
         future.add_done_callback(
             lambda completed, current=generation: self._perpDexExecutionReady.emit(
@@ -1953,7 +2017,7 @@ class WalletController(QObject):
             return
         operation_id = str(self._perpdex_external.get("action_id", ""))
         try:
-            self._perpdex_adapter.mark_operation(operation_id, "REJECTED")
+            self._perpdex_active_adapter.mark_operation(operation_id, "REJECTED")
         except Exception:
             pass
         target = self._perpdex_return_screen
@@ -4090,7 +4154,7 @@ class WalletController(QObject):
             self._perpdex_completion = None
             self._perpdex_external = None
             try:
-                self._perpdex_adapter.mark_operation(
+                self._perpdex_active_adapter.mark_operation(
                     str(context["action_id"]), "FAILED",
                 )
             except Exception:
@@ -4109,7 +4173,7 @@ class WalletController(QObject):
         self._perpdex_bundle = bundle
         self._perpdex_completion = None
         try:
-            self._perpdex_adapter.mark_operation(
+            self._perpdex_active_adapter.mark_operation(
                 bundle.operation_id, "AWAITING_LOCAL_CONFIRMATION",
             )
         except Exception:
@@ -4159,7 +4223,12 @@ class WalletController(QObject):
             )
         self._perpdex_in_progress = False
         self._perpdex_result = result
-        if result.status in {"COMPLETED", "PARTIAL"}:
+        if result.status == "PENDING_CREDIT":
+            self._notify_perpdex(
+                "COMPLETED", result.code, "pending",
+                _perpdex_transaction_hash(result), "pending",
+            )
+        elif result.status in {"COMPLETED", "PARTIAL"}:
             self._notify_perpdex(
                 "COMPLETED", result.code,
                 "confirmed" if result.status == "COMPLETED" else "partial",
@@ -4416,6 +4485,7 @@ class WalletController(QObject):
 
     def _notify_perpdex(
         self, event: str, code: str, outcome: str | None = None,
+        transaction_hash: str | None = None, receipt_state: str = "none",
     ) -> None:
         context = self._perpdex_external
         sender = self._guard_status_sender
@@ -4427,8 +4497,8 @@ class WalletController(QObject):
             "operation_id": context["action_id"],
             "phase_action_id": context["action_id"], "phase": "module_bundle",
             "prepared_digest": context["prepared_digest"], "event": event,
-            "code": code, "outcome": outcome, "transaction_hash": None,
-            "receipt_state": "none",
+            "code": code, "outcome": outcome,
+            "transaction_hash": transaction_hash, "receipt_state": receipt_state,
         }
         self._perpdex_external = None
         self._perpdex_completion = None
@@ -4452,7 +4522,7 @@ class WalletController(QObject):
         ):
             return self._external_refusal(request, "ACTION_MISMATCH")
         try:
-            self._perpdex_adapter.mark_operation(bundle.operation_id, "REJECTED")
+            self._perpdex_active_adapter.mark_operation(bundle.operation_id, "REJECTED")
         except Exception:
             return self._external_refusal(request, "PERPDEX_OPERATION_STATE_INVALID")
         response = {
@@ -4469,7 +4539,7 @@ class WalletController(QObject):
         if self._perpdex_in_progress or self._perpdex_bundle is None:
             return
         try:
-            self._perpdex_adapter.mark_operation(
+            self._perpdex_active_adapter.mark_operation(
                 self._perpdex_bundle.operation_id, "EXPIRED",
             )
         except Exception:
@@ -4486,6 +4556,7 @@ class WalletController(QObject):
         self._perpdex_completion = None
         self._perpdex_begin_delivery = None
         self._perpdex_bundle = None
+        self._perpdex_active_adapter = None
         self._perpdex_in_progress = False
         self._perpdex_return_screen = "main"
         if clear_result:
@@ -5151,6 +5222,17 @@ def _revoke_history_record(action: PreparedRevokeAction) -> WalletHistoryRecord:
 
 def _utc_timestamp(value: datetime) -> str:
     return value.astimezone(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _perpdex_transaction_hash(result: PerpDexExecutionResult) -> str | None:
+    for phase in result.phase_states:
+        value = phase.get("publicId")
+        if (
+            isinstance(value, str) and value.startswith("0x") and len(value) == 66
+            and all(character in "0123456789abcdef" for character in value[2:])
+        ):
+            return value
+    return None
 
 
 def _transfer_error_message(code: TransferPreflightCode) -> str:

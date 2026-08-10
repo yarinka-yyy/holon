@@ -220,6 +220,94 @@ class _ModuleExecutor:
         )
 
 
+class _FundingIntent:
+    action_type = SimpleNamespace(value="FUND_TRADING_ACCOUNT")
+
+    @staticmethod
+    def to_mapping():
+        return {"amount_usdc": "5"}
+
+
+class _FundingPreparedBundle:
+    operation_id = "act-33333333-3333-4333-8333-333333333333"
+    account = "0x" + "11" * 20
+    intent = _FundingIntent()
+    created_at = "2026-08-06T12:00:00.000Z"
+    expires_at = "2099-08-06T12:05:00.000Z"
+    disclosure = "Native USDC only"
+    bundle_digest = "c" * 64
+    phases = (
+        SimpleNamespace(
+            phase_type=SimpleNamespace(value="ARBITRUM_USDC_TRANSFER"),
+            semantic={
+                "amount_usdc": "5", "bridge_address": "0x" + "22" * 20,
+                "chain_id": 42161, "max_total_fee_wei": "100",
+                "token_contract": "0x" + "33" * 20, "usd_atomic": "5000000",
+            },
+        ),
+    )
+    action = SimpleNamespace(
+        amount_atomic=5_000_000, chain_id=42161, max_total_fee_wei=100,
+        recipient="0x" + "22" * 20, token_contract="0x" + "33" * 20,
+    )
+
+
+class _FundingAdapter:
+    def __init__(self) -> None:
+        self.states = []
+        self.calls = 0
+
+    def prepare(self, bundle, account, current, preflight):
+        del bundle, account, current, preflight
+        self.calls += 1
+        return _FundingPreparedBundle()
+
+    def mark_operation(self, operation_id, state):
+        self.states.append((operation_id, state))
+
+
+def test_funding_reaches_wallet_review_then_cancel_without_signing(tmp_path) -> None:
+    now = datetime.now(UTC)
+    _FundingPreparedBundle.created_at = now.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    _FundingPreparedBundle.expires_at = (now + timedelta(minutes=5)).isoformat(
+        timespec="milliseconds",
+    ).replace("+00:00", "Z")
+    item = controller(tmp_path)
+    secret = password()
+    item.beginCreate()
+    assert item.submitPassword(secret, secret) and item.finishBackup()
+    _FundingPreparedBundle.account = item.activeProfile["address"]
+    adapter = _FundingAdapter()
+    item._funding_adapter = adapter
+    item._funding_executor = object()
+    statuses = []
+    item.attach_guard_status_sender(statuses.append)
+    request = {
+        "authority_version": "2", "kind": "prepare_module_action",
+        "flow_id": "11111111-1111-4111-8111-111111111111",
+        "action_id": _FundingPreparedBundle.operation_id,
+        "module_id": "holon.perpdex",
+        "capability_id": "holon.perpdex.funding.wallet",
+        "profile_id": "hyperliquid-arbitrum-funding-v1",
+        "action_type": "FUND_TRADING_ACCOUNT", "bundle": {"bundle": "fixed"},
+        "created_at": _FundingPreparedBundle.created_at,
+        "expires_at": _FundingPreparedBundle.expires_at,
+    }
+    callbacks = []
+    item.prepareExternalModule(request, callbacks.append, lambda: True)
+
+    assert adapter.calls == 1 and item.currentScreen == "perpdex_review"
+    assert item.perpDexAction["funding"]["chainId"] == 42161
+    item.cancelPerpDexAction()
+    assert adapter.states == [
+        (_FundingPreparedBundle.operation_id, "AWAITING_LOCAL_CONFIRMATION"),
+        (_FundingPreparedBundle.operation_id, "REJECTED"),
+    ]
+    assert statuses[0]["event"] == "REJECTED"
+    assert statuses[0]["transaction_hash"] is None
+    assert item._test_mainnet_rpc.send_calls == 0
+
+
 def test_external_perpdex_review_password_and_result_are_one_bundle(tmp_path) -> None:
     now = datetime.now(UTC)
     _ModuleBundle.created_at = now.isoformat(timespec="milliseconds").replace("+00:00", "Z")

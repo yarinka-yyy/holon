@@ -21,10 +21,12 @@ def test_installer_has_fixed_per_user_bilingual_contract() -> None:
     assert "DefaultDirName={localappdata}\\Holon\\installer" in source
     assert "DisableDirPage=yes" in source
     assert "AllowCancelDuringInstall=no" in source
+    assert "UsePreviousLanguage=yes" in source
+    assert "LanguageDetectionMethod=none" in source
     assert 'Name: "english"' in source
     assert 'Name: "russian"' in source
-    assert "Holon-0.1.0-alpha-Setup" in source
-    assert "VersionInfoVersion=0.1.0.0" in source
+    assert "Holon-0.2.0-alpha-Setup" in source
+    assert "VersionInfoVersion=0.2.0.0" in source
     assert "SignTool=" not in source
     assert "InfoBeforeFile={#NOTICE_FILE}" in source
     assert "#error NOTICE_FILE is required" in source

@@ -15,7 +15,7 @@
 #endif
 
 #define ProductName "Holon"
-#define ProductVersion "0.1.0-alpha"
+#define ProductVersion "0.2.0-alpha"
 #define ProductId "{{F690E30A-1C8E-47E1-AF5E-65243A4662CC}"
 
 [Setup]
@@ -41,10 +41,10 @@ InfoBeforeFile={#NOTICE_FILE}
 SetupIconFile={#SETUP_ICON}
 UninstallDisplayIcon={localappdata}\Holon\app\HolonWallet.exe
 OutputDir={#OUTPUT_DIR}
-OutputBaseFilename=Holon-0.1.0-alpha-Setup
-VersionInfoVersion=0.1.0.0
+OutputBaseFilename=Holon-0.2.0-alpha-Setup
+VersionInfoVersion=0.2.0.0
 VersionInfoProductName={#ProductName}
-VersionInfoProductVersion=0.1.0.0
+VersionInfoProductVersion=0.2.0.0
 Compression=lzma2/max
 SolidCompression=yes
 CloseApplications=no
@@ -53,6 +53,7 @@ ChangesEnvironment=no
 AllowCancelDuringInstall=no
 UsePreviousAppDir=no
 UsePreviousLanguage=yes
+LanguageDetectionMethod=none
 Uninstallable=yes
 
 [Languages]

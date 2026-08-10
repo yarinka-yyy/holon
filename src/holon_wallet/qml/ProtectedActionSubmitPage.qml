@@ -2,6 +2,8 @@ import QtQuick
 import "."
 
 TransactionFlowShell {
+    id: root
+    property var action: walletController.perpDexAction
     title: "Submitting Protected Action"
     subtitle: "Do not close Holon Wallet"
     activeStep: 2; backVisible: false
@@ -22,14 +24,17 @@ TransactionFlowShell {
         }
         Text {
             anchors.horizontalCenter: parent.horizontalCenter; y: 158
-            text: "Sequential submit-once execution"
+            text: root.action.actionType === "FUND_TRADING_ACCOUNT"
+                ? "One signed Arbitrum transfer" : "Sequential submit-once execution"
             color: Design.text; font.family: Design.fontFamily
             font.pixelSize: 20; font.weight: Font.DemiBold
         }
         Text {
             x: 30; y: 202; width: 398; horizontalAlignment: Text.AlignHCenter
             wrapMode: Text.Wrap
-            text: "Each phase is rechecked, signed locally, submitted once, and reconciled before the next phase."
+            text: root.action.actionType === "FUND_TRADING_ACCOUNT"
+                ? "The exact native-USDC transfer is rechecked, signed locally, and submitted once. A broadcast is not a Hyperliquid credit."
+                : "Each phase is rechecked, signed locally, submitted once, and reconciled before the next phase."
             color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 12
         }
     }

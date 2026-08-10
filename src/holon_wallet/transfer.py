@@ -22,6 +22,7 @@ from web3.exceptions import BadFunctionCallOutput, ContractLogicError, Web3Excep
 
 from .model import ProfileSummary
 from .public_data import (
+    ARBITRUM_USDC,
     BASE_USDC,
     ETHEREUM_USDC,
     NETWORK_BY_ID,
@@ -32,6 +33,7 @@ TRANSFER_SCHEMA_VERSION = 1
 BASE_CHAIN_ID = 8453
 BASE_NETWORK_ID = "base"
 BASE_NETWORK_LABEL = "Base"
+ARBITRUM_NETWORK_ID = "arbitrum"
 ETHEREUM_CHAIN_ID = 1
 ETHEREUM_NETWORK_ID = "ethereum"
 ETHEREUM_NETWORK_LABEL = "Ethereum"
@@ -86,12 +88,17 @@ def _route(network_id: str, asset_id: str) -> TransferRouteSpec:
 
 TRANSFER_ROUTES = MappingProxyType({
     (network_id, asset_id): _route(network_id, asset_id)
-    for network_id in (ETHEREUM_NETWORK_ID, BASE_NETWORK_ID)
-    for asset_id in (ETH_ASSET_ID, USDC_ASSET_ID)
+    for network_id, asset_id in (
+        (ETHEREUM_NETWORK_ID, ETH_ASSET_ID),
+        (ETHEREUM_NETWORK_ID, USDC_ASSET_ID),
+        (BASE_NETWORK_ID, ETH_ASSET_ID),
+        (BASE_NETWORK_ID, USDC_ASSET_ID),
+        (ARBITRUM_NETWORK_ID, USDC_ASSET_ID),
+    )
 })
 ALLOWLISTED_TOKEN_CONTRACTS = frozenset(
     contract.lower()
-    for contract in (ETHEREUM_USDC, BASE_USDC)
+    for contract in (ETHEREUM_USDC, BASE_USDC, ARBITRUM_USDC)
 )
 
 
