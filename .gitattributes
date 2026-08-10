@@ -2,5 +2,8 @@
 # conversion to them on Windows: their SHA-256 values cover the stored bytes.
 modules/** -text
 
+# The network registry also pins the original bytes of its Wallet icon assets.
+src/holon_wallet/qml/assets/** -text
+
 # The manifest itself is canonical UTF-8 JSON and must retain LF line endings.
 module-manifest.json text eol=lf

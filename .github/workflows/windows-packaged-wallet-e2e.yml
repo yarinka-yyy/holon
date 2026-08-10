@@ -41,13 +41,16 @@ jobs:
       - name: Restore locked build environment
         shell: pwsh
         run: uv sync --locked --extra perpdex --python '${{ steps.python313.outputs.python-path }}'
-      - name: Verify canonical module manifest checkout
+      - name: Verify byte-exact integrity inputs
         shell: pwsh
         run: |
           git config core.autocrlf false
-          git checkout -- modules/perpdex
+          git checkout -- modules/perpdex src/holon_wallet/qml/assets
           $raw = [IO.File]::ReadAllBytes('modules/perpdex/module-manifest.json')
           if ($raw -contains 13) { throw 'Module manifest contains CRLF' }
+          $python = (Resolve-Path -LiteralPath '.venv\Scripts\python.exe').Path
+          & $python -m pytest -q tests/test_network_asset_registry.py::test_official_icon_files_match_pinned_sha256
+          if ($LASTEXITCODE -ne 0) { throw 'Integrity input validation failed' }
       - name: Build Extended binaries and package
         shell: pwsh
         run: |
