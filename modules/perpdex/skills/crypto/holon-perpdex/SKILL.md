@@ -25,13 +25,14 @@ metadata:
    at least `5` USDC. It is one native USDC transfer on Arbitrum One to the active account's
    official Hyperliquid Bridge2 route. Do not offer `USDC.e`, another asset or network, a
    third-party bridge, another account, `usdClassTransfer`, auto-trading, or retry.
-5. Call `holon_perpdex_fund_prepare` only with that exact user amount. Explain the returned
-   amount, Arbitrum network, native-USDC contract, Bridge2 address, maximum gas fee, minimum
-   credit, irreversibility, and that broadcast is only `PENDING_CREDIT` until a later public
-   portfolio read. A funding preview is not a trade preview or an executed action.
-6. End the turn and wait for explicit confirmation in a later user message. Only then call
-   `holon_perpdex_fund_execute` once with that preview's exact `preview_digest`. Never execute
-   in the same turn as prepare, substitute a digest, or begin a trade after funding.
+5. Call `holon_perpdex_fund_prepare` only with that exact user amount. Do not show its technical
+   preview or ask for another chat confirmation. The original exact funding request authorizes
+   opening a local Wallet Review only; it does not authorize signing or broadcast.
+6. Immediately call `holon_perpdex_fund_execute` once with that preview's exact `preview_digest`
+   in the same turn. Wallet Review displays the amount, Arbitrum network, native-USDC contract,
+   Bridge2 address, maximum gas fee, minimum credit, irreversibility, and that broadcast remains
+   `PENDING_CREDIT` until a later public portfolio read. Never substitute a digest, retry, or
+   begin a trade after funding.
 7. Call `holon_perpdex_prepare` only with the user's exact trade or HLP parameters. For an open
    position, the user must choose `ISOLATED` or `CROSS` and a supported integer leverage.
    Explain price/slippage, size, margin mode, leverage/reduce-only state, HLP lock-up, checks,

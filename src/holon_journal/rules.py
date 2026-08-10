@@ -68,7 +68,13 @@ def validate_optional(name: str, value: Any) -> None:
     elif name in {"wallet_address", "recipient", "contract"}:
         if not isinstance(value, str) or ADDRESS_RE.fullmatch(value) is None:
             raise JournalValidationError("Invalid public address")
-    elif name in {"action_type", "network", "asset"}:
+    elif name == "action_type":
+        if (
+            not isinstance(value, str)
+            or (NAME_RE.fullmatch(value) is None and CODE_RE.fullmatch(value) is None)
+        ):
+            raise JournalValidationError("Invalid public action type")
+    elif name in {"network", "asset"}:
         if not isinstance(value, str) or NAME_RE.fullmatch(value) is None:
             raise JournalValidationError("Invalid public name")
     elif name == "amount_atomic" and (

@@ -67,6 +67,24 @@ class JournalStoreTests(unittest.TestCase):
                 journal.emit(EventType.TECHNICAL_ERROR, "SAFE_ERROR")
         self.assertEqual(raised.exception.code, "JOURNAL_WRITE_FAILED")
 
+    def test_canonical_module_action_type_is_journal_safe(self) -> None:
+        event = self.factory.create(
+            EventType.FLOW_STARTED,
+            "AWAITING_LOCAL_CONFIRMATION",
+            action_id="act-11111111-1111-4111-8111-111111111111",
+            flow_id="11111111-1111-4111-8111-111111111111",
+            guard_state="ACTIVE",
+            action_type="FUND_TRADING_ACCOUNT",
+            wallet_address="0x" + "11" * 20,
+        )
+
+        self.store.append(event)
+
+        self.assertEqual(
+            self.store.read_events()[0].public_fields["action_type"],
+            "FUND_TRADING_ACCOUNT",
+        )
+
     def test_unreadable_and_rotation_failures_are_fail_closed(self) -> None:
         with patch.object(Path, "read_bytes", side_effect=OSError("private")):
             with self.assertRaises(JournalInvalid):

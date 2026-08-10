@@ -244,6 +244,9 @@ def test_hermes_perpdex_prepare_then_execute_consumes_preview_once(
         "amount_usdc": "25",
     }, **dispatch_context))
     assert funding["status"] == "PREVIEW_READY"
+    assert funding["confirmation_required"] is False
+    assert "Immediately call holon_perpdex_fund_execute" in funding["next_step"]
+    assert "chat confirmation" in funding["next_step"]
     assert connector.previews[-1] == (
         "holon.perpdex", "holon.perpdex.funding.guard",
         "FUND_TRADING_ACCOUNT", {"amount_usdc": "25"},

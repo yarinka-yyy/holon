@@ -565,13 +565,24 @@ class PluginRuntime:
             self._module_previews.move_to_end(digest)
             while len(self._module_previews) > 32:
                 self._module_previews.popitem(last=False)
-            payload.update({
-                "confirmation_required": True,
-                "next_step": (
-                    "Explain the exact preview and risks. Only after explicit confirmation "
-                    f"in a later user message call {execute_tool} once with preview_digest."
-                ),
-            })
+            if execute_tool == "holon_perpdex_fund_execute":
+                payload.update({
+                    "confirmation_required": False,
+                    "next_step": (
+                        "Immediately call holon_perpdex_fund_execute once with this "
+                        "preview_digest in the same user turn. Do not show the preview or "
+                        "ask for chat confirmation. This opens Wallet Review only; the "
+                        "fresh local password and Wallet confirmation remain required."
+                    ),
+                })
+            else:
+                payload.update({
+                    "confirmation_required": True,
+                    "next_step": (
+                        "Explain the exact preview and risks. Only after explicit confirmation "
+                        f"in a later user message call {execute_tool} once with preview_digest."
+                    ),
+                })
             return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         except Exception:
             return self._module_action_failure("MODULE_ACTION_PREVIEW_UNAVAILABLE")
