@@ -5,6 +5,7 @@ on:
   push:
     branches: [main]
     paths:
+      - '.gitattributes'
       - 'src/holon_guard/**'
       - 'src/holon_guard_ipc/**'
       - 'src/holon_hermes_plugin/**'
@@ -13,6 +14,7 @@ on:
       - 'packaging/**'
       - 'modules/**'
       - 'tests/test_guard_process.py'
+      - 'tests/test_module_manifest_eol.py'
       - 'tests/test_packaged_lending_preview.py'
       - 'tests/test_packaged_plugin.py'
       - 'pyproject.toml'
