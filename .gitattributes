@@ -1,0 +1,2 @@
+# Module manifests are byte-canonical and must not acquire CRLF on Windows.
+module-manifest.json text eol=lf
