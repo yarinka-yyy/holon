@@ -51,7 +51,7 @@ jobs:
       - name: Build Extended binaries and package
         shell: pwsh
         run: |
-          $python = '${{ steps.python313.outputs.python-path }}'
+          $python = (Resolve-Path -LiteralPath '.venv\Scripts\python.exe').Path
           & $python packaging/build_composition.py --destination build/ci-composition --composition-id extended --module-root modules/perpdex
           if ($LASTEXITCODE -ne 0) { throw 'Composition build failed' }
           & packaging/build-guard.ps1 -PythonPath $python -CompositionRoot build/ci-composition
