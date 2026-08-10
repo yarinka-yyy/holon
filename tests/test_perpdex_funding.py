@@ -52,6 +52,18 @@ class Preflight:
         )
 
 
+class SequencedPreflight(Preflight):
+    def __init__(self, *fees: int) -> None:
+        if not fees:
+            raise ValueError("At least one fee is required")
+        super().__init__(fees[0])
+        self._fees = iter(fees)
+
+    def prepare(self, request, current, recipient):
+        self.fee = next(self._fees)
+        return super().prepare(request, current, recipient)
+
+
 def bundle(tmp_path: Path, *, fee: int = 100):
     clock = [time.time()]
     guard = FundingGuardAdapter(Preflight(fee), clock=lambda: clock[0])
@@ -71,7 +83,7 @@ def test_funding_bundle_pins_only_native_usdc_arbitrum_bridge2(tmp_path: Path) -
     assert item.intent.action_type.value == "FUND_TRADING_ACCOUNT"
     assert phase.semantic == {
         "amount_usdc": "5.25", "bridge_address": BRIDGE2_ADDRESS,
-        "chain_id": 42161, "max_total_fee_wei": "100",
+        "chain_id": 42161, "max_total_fee_wei": "125",
         "token_contract": NATIVE_USDC, "usd_atomic": "5250000",
     }
     tampered = item.to_mapping()
@@ -115,9 +127,9 @@ def test_wallet_rechecks_fixed_route_and_fee_before_review(tmp_path: Path) -> No
     with pytest.raises(FundingWalletError) as changed:
         adapter.prepare(
             item.to_mapping(), {"address": ACCOUNT, "label": "Main"}, profile(),
-            Preflight(101),
+            Preflight(126),
         )
-    assert changed.value.code == "FUNDING_LIVE_STATE_CHANGED"
+    assert changed.value.code == "FUNDING_WALLET_FEE_CAP_EXCEEDED"
 
     class WrongRoute(Preflight):
         def prepare(self, request, current, recipient):
@@ -128,7 +140,95 @@ def test_wallet_rechecks_fixed_route_and_fee_before_review(tmp_path: Path) -> No
             item.to_mapping(), {"address": ACCOUNT, "label": "Main"}, profile(),
             WrongRoute(),
         )
-    assert wrong_route.value.code == "FUNDING_LIVE_STATE_CHANGED"
+    assert wrong_route.value.code == "FUNDING_WALLET_ROUTE_CHANGED"
+
+    class WrongAmount(Preflight):
+        def prepare(self, request, current, recipient):
+            return replace(
+                super().prepare(request, current, recipient),
+                amount_atomic=int(request.amount_atomic) + 1,
+            )
+
+    with pytest.raises(FundingWalletError) as wrong_amount:
+        adapter.prepare(
+            item.to_mapping(), {"address": ACCOUNT, "label": "Main"}, profile(),
+            WrongAmount(),
+        )
+    assert wrong_amount.value.code == "FUNDING_AMOUNT_CHANGED"
+
+
+def test_fee_drift_within_ceiling_reaches_wallet_preparation(tmp_path: Path) -> None:
+    preflight = SequencedPreflight(100, 102, 103)
+    guard = FundingGuardAdapter(preflight)
+    guard.configure(tmp_path)
+    account = {"address": ACCOUNT, "label": "Main"}
+
+    preview = guard.preview("FUND_TRADING_ACCOUNT", {"amount_usdc": "6"}, account)
+    bundle = guard.prepare(
+        OPERATION_ID, "FUND_TRADING_ACCOUNT", {"amount_usdc": "6"},
+        account, preview.preview_digest,
+    )
+    adapter = FundingWalletAdapter()
+    adapter.configure(tmp_path)
+    prepared = adapter.prepare(bundle.to_mapping(), account, profile(), preflight)
+
+    assert preview.preview["max_total_fee_wei"] == "125"
+    assert bundle.phases[0].semantic["max_total_fee_wei"] == "125"
+    assert prepared.action.max_total_fee_wei == 103
+
+
+def test_guard_refuses_fee_above_preview_ceiling_before_wallet(tmp_path: Path) -> None:
+    guard = FundingGuardAdapter(SequencedPreflight(100, 126))
+    guard.configure(tmp_path)
+    account = {"address": ACCOUNT, "label": "Main"}
+    preview = guard.preview("FUND_TRADING_ACCOUNT", {"amount_usdc": "6"}, account)
+
+    with pytest.raises(FundingError) as failed:
+        guard.prepare(
+            OPERATION_ID, "FUND_TRADING_ACCOUNT", {"amount_usdc": "6"},
+            account, preview.preview_digest,
+        )
+
+    assert failed.value.code == "FUNDING_GUARD_FEE_CAP_EXCEEDED"
+
+
+def test_guard_binds_preview_to_account_and_amount(tmp_path: Path) -> None:
+    guard = FundingGuardAdapter(Preflight())
+    guard.configure(tmp_path)
+    account = {"address": ACCOUNT, "label": "Main"}
+    preview = guard.preview("FUND_TRADING_ACCOUNT", {"amount_usdc": "6"}, account)
+
+    with pytest.raises(FundingError) as wrong_account:
+        guard.prepare(
+            OPERATION_ID, "FUND_TRADING_ACCOUNT", {"amount_usdc": "6"},
+            {"address": "0x" + "22" * 20, "label": "Other"}, preview.preview_digest,
+        )
+    assert wrong_account.value.code == "FUNDING_ACCOUNT_CHANGED"
+
+    preview = guard.preview("FUND_TRADING_ACCOUNT", {"amount_usdc": "6"}, account)
+    with pytest.raises(FundingError) as wrong_amount:
+        guard.prepare(
+            OPERATION_ID, "FUND_TRADING_ACCOUNT", {"amount_usdc": "6.01"},
+            account, preview.preview_digest,
+        )
+    assert wrong_amount.value.code == "FUNDING_AMOUNT_CHANGED"
+
+
+def test_guard_rechecks_the_fixed_route(tmp_path: Path) -> None:
+    class WrongRoute(Preflight):
+        def prepare(self, request, current, recipient):
+            return replace(super().prepare(request, current, recipient), asset_id="eth")
+
+    guard = FundingGuardAdapter(WrongRoute())
+    guard.configure(tmp_path)
+
+    with pytest.raises(FundingError) as wrong_route:
+        guard.preview(
+            "FUND_TRADING_ACCOUNT", {"amount_usdc": "6"},
+            {"address": ACCOUNT, "label": "Main"},
+        )
+
+    assert wrong_route.value.code == "FUNDING_GUARD_ROUTE_CHANGED"
 
 
 def test_expired_funding_preview_and_invalid_amount_fail_before_wallet_review(tmp_path: Path) -> None:

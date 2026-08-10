@@ -68,4 +68,5 @@ jobs:
           & .\.venv\Scripts\python.exe -m pytest -q `
             tests/test_guard_process.py `
             tests/test_packaged_lending_preview.py::test_packaged_guard_cold_starts_and_reactivates_wallet `
+            tests/test_packaged_lending_preview.py::test_packaged_funding_reaches_review_with_bounded_fee_drift `
             tests/test_packaged_plugin.py

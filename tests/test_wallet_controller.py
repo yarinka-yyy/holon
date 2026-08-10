@@ -241,13 +241,13 @@ class _FundingPreparedBundle:
             phase_type=SimpleNamespace(value="ARBITRUM_USDC_TRANSFER"),
             semantic={
                 "amount_usdc": "5", "bridge_address": "0x" + "22" * 20,
-                "chain_id": 42161, "max_total_fee_wei": "100",
+                "chain_id": 42161, "max_total_fee_wei": "125",
                 "token_contract": "0x" + "33" * 20, "usd_atomic": "5000000",
             },
         ),
     )
     action = SimpleNamespace(
-        amount_atomic=5_000_000, chain_id=42161, max_total_fee_wei=100,
+        amount_atomic=5_000_000, chain_id=42161, max_total_fee_wei=103,
         recipient="0x" + "22" * 20, token_contract="0x" + "33" * 20,
     )
 
@@ -298,6 +298,7 @@ def test_funding_reaches_wallet_review_then_cancel_without_signing(tmp_path) -> 
 
     assert adapter.calls == 1 and item.currentScreen == "perpdex_review"
     assert item.perpDexAction["funding"]["chainId"] == 42161
+    assert item.perpDexAction["funding"]["maxTotalFeeWei"] == "103"
     item.cancelPerpDexAction()
     assert adapter.states == [
         (_FundingPreparedBundle.operation_id, "AWAITING_LOCAL_CONFIRMATION"),

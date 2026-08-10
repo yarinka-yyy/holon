@@ -97,12 +97,15 @@ class FundingWalletAdapter:
             action.network_id != ARBITRUM_NETWORK_ID
             or action.chain_id != ARBITRUM_CHAIN_ID
             or action.asset_id != "usdc" or action.decimals != 6
+            or action.token_contract is None
             or action.token_contract.lower() != NATIVE_USDC.lower()
             or action.recipient.lower() != BRIDGE2_ADDRESS.lower()
-            or action.amount_atomic != int(semantic["usd_atomic"])
-            or action.max_total_fee_wei > int(semantic["max_total_fee_wei"])
         ):
-            raise FundingWalletError("FUNDING_LIVE_STATE_CHANGED")
+            raise FundingWalletError("FUNDING_WALLET_ROUTE_CHANGED")
+        if action.amount_atomic != int(semantic["usd_atomic"]):
+            raise FundingWalletError("FUNDING_AMOUNT_CHANGED")
+        if action.max_total_fee_wei > int(semantic["max_total_fee_wei"]):
+            raise FundingWalletError("FUNDING_WALLET_FEE_CAP_EXCEEDED")
         return FundingPreparedBundle(
             bundle, replace(
                 action, action_type="perpdex_funding", method="bridge2_deposit",

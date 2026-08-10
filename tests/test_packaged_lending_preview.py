@@ -126,6 +126,38 @@ class RpcFixture(BaseHTTPRequestHandler):
         raise AssertionError(f"Unexpected eth_call: {target} {data[:8]}")
 
 
+class FundingRpcFixture(RpcFixture):
+    snapshots = (50, 51, 51)
+    snapshot_index = 0
+
+    @classmethod
+    def reset(cls) -> None:
+        cls.calls = []
+        cls.snapshot_index = 0
+
+    @classmethod
+    def _response(cls, method: str, params: list[object]) -> object:
+        if method == "eth_chainId":
+            return hex(42161)
+        if method == "eth_blockNumber":
+            return hex(300_000_000)
+        if method == "eth_getBlockByNumber":
+            index = min(cls.snapshot_index, len(cls.snapshots) - 1)
+            cls.snapshot_index += 1
+            return {
+                "number": hex(300_000_000 + index),
+                "timestamp": hex(int(time.time()) - 1),
+                "baseFeePerGas": hex(cls.snapshots[index]),
+            }
+        if method == "eth_maxPriorityFeePerGas":
+            return hex(1 if cls.snapshot_index >= 3 else 0)
+        if method == "eth_estimateGas":
+            return hex(1)
+        if method == "eth_sendRawTransaction":
+            return "0x" + "ab" * 32
+        return super()._response(method, params)
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="Packaged Windows executables")
 def test_packaged_wallet_boots_offline_with_public_cache(tmp_path: Path) -> None:
     wallet = Path(os.environ.get("HOLON_TEST_WALLET_EXE", ""))
@@ -335,6 +367,86 @@ def test_packaged_guard_wallet_preview_with_offline_rpc(tmp_path: Path) -> None:
         assert response.payload["execution_available"] is False
         assert "eth_sendRawTransaction" not in RpcFixture.calls
         assert not (paths.data_dir / "action-state.json").exists()
+    finally:
+        subprocess.run(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=10,
+        )
+        process.wait(timeout=10)
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=2)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Packaged Windows executables")
+def test_packaged_funding_reaches_review_with_bounded_fee_drift(tmp_path: Path) -> None:
+    guard = Path(os.environ.get("HOLON_TEST_GUARD_EXE", ""))
+    wallet = Path(os.environ.get("HOLON_TEST_WALLET_EXE", ""))
+    if not guard.is_file() or not wallet.is_file():
+        pytest.skip("Packaged Guard and Wallet paths were not provided")
+    local_root = tmp_path / "funding-local"
+    paths = WalletPaths(local_root / "Holon" / "data")
+    repository = VaultRepository(paths)
+    record = repository.new_record(generate_mnemonic(), "Funding Fixture")
+    repository.create_new("fixture-password", record)
+    SettingsStore(paths).save_active_id(record.summary.profile_id)
+    SnapshotStore(paths.data_dir / "guard-state.json").bootstrap_normal_for_test()
+    ActionStateStore(paths.data_dir / "action-state.json").bootstrap_empty_for_test()
+    RequestStateStore(paths.data_dir / "request-control-state.json").bootstrap_empty_for_test()
+    JournalStore(paths.data_dir / "journal.jsonl").bootstrap_empty_for_test()
+
+    FundingRpcFixture.reset()
+    server = ThreadingHTTPServer(("127.0.0.1", 0), FundingRpcFixture)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    pipe = rf"\\.\pipe\Holon.Guard.packaged-funding.{uuid.uuid4()}"
+    environment = dict(os.environ)
+    environment.update({
+        "LOCALAPPDATA": str(local_root),
+        "HOLON_ARBITRUM_RPC_URL": f"http://127.0.0.1:{server.server_port}",
+        "QT_QPA_PLATFORM": "offscreen",
+    })
+    process = subprocess.Popen(
+        [str(guard.resolve()), "--pipe-name", pipe, "--wallet-path", str(wallet.resolve())],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        env=environment, creationflags=0x08000000,
+    )
+    try:
+        wait_for_pipe(pipe, 20.0)
+        client = PipeClient(pipe, 2.0, 40.0)
+        opened = client.request(MessageKind.OPEN_WALLET, response_timeout=20.0)
+        assert opened.kind is MessageKind.WALLET_OPENED
+        preview = client.request(
+            MessageKind.MODULE_ACTION_INTENT,
+            {
+                "module_id": "holon.perpdex",
+                "capability_id": "holon.perpdex.funding.guard",
+                "action_type": "FUND_TRADING_ACCOUNT",
+                "params": {"amount_usdc": "6"},
+            },
+            response_timeout=40.0,
+        )
+        assert preview.kind is MessageKind.MODULE_ACTION_PREVIEW
+        assert preview.payload["status"] == "PREVIEW_READY"
+        assert preview.payload["preview"]["max_total_fee_wei"] == "125"
+        action_id = "act-" + str(uuid.uuid4())
+        started = client.request(
+            MessageKind.MODULE_AUTHORITY_INTENT,
+            {
+                "module_id": "holon.perpdex",
+                "capability_id": "holon.perpdex.funding.guard",
+                "action_type": "FUND_TRADING_ACCOUNT",
+                "params": {"amount_usdc": "6"},
+                "preview_digest": preview.payload["preview_digest"],
+            },
+            action_id=action_id, owner_pid=os.getpid(), response_timeout=40.0,
+        )
+        assert started.kind is MessageKind.PROTECTED_FLOW_STARTED
+        assert FundingRpcFixture.snapshot_index >= 3
+        cancelled = client.request(MessageKind.CANCEL_ACTION, action_id=action_id)
+        assert cancelled.payload["code"] == "ACTION_CANCELLED"
+        assert "eth_sendRawTransaction" not in FundingRpcFixture.calls
     finally:
         subprocess.run(
             ["taskkill", "/PID", str(process.pid), "/T", "/F"],
