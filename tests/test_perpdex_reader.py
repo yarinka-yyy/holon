@@ -129,6 +129,20 @@ def test_referral_reads_only_referred_by_and_never_volume_history() -> None:
     assert existing["referred_by"] == "SOMEONE"
 
 
+def test_entry_referral_caches_only_positive_immutable_assignment() -> None:
+    existing_transport = FakeInfo(referred_by={"code": "SOMEONE"})
+    existing_reader = HyperliquidReader(existing_transport)
+    assert existing_reader.entry_referral(ACCOUNT)["has_referrer"] is True
+    assert existing_reader.entry_referral(ACCOUNT)["has_referrer"] is True
+    assert [call["type"] for call in existing_transport.calls] == ["referral"]
+
+    absent_transport = FakeInfo(referred_by=None)
+    absent_reader = HyperliquidReader(absent_transport)
+    assert absent_reader.entry_referral(ACCOUNT)["has_referrer"] is False
+    assert absent_reader.entry_referral(ACCOUNT)["has_referrer"] is False
+    assert [call["type"] for call in absent_transport.calls] == ["referral", "referral"]
+
+
 def test_hlp_identity_mismatch_fails_closed() -> None:
     result = HyperliquidReader(FakeInfo(identity="0x" + "00" * 20))(
         "hlp", {"active_account": ACCOUNT},
@@ -192,6 +206,7 @@ def test_public_transport_never_retries_invalid_data_or_more_than_once(
     with pytest.raises(ReaderError, match="Invalid Hyperliquid response") as invalid:
         HttpInfoTransport()({"type": "metaAndAssetCtxs"})
     assert invalid.value.code == "HYPERLIQUID_DATA_INVALID"
+    assert invalid.value.operation_class == "metaAndAssetCtxs"
     assert len(attempts) == 1
 
     attempts.clear()
@@ -204,6 +219,7 @@ def test_public_transport_never_retries_invalid_data_or_more_than_once(
     with pytest.raises(ReaderError, match="public data is unavailable") as exhausted:
         HttpInfoTransport(sleeper=lambda _delay: None)({"type": "metaAndAssetCtxs"})
     assert exhausted.value.code == "HYPERLIQUID_UNAVAILABLE"
+    assert exhausted.value.operation_class == "metaAndAssetCtxs"
     assert len(attempts) == 2
 
 
@@ -233,4 +249,5 @@ def test_test_endpoint_is_loopback_only_and_live_budget_stops_retry(
     with transport.live_check_budget(), pytest.raises(ReaderError) as exhausted:
         transport({"type": "metaAndAssetCtxs"})
     assert exhausted.value.code == "HYPERLIQUID_UNAVAILABLE"
+    assert exhausted.value.operation_class == "metaAndAssetCtxs"
     assert attempts == [8]

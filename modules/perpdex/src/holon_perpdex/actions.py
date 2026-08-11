@@ -27,9 +27,12 @@ MIN_FINAL_ORDER_NOTIONAL_USDC = Decimal("10")
 
 
 class AdapterError(RuntimeError):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(
+        self, code: str, message: str, *, operation_class: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
+        self.operation_class = operation_class
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,12 +179,12 @@ class HyperliquidActionBuilder:
 
     def _markets(self, market: str) -> dict[str, object]:
         try:
-            result = self.reader.markets()
+            selected = self.reader.market(market)
         except ReaderError as exc:
-            raise AdapterError(exc.code, "Hyperliquid market data is unavailable") from exc
-        selected = next((item for item in result["markets"] if item["market"] == market), None)
-        if selected is None:
-            raise AdapterError("PERPDEX_MARKET_UNAVAILABLE", "Selected market is unavailable")
+            raise AdapterError(
+                exc.code, "Hyperliquid market data is unavailable",
+                operation_class=exc.operation_class,
+            ) from exc
         now_ms = int(self.clock() * 1000)
         book_time = selected["book_time_ms"]
         if (
@@ -196,20 +199,29 @@ class HyperliquidActionBuilder:
         try:
             return self.reader.portfolio(account)
         except ReaderError as exc:
-            raise AdapterError(exc.code, "Hyperliquid portfolio is unavailable") from exc
+            raise AdapterError(
+                exc.code, "Hyperliquid portfolio is unavailable",
+                operation_class=exc.operation_class,
+            ) from exc
 
     def _referral(self, account: Mapping[str, str]) -> bool:
         try:
-            result = self.reader.referral(account)
+            result = self.reader.entry_referral(account)
         except ReaderError as exc:
-            raise AdapterError(exc.code, "Hyperliquid referral state is unavailable") from exc
+            raise AdapterError(
+                exc.code, "Hyperliquid referral state is unavailable",
+                operation_class=exc.operation_class,
+            ) from exc
         return not bool(result["has_referrer"])
 
     def _hlp(self, account: Mapping[str, str]) -> dict[str, object]:
         try:
             return self.reader.hlp(account)
         except ReaderError as exc:
-            raise AdapterError(exc.code, "Official HLP state is unavailable") from exc
+            raise AdapterError(
+                exc.code, "Official HLP state is unavailable",
+                operation_class=exc.operation_class,
+            ) from exc
 
     def _order_prices(self, market: Mapping[str, object], buy: bool) -> tuple[Decimal, Decimal]:
         reference = _decimal(market["best_ask"] if buy else market["best_bid"], "BBO")
@@ -268,7 +280,10 @@ class HyperliquidActionBuilder:
         try:
             fees = self.reader.fees(account)
         except ReaderError as exc:
-            raise AdapterError(exc.code, "Hyperliquid fee state is unavailable") from exc
+            raise AdapterError(
+                exc.code, "Hyperliquid fee state is unavailable",
+                operation_class=exc.operation_class,
+            ) from exc
         bounded_notional = size * size_price
         final_order_notional = size * limit
         if final_order_notional < MIN_FINAL_ORDER_NOTIONAL_USDC:

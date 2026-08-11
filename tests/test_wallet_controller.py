@@ -206,6 +206,15 @@ class _ModuleAdapter:
         self.states.append((operation_id, state))
 
 
+class _UnavailableModuleAdapter(_ModuleAdapter):
+    def verify(self, bundle, account):
+        del bundle, account
+        error = RuntimeError("private endpoint detail")
+        error.code = "HYPERLIQUID_UNAVAILABLE"
+        error.operation_class = "frontendOpenOrders"
+        raise error
+
+
 class _ModuleExecutor:
     @staticmethod
     def execute(bundle, password_value, profile_id, account):
@@ -360,6 +369,44 @@ def test_external_perpdex_review_password_and_result_are_one_bundle(tmp_path) ->
     ]
     item.finishPerpDexExecution()
     assert item.currentScreen == "main"
+
+
+def test_external_perpdex_live_failure_returns_only_safe_operation_class(
+    tmp_path,
+) -> None:
+    now = datetime.now(UTC)
+    _ModuleBundle.created_at = now.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    _ModuleBundle.expires_at = (now + timedelta(minutes=5)).isoformat(
+        timespec="milliseconds",
+    ).replace("+00:00", "Z")
+    item = controller(tmp_path)
+    secret = password()
+    item.beginCreate()
+    assert item.submitPassword(secret, secret) and item.finishBackup()
+    _ModuleBundle.account = item.activeProfile["address"]
+    adapter = _UnavailableModuleAdapter()
+    item._perpdex_adapter = adapter
+    item._perpdex_executor = object()
+    callbacks = []
+    request = {
+        "authority_version": "2", "kind": "prepare_module_action",
+        "flow_id": "11111111-1111-4111-8111-111111111111",
+        "action_id": _ModuleBundle.operation_id,
+        "module_id": "holon.perpdex",
+        "capability_id": "holon.perpdex.action.wallet",
+        "profile_id": "hyperliquid-mainnet-v1", "action_type": "OPEN_POSITION",
+        "bundle": _ModuleBundle().to_mapping(),
+        "created_at": _ModuleBundle.created_at, "expires_at": _ModuleBundle.expires_at,
+    }
+    item.prepareExternalModule(request, callbacks.append, lambda: True)
+    assert callbacks == [{
+        "authority_version": "2", "kind": "module_action_refused",
+        "flow_id": request["flow_id"], "action_id": request["action_id"],
+        "code": "HYPERLIQUID_UNAVAILABLE", "stage": "WALLET_LIVE_VERIFY",
+        "operation_class": "frontendOpenOrders",
+    }]
+    assert adapter.states == [(_ModuleBundle.operation_id, "FAILED")]
+    assert "private" not in str(callbacks).lower()
 
 
 class StubPolicyControl:

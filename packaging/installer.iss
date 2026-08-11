@@ -95,6 +95,7 @@ english.HermesRunning=Hermes is still running. Allow Setup to close it, or close
 english.HermesClosePrompt=Hermes is running and must be closed before Holon is installed.%n%nAllow Setup to close only processes running from the selected Hermes installation?
 english.HermesCloseFailed=Setup could not close Hermes. Close its remaining processes in Task Manager and click Install again.
 english.HermesProcessCheckFailed=Setup could not verify whether Hermes is running. No files were changed. Click Install to try again.
+english.HolonGuardCloseFailed=Setup could not close the installed Holon Guard. Close it in Task Manager and click Install again.
 english.InstallFailed=Holon installation failed and previous files were restored. Details: %1
 english.UninstallDataQuestion=Remove local Holon Wallet data too?%n%nChoose No to preserve accounts, encrypted vault data, settings, and history.
 english.UninstallDataConfirm=This permanently removes local Holon Wallet data and cannot be undone. Continue?
@@ -113,6 +114,7 @@ russian.HermesRunning=Hermes всё ещё запущен. Разрешите у
 russian.HermesClosePrompt=Hermes запущен, и перед установкой Holon его необходимо закрыть.%n%nРазрешить установщику закрыть только процессы из выбранной установки Hermes?
 russian.HermesCloseFailed=Установщику не удалось закрыть Hermes. Завершите оставшиеся процессы в диспетчере задач и снова нажмите «Установить».
 russian.HermesProcessCheckFailed=Установщик не смог проверить, запущен ли Hermes. Файлы не изменялись. Нажмите «Установить», чтобы повторить проверку.
+russian.HolonGuardCloseFailed=Установщику не удалось закрыть установленный Holon Guard. Завершите его в диспетчере задач и снова нажмите «Установить».
 russian.InstallFailed=Установка Holon не выполнена; предыдущие файлы восстановлены. Подробности: %1
 russian.UninstallDataQuestion=Удалить также локальные данные Holon Wallet?%n%nВыберите «Нет», чтобы сохранить аккаунты, зашифрованное хранилище, настройки и историю.
 russian.UninstallDataConfirm=Локальные данные Holon Wallet будут удалены без возможности восстановления. Продолжить?
@@ -320,6 +322,74 @@ begin
     Log('Hermes process termination failed: ' + GetExceptionMessage +
       '; checking the selected installation again.');
     Result := CountHermesProcesses(HermesHome) = 0;
+  end;
+end;
+
+function IsInstalledHolonGuard(const ProcessPath: String): Boolean;
+begin
+  Result := CompareText(
+    ProcessPath,
+    ExpandConstant('{localappdata}\Holon\app\HolonGuard.exe')) = 0;
+end;
+
+function CountHolonGuardProcesses: Integer;
+var
+  ProcessItem: Variant;
+  Processes: Variant;
+  ProcessPath: String;
+  Index: Integer;
+begin
+  Result := -1;
+  try
+    Processes := QueryHermesProcesses;
+    Result := 0;
+    for Index := 0 to Integer(Processes.Count) - 1 do
+    begin
+      ProcessItem := Processes.ItemIndex(Index);
+      ProcessPath := String(ProcessItem.ExecutablePath);
+      if IsInstalledHolonGuard(ProcessPath) then
+        Result := Result + 1;
+    end;
+  except
+    Log('Holon Guard process query failed: ' + GetExceptionMessage);
+    Result := -1;
+  end;
+end;
+
+function CloseHolonGuardProcesses: Boolean;
+var
+  ProcessItem: Variant;
+  Processes: Variant;
+  ProcessPath: String;
+  TerminateResult: Variant;
+  Index: Integer;
+begin
+  Result := False;
+  try
+    Processes := QueryHermesProcesses;
+    for Index := 0 to Integer(Processes.Count) - 1 do
+    begin
+      ProcessItem := Processes.ItemIndex(Index);
+      ProcessPath := String(ProcessItem.ExecutablePath);
+      if IsInstalledHolonGuard(ProcessPath) then
+      begin
+        Log('Closing installed Holon Guard process.');
+        try
+          TerminateResult := ProcessItem.Terminate(0);
+          if Integer(TerminateResult) <> 0 then
+            Log('Holon Guard process termination failed with code ' +
+              IntToStr(Integer(TerminateResult)) + '; checking again.');
+        except
+          Log('Holon Guard process disappeared while closing; checking again.');
+        end;
+      end;
+    end;
+    Sleep(500);
+    Result := CountHolonGuardProcesses = 0;
+  except
+    Log('Holon Guard process termination failed: ' + GetExceptionMessage +
+      '; checking again.');
+    Result := CountHolonGuardProcesses = 0;
   end;
 end;
 
@@ -548,6 +618,7 @@ function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   DetectionCode: String;
   Details: String;
+  GuardProcessCount: Integer;
   ProcessCount: Integer;
 begin
   Result := '';
@@ -575,6 +646,17 @@ begin
       Result := CustomMessage('HermesCloseFailed');
       Exit;
     end;
+  end;
+  GuardProcessCount := CountHolonGuardProcesses;
+  if GuardProcessCount < 0 then
+  begin
+    Result := CustomMessage('HermesProcessCheckFailed');
+    Exit;
+  end;
+  if (GuardProcessCount > 0) and not CloseHolonGuardProcesses then
+  begin
+    Result := CustomMessage('HolonGuardCloseFailed');
+    Exit;
   end;
   try
     ExtractTemporaryFiles('{tmp}\HolonPackage\*');

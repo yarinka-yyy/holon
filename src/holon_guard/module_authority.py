@@ -18,21 +18,34 @@ _SAFE_PREPARE_CODES = frozenset({
     "PERPDEX_OPERATION_STATE_UNAVAILABLE", "PERPDEX_OPERATION_STATE_INVALID",
     "WALLET_ACCOUNT_UNAVAILABLE",
 })
+_SAFE_OPERATION_CLASSES = frozenset({
+    "clearinghouseState", "frontendOpenOrders", "l2Book", "metaAndAssetCtxs",
+    "orderStatus", "referral", "userFees", "userFillsByTime",
+    "userNonFundingLedgerUpdates", "userVaultEquities", "vaultDetails",
+})
 
 
-def _prepare_failure(exc: Exception, *, fallback: str) -> tuple[str, str | None]:
+def _prepare_failure(
+    exc: Exception, *, fallback: str,
+) -> tuple[str, str | None, str | None]:
     code = getattr(exc, "code", None)
+    requested = getattr(exc, "operation_class", None)
+    operation_class = requested if requested in _SAFE_OPERATION_CLASSES else None
     if isinstance(code, str) and (
         code in _SAFE_PREPARE_CODES or code.startswith("HYPERLIQUID_")
     ):
         if code == "HYPERLIQUID_UNAVAILABLE":
-            return code, "public_transport"
+            return code, "public_transport", operation_class
         if code.startswith("HYPERLIQUID_"):
-            return code, "public_data"
+            return code, "public_data", operation_class
         if code.startswith("PERPDEX_"):
-            return code, "perpdex_state"
-        return code, "wallet"
-    return fallback, "adapter" if fallback == "MODULE_ADAPTER_UNAVAILABLE" else "internal"
+            return code, "perpdex_state", operation_class
+        return code, "wallet", operation_class
+    return (
+        fallback,
+        "adapter" if fallback == "MODULE_ADAPTER_UNAVAILABLE" else "internal",
+        None,
+    )
 
 
 def _stage_failure_category(code: str) -> str:
@@ -64,6 +77,7 @@ def _fingerprint(request) -> str:
 def _refuse(
     service, request, fingerprint: str, code: str, message: str, *,
     stage: str | None = None, failure_category: str | None = None,
+    operation_class: str | None = None,
 ):
     try:
         service.lifecycle.ledger.refuse(request.action_id or "", fingerprint, code)
@@ -72,9 +86,14 @@ def _refuse(
             return service.fail_closed_response(request, exc.code)
         return service.refusal(request, exc.code, "Module action cannot be prepared.")
     if failure_category is not None:
+        diagnostic = {"failure_category": failure_category}
+        if stage is not None:
+            diagnostic["stage"] = stage
+        if operation_class in _SAFE_OPERATION_CLASSES:
+            diagnostic["operation_class"] = operation_class
         if not service.audit_system(
             EventType.TECHNICAL_ERROR, code, action_id=request.action_id,
-            stage=stage, failure_category=failure_category,
+            **diagnostic,
         ):
             return service.security_response(request)
     return service.refusal(request, code, message, stage=stage)
@@ -93,11 +112,13 @@ def prepare_module_authority(service, request, owner_pid: int):
             str(request.payload["action_type"]),
         )
     except Exception as exc:
-        code, category = _prepare_failure(exc, fallback="MODULE_ADAPTER_UNAVAILABLE")
+        code, category, operation_class = _prepare_failure(
+            exc, fallback="MODULE_ADAPTER_UNAVAILABLE",
+        )
         return _refuse(
             service, request, fingerprint, code,
             "Module action adapter is unavailable.", stage="GUARD_FRESH_PREPARE",
-            failure_category=category,
+            failure_category=category, operation_class=operation_class,
         )
     try:
         wallet = service.lifecycle.wallet.read_public_balances()
@@ -123,11 +144,14 @@ def prepare_module_authority(service, request, owner_pid: int):
             request.payload["params"], account, request.payload["preview_digest"],
         )
     except Exception as exc:
-        code, category = _prepare_failure(exc, fallback="MODULE_ACTION_INTERNAL_FAILURE")
+        code, category, operation_class = _prepare_failure(
+            exc, fallback="MODULE_ACTION_INTERNAL_FAILURE",
+        )
         return _refuse(
             service, request, fingerprint, code,
             "Module action could not be prepared from fresh public state.",
             stage="GUARD_FRESH_PREPARE", failure_category=category,
+            operation_class=operation_class,
         )
     if service.lifecycle.snapshot.state is GuardState.RECOVERY_REQUIRED:
         previous_action_id = service.lifecycle.snapshot.action_id
@@ -161,9 +185,18 @@ def prepare_module_authority(service, request, owner_pid: int):
             adapter.reject(request.action_id or "")
         except Exception:
             pass
+        operation_class = (
+            prepared.get("operation_class") if isinstance(prepared, dict) else None
+        )
+        diagnostic = {
+            "stage": result.stage,
+            "failure_category": _stage_failure_category(result.code),
+        }
+        if operation_class in _SAFE_OPERATION_CLASSES:
+            diagnostic["operation_class"] = operation_class
         if result.stage is not None and not service.audit_system(
             EventType.TECHNICAL_ERROR, result.code, action_id=request.action_id,
-            stage=result.stage, failure_category=_stage_failure_category(result.code),
+            **diagnostic,
         ):
             return service.security_response(request)
         return service._failure(request, result)

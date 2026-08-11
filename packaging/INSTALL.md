@@ -40,10 +40,12 @@ data, settings, and secret-free journals are kept separately under
 `%LOCALAPPDATA%\Holon\data`. Reinstall, upgrade, and ordinary uninstall preserve
 that data by default. Permanent data deletion is a separate twice-confirmed choice.
 
-If Setup cannot find a compatible Hermes installation or cannot safely close the
-selected Hermes processes, it changes no files. Close Hermes manually, verify its
-version, and run Setup again. Do not paste Wallet secrets or diagnostic content
-into chat while troubleshooting.
+If Setup cannot find a compatible Hermes installation, cannot safely close the
+selected Hermes processes, or cannot stop the exact installed `HolonGuard.exe`,
+it changes no files. This prevents an upgrade from leaving an older Guard process
+in memory while replacing its files on disk. Close Hermes and the installed Holon
+runtime manually if prompted, verify the Hermes version, and run Setup again. Do
+not paste Wallet secrets or diagnostic content into chat while troubleshooting.
 
 ## Developer build
 

@@ -70,6 +70,22 @@ $committed = $false
 $installStep = "manifest"
 $installCode = "INSTALL_FILESYSTEM_FAILED"
 $installMessage = ""
+function Test-HolGuardRunning([string]$AppRootPath) {
+    try {
+        $expected = [IO.Path]::GetFullPath((Join-Path $AppRootPath "HolonGuard.exe"))
+        foreach ($process in @(Get-Process -Name "HolonGuard" -ErrorAction SilentlyContinue)) {
+            try {
+                if ([IO.Path]::GetFullPath($process.Path).Equals(
+                    $expected, [StringComparison]::OrdinalIgnoreCase
+                )) { return $true }
+            } catch { continue }
+        }
+    } catch { return $true }
+    return $false
+}
+if (Test-HolGuardRunning $appRoot) {
+    Stop-HolInstall 2 "HOLON_RUNTIME_RUNNING" "Close the installed Holon runtime and run Setup again."
+}
 function Restore-HolPrevious([string]$Current, [string]$Backup, [bool]$Swapped) {
     try {
         if ($Swapped -and (Test-Path -LiteralPath $Current)) {

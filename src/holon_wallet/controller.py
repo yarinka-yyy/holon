@@ -1709,6 +1709,7 @@ class WalletController(QObject):
     @staticmethod
     def _external_refusal(
         request: dict[str, object], code: str, stage: str | None = None,
+        operation_class: str | None = None,
     ) -> dict[str, object]:
         response: dict[str, object] = {
             "authority_version": AUTHORITY_VERSION,
@@ -1722,6 +1723,12 @@ class WalletController(QObject):
         }
         if request.get("kind") == "prepare_module_action" and stage is not None:
             response["stage"] = stage
+            if operation_class in {
+                "clearinghouseState", "frontendOpenOrders", "l2Book",
+                "metaAndAssetCtxs", "referral", "userFees", "vaultDetails",
+                "userVaultEquities",
+            }:
+                response["operation_class"] = operation_class
         return response
 
     @Slot(str, str, str, result=bool)
@@ -4200,6 +4207,7 @@ class WalletController(QObject):
             bundle = future.result()
         except Exception as exc:
             code = str(getattr(exc, "code", "PERPDEX_LIVE_CHECK_FAILED"))
+            operation_class = getattr(exc, "operation_class", None)
             if not code or len(code) > 64:
                 code = "PERPDEX_LIVE_CHECK_FAILED"
             self._perpdex_completion = None
@@ -4210,7 +4218,9 @@ class WalletController(QObject):
                 )
             except Exception:
                 pass
-            completion(self._external_refusal(context, code, "WALLET_LIVE_VERIFY"))
+            completion(self._external_refusal(
+                context, code, "WALLET_LIVE_VERIFY", operation_class,
+            ))
             self.perpDexChanged.emit()
             return
         prepared_digest = hashlib.sha256(json.dumps({

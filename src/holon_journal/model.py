@@ -19,6 +19,7 @@ OPTIONAL_FIELDS = frozenset(
         "wallet_address", "recipient", "asset", "amount_atomic", "policy_version",
         "policy_result", "guard_state", "contract", "selector", "calldata_hash",
         "transaction_hash", "simulated", "stage", "failure_category",
+        "operation_class",
     }
 )
 

@@ -72,6 +72,10 @@ def test_installer_requires_safe_hermes_and_uses_transactional_backend() -> None
     assert "RunDetector(False, False, DetectionCode)" in prepare
     assert "CountHermesProcesses(DetectedHermesHome)" in prepare
     assert "CloseHermesProcesses(DetectedHermesHome)" in prepare
+    assert "CountHolonGuardProcesses" in prepare
+    assert "CloseHolonGuardProcesses" in prepare
+    assert "IsInstalledHolonGuard" in source
+    assert "{localappdata}\\Holon\\app\\HolonGuard.exe" in source
     assert "if ProcessCount > 0 then" in prepare
     assert "if ProcessCount = 0 then" not in prepare
     assert "ExtractTemporaryFiles('{tmp}\\HolonPackage\\*')" in prepare
@@ -106,6 +110,8 @@ def test_installer_requires_safe_hermes_and_uses_transactional_backend() -> None
     assert "$start.WorkingDirectory = $HermesHomePath" in install_backend
     assert '$start.EnvironmentVariables["HERMES_HOME"] = $HermesHomePath' in install_backend
     assert "function Write-HolInstallResult" in install_backend
+    assert "function Test-HolGuardRunning" in install_backend
+    assert 'Stop-HolInstall 2 "HOLON_RUNTIME_RUNNING"' in install_backend
     assert "$OutputPath" in install_backend
 
 

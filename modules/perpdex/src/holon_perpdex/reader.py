@@ -23,15 +23,25 @@ MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 LIVE_CHECK_TIMEOUT_SECONDS = 20.0
 HTTP_ATTEMPT_TIMEOUT_SECONDS = 8.0
 HTTP_RETRY_DELAY_SECONDS = 0.2
+INFO_OPERATION_CLASSES = frozenset({
+    "clearinghouseState", "frontendOpenOrders", "l2Book", "metaAndAssetCtxs",
+    "orderStatus", "referral", "userFees", "userFillsByTime",
+    "userNonFundingLedgerUpdates", "userVaultEquities", "vaultDetails",
+})
 _ADDRESS_RE = re.compile(r"^0x[0-9A-Fa-f]{40}$")
 _NUMBER_RE = re.compile(r"^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$")
 _CLOID_RE = re.compile(r"^0x[0-9a-f]{32}$")
 
 
 class ReaderError(RuntimeError):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(
+        self, code: str, message: str, *, operation_class: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
+        self.operation_class = (
+            operation_class if operation_class in INFO_OPERATION_CLASSES else None
+        )
 
 
 def _observed_at() -> str:
@@ -108,6 +118,11 @@ class HttpInfoTransport:
         return max(0.0, deadline - self._clock())
 
     def __call__(self, payload: Mapping[str, object]) -> object:
+        requested = payload.get("type")
+        operation_class = (
+            requested if isinstance(requested, str) and requested in INFO_OPERATION_CLASSES
+            else None
+        )
         body = json.dumps(
             dict(payload), ensure_ascii=True, separators=(",", ":"), sort_keys=True,
         ).encode("utf-8")
@@ -132,16 +147,26 @@ class HttpInfoTransport:
                 if attempt == 1 or self._remaining() <= HTTP_RETRY_DELAY_SECONDS:
                     raise ReaderError(
                         "HYPERLIQUID_UNAVAILABLE", "Hyperliquid public data is unavailable",
+                        operation_class=operation_class,
                     ) from exc
                 self._sleeper(HTTP_RETRY_DELAY_SECONDS)
         if raw is None:
-            raise ReaderError("HYPERLIQUID_UNAVAILABLE", "Hyperliquid public data is unavailable")
+            raise ReaderError(
+                "HYPERLIQUID_UNAVAILABLE", "Hyperliquid public data is unavailable",
+                operation_class=operation_class,
+            )
         if not raw or len(raw) > MAX_RESPONSE_BYTES:
-            raise ReaderError("HYPERLIQUID_DATA_INVALID", "Invalid Hyperliquid response size")
+            raise ReaderError(
+                "HYPERLIQUID_DATA_INVALID", "Invalid Hyperliquid response size",
+                operation_class=operation_class,
+            )
         try:
             return json.loads(raw.decode("utf-8"), parse_float=str)
         except (UnicodeError, json.JSONDecodeError) as exc:
-            raise ReaderError("HYPERLIQUID_DATA_INVALID", "Invalid Hyperliquid response") from exc
+            raise ReaderError(
+                "HYPERLIQUID_DATA_INVALID", "Invalid Hyperliquid response",
+                operation_class=operation_class,
+            ) from exc
 
 
 def _is_packaged_test_endpoint(value: str) -> bool:
@@ -162,6 +187,7 @@ class HyperliquidReader:
 
     def __init__(self, transport: Callable[[Mapping[str, object]], object] | None = None) -> None:
         self._post = transport or _default_transport()
+        self._known_assigned_referrers: set[str] = set()
 
     @contextmanager
     def live_check_budget(self):
@@ -202,7 +228,9 @@ class HyperliquidReader:
             "status": "UNAVAILABLE",
         }
 
-    def markets(self) -> dict[str, object]:
+    def _market_entries(
+        self,
+    ) -> dict[str, tuple[int, Mapping[str, object], Mapping[str, object]]]:
         response = self._post({"type": "metaAndAssetCtxs"})
         if not isinstance(response, list) or len(response) != 2:
             raise ReaderError("HYPERLIQUID_METADATA_INVALID", "Invalid market metadata")
@@ -223,41 +251,54 @@ class HyperliquidReader:
                 if name in by_name:
                     raise ReaderError("HYPERLIQUID_METADATA_INVALID", "Duplicate market metadata")
                 by_name[name] = (index, asset, context)
-        markets: list[dict[str, object]] = []
-        for market in SUPPORTED_MARKETS:
-            if market not in by_name:
-                raise ReaderError("HYPERLIQUID_METADATA_INVALID", "Supported market is unavailable")
-            index, asset, context = by_name[market]
-            sz_decimals = asset.get("szDecimals")
-            max_leverage = asset.get("maxLeverage")
-            if (
-                type(sz_decimals) is not int or not 0 <= sz_decimals <= 8
-                or type(max_leverage) is not int or max_leverage < 1
-            ):
-                raise ReaderError("HYPERLIQUID_METADATA_INVALID", "Invalid supported market limits")
-            book = self._book(market)
-            bid = Decimal(book["best_bid"])
-            ask = Decimal(book["best_ask"])
-            spread_percent = _format_decimal(
-                ((ask - bid) / ((ask + bid) / Decimal(2)) * Decimal(100)).quantize(
-                    Decimal("0.0001"), rounding=ROUND_HALF_UP,
-                )
+        if any(market not in by_name for market in SUPPORTED_MARKETS):
+            raise ReaderError("HYPERLIQUID_METADATA_INVALID", "Supported market is unavailable")
+        return by_name
+
+    def _market_record(
+        self, market: str,
+        entries: Mapping[str, tuple[int, Mapping[str, object], Mapping[str, object]]],
+    ) -> dict[str, object]:
+        index, asset, context = entries[market]
+        sz_decimals = asset.get("szDecimals")
+        max_leverage = asset.get("maxLeverage")
+        if (
+            type(sz_decimals) is not int or not 0 <= sz_decimals <= 8
+            or type(max_leverage) is not int or max_leverage < 1
+        ):
+            raise ReaderError("HYPERLIQUID_METADATA_INVALID", "Invalid supported market limits")
+        book = self._book(market)
+        bid = Decimal(book["best_bid"])
+        ask = Decimal(book["best_ask"])
+        spread_percent = _format_decimal(
+            ((ask - bid) / ((ask + bid) / Decimal(2)) * Decimal(100)).quantize(
+                Decimal("0.0001"), rounding=ROUND_HALF_UP,
             )
-            markets.append({
-                "asset_index": index,
-                "best_ask": book["best_ask"],
-                "best_bid": book["best_bid"],
-                "book_time_ms": book["book_time_ms"],
-                "funding_rate": _number(context.get("funding"), "funding rate"),
-                "market": market,
-                "mark_price": _number(context.get("markPx"), "mark price", signed=False),
-                "max_exchange_leverage": max_leverage,
-                "open_interest_asset": _number(context.get("openInterest"), "open interest", signed=False),
-                "oracle_price": _number(context.get("oraclePx"), "oracle price", signed=False),
-                "supported": True,
-                "spread_percent": spread_percent,
-                "sz_decimals": sz_decimals,
-            })
+        )
+        return {
+            "asset_index": index,
+            "best_ask": book["best_ask"],
+            "best_bid": book["best_bid"],
+            "book_time_ms": book["book_time_ms"],
+            "funding_rate": _number(context.get("funding"), "funding rate"),
+            "market": market,
+            "mark_price": _number(context.get("markPx"), "mark price", signed=False),
+            "max_exchange_leverage": max_leverage,
+            "open_interest_asset": _number(context.get("openInterest"), "open interest", signed=False),
+            "oracle_price": _number(context.get("oraclePx"), "oracle price", signed=False),
+            "supported": True,
+            "spread_percent": spread_percent,
+            "sz_decimals": sz_decimals,
+        }
+
+    def market(self, market: str) -> dict[str, object]:
+        if market not in SUPPORTED_MARKETS:
+            raise ReaderError("PERPDEX_MARKET_UNAVAILABLE", "Selected market is unavailable")
+        return self._market_record(market, self._market_entries())
+
+    def markets(self) -> dict[str, object]:
+        entries = self._market_entries()
+        markets = [self._market_record(market, entries) for market in SUPPORTED_MARKETS]
         return {
             "code": "PERPDEX_MARKETS_READY",
             "markets": markets,
@@ -422,6 +463,26 @@ class HyperliquidReader:
             "schema_version": READ_SCHEMA_VERSION,
             "status": "READY",
         }
+
+    def entry_referral(self, account: Mapping[str, str]) -> dict[str, object]:
+        """Reuse only a positive immutable referral result for entry checks."""
+        address = account["address"].lower()
+        if address in self._known_assigned_referrers:
+            return {
+                "account": dict(account),
+                "code": "PERPDEX_REFERRAL_READY",
+                "has_referrer": True,
+                "message": "Hyperliquid referral state is available.",
+                "observed_at": _observed_at(),
+                "operation": "referral",
+                "referred_by": "assigned",
+                "schema_version": READ_SCHEMA_VERSION,
+                "status": "READY",
+            }
+        result = self.referral(account)
+        if result["has_referrer"]:
+            self._known_assigned_referrers.add(address)
+        return result
 
     def hlp(self, account: Mapping[str, str]) -> dict[str, object]:
         details = self._post({"type": "vaultDetails", "user": account["address"], "vaultAddress": HLP_ADDRESS})

@@ -25,6 +25,7 @@ from holon_perpdex.persistence import (  # noqa: E402
 )
 from holon_perpdex.profile import HLP_ADDRESS, HLP_NAME  # noqa: E402
 from holon_perpdex.reader import HyperliquidReader  # noqa: E402
+from holon_perpdex.wallet import WalletProtectedActionAdapter  # noqa: E402
 
 ACCOUNT = {"address": "0x" + "12" * 20, "label": "Main"}
 CLOCK = 1_786_000_000.0
@@ -357,6 +358,78 @@ def test_guard_preview_is_single_use_and_operation_state_is_secret_free(tmp_path
     assert state is not None and state["state"] == "PREPARED"
     raw = (tmp_path / "perpdex-operations.json").read_text(encoding="utf-8")
     assert all(token not in raw.casefold() for token in ("password", "private_key", "signature", "signed_payload"))
+
+
+def test_direct_eth_long_5_5_reaches_review_reliably_with_bounded_live_reads(
+    tmp_path: Path,
+) -> None:
+    guard_info = ActionInfo(referred_by={"code": "EXISTING"}, withdrawable="5.97316")
+    wallet_info = ActionInfo(referred_by={"code": "EXISTING"}, withdrawable="5.97316")
+    guard = GuardProtectedActionAdapter(HyperliquidReader(guard_info), clock=lambda: CLOCK)
+    wallet = WalletProtectedActionAdapter(HyperliquidReader(wallet_info), clock=lambda: CLOCK)
+    guard.configure(tmp_path / "guard")
+    params = {
+        "leverage": 2, "margin_mode": "ISOLATED", "market": "ETH",
+        "notional_usdc": "11", "side": "LONG",
+    }
+
+    for _attempt in range(25):
+        preview = guard.preview("OPEN_POSITION", params, ACCOUNT)
+        guard_calls_after_preview = len(guard_info.calls)
+        bundle = guard.prepare(
+            operation_id(), "OPEN_POSITION", params, ACCOUNT,
+            str(preview.preview_digest),
+        )
+        assert len(guard_info.calls) == guard_calls_after_preview
+        verified = wallet.verify(bundle.to_mapping(), ACCOUNT)
+        assert verified == bundle
+        assert bundle.intent.notional_usdc == "11"
+        assert Decimal(bundle.phases[-1].semantic["size_asset"]) * Decimal(
+            bundle.phases[-1].semantic["limit_price"]
+        ) >= Decimal("10")
+
+    all_calls = guard_info.calls + wallet_info.calls
+    books = [call for call in all_calls if call["type"] == "l2Book"]
+    assert len(books) == 50
+    assert {call["coin"] for call in books} == {"ETH"}
+    assert [call["type"] for call in guard_info.calls].count("referral") == 1
+    assert [call["type"] for call in wallet_info.calls].count("referral") == 1
+    assert all(call["type"] != "exchange" for call in all_calls)
+
+
+def test_direct_preview_must_be_consumed_immediately(tmp_path: Path) -> None:
+    now = [CLOCK]
+    adapter = GuardProtectedActionAdapter(
+        HyperliquidReader(ActionInfo(referred_by={"code": "EXISTING"})),
+        clock=lambda: now[0],
+    )
+    adapter.configure(tmp_path)
+    params = {
+        "leverage": 2, "margin_mode": "ISOLATED", "market": "ETH",
+        "notional_usdc": "11", "side": "LONG",
+    }
+    preview = adapter.preview("OPEN_POSITION", params, ACCOUNT)
+    now[0] += 5.001
+    with pytest.raises(AdapterError) as error:
+        adapter.prepare(
+            operation_id(), "OPEN_POSITION", params, ACCOUNT,
+            str(preview.preview_digest),
+        )
+    assert error.value.code == "PERPDEX_PREVIEW_EXPIRED"
+
+
+def test_hlp_prepare_keeps_delayed_guard_fresh_revalidation(tmp_path: Path) -> None:
+    info = ActionInfo(referred_by={"code": "EXISTING"})
+    adapter = GuardProtectedActionAdapter(HyperliquidReader(info), clock=lambda: CLOCK)
+    adapter.configure(tmp_path)
+    params = {"amount_mode": "ALL", "amount_usdc": None}
+    preview = adapter.preview("HLP_WITHDRAW", params, ACCOUNT)
+    calls_after_preview = len(info.calls)
+    adapter.prepare(
+        operation_id(), "HLP_WITHDRAW", params, ACCOUNT,
+        str(preview.preview_digest),
+    )
+    assert len(info.calls) > calls_after_preview
 
 
 def test_order_and_hlp_reconciliation_require_matching_public_evidence(

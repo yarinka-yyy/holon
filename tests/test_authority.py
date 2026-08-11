@@ -341,8 +341,9 @@ class AuthorityTests(unittest.TestCase):
 
     def test_module_fresh_prepare_exposes_only_safe_diagnostic_categories(self) -> None:
         class AdapterError(RuntimeError):
-            def __init__(self, code: str) -> None:
+            def __init__(self, code: str, operation_class: str | None = None) -> None:
                 self.code = code
+                self.operation_class = operation_class
 
         class Adapter:
             def __init__(self, error: Exception) -> None:
@@ -363,7 +364,10 @@ class AuthorityTests(unittest.TestCase):
         )
 
         cases = (
-            (AdapterError("HYPERLIQUID_UNAVAILABLE"), "HYPERLIQUID_UNAVAILABLE", "public_transport"),
+            (
+                AdapterError("HYPERLIQUID_UNAVAILABLE", "l2Book"),
+                "HYPERLIQUID_UNAVAILABLE", "public_transport",
+            ),
             (AdapterError("PERPDEX_NONCE_STATE_INVALID"), "PERPDEX_NONCE_STATE_INVALID", "perpdex_state"),
             (ValueError("private local detail"), "MODULE_ACTION_INTERNAL_FAILURE", "internal"),
         )
@@ -379,6 +383,8 @@ class AuthorityTests(unittest.TestCase):
                 event = self.audit.journal.events()[-1]
                 self.assertEqual(event.event_type, EventType.TECHNICAL_ERROR)
                 self.assertEqual(event.public_fields["failure_category"], category)
+                if code == "HYPERLIQUID_UNAVAILABLE":
+                    self.assertEqual(event.public_fields["operation_class"], "l2Book")
                 self.assertNotIn("private", str(response.to_dict()).lower())
 
     def test_module_account_refusal_has_safe_guard_stage(self) -> None:
@@ -431,7 +437,7 @@ class AuthorityTests(unittest.TestCase):
                 False, "HYPERLIQUID_UNAVAILABLE", GuardState.NORMAL,
                 "Private transport exception", None, "WALLET_LIVE_VERIFY",
             ),
-            None,
+            {"stage": "WALLET_LIVE_VERIFY", "operation_class": "userFees"},
         )
         response = self.service.handle(module_request(new_action_id()), owner_pid=101)
         self.assertEqual(response.kind, MessageKind.ERROR)
@@ -440,6 +446,7 @@ class AuthorityTests(unittest.TestCase):
         event = self.audit.journal.events()[-1]
         self.assertEqual(event.event_type, EventType.TECHNICAL_ERROR)
         self.assertEqual(event.public_fields["failure_category"], "public_transport")
+        self.assertEqual(event.public_fields["operation_class"], "userFees")
         self.assertNotIn("private", str(event.to_dict()).lower())
 
     def test_lending_reads_are_public_and_work_when_signing_disabled(self) -> None:

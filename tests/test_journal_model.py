@@ -65,11 +65,15 @@ class JournalModelTests(unittest.TestCase):
         event = self.factory.create(
             EventType.TECHNICAL_ERROR, "HYPERLIQUID_UNAVAILABLE",
             action_id=ACTION_ID, stage="WALLET_LIVE_VERIFY",
-            failure_category="public_transport",
+            failure_category="public_transport", operation_class="l2Book",
         )
         self.assertEqual(parse_event(event.to_dict()), event)
         self.assertNotIn("url", encode_event(event).decode("utf-8").lower())
         value = event.to_dict()
         value["failure_category"] = "exception-text"
+        with self.assertRaises(JournalValidationError):
+            parse_event(value)
+        value = event.to_dict()
+        value["operation_class"] = "url-with-account"
         with self.assertRaises(JournalValidationError):
             parse_event(value)

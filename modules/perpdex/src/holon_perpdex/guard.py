@@ -7,9 +7,14 @@ from pathlib import Path
 import time
 
 from .actions import AdapterError, BuiltPreview, HyperliquidActionBuilder
-from .contracts import PerpDexActionPreview, ProtectedActionBundle
+from .contracts import (
+    ActionType, ContractError, PerpDexActionIntent, PerpDexActionPreview,
+    ProtectedActionBundle,
+)
 from .persistence import PersistenceError, PerpDexNonceStore, PerpDexOperationStore
 from .reader import HyperliquidReader
+
+DIRECT_REVIEW_MAX_AGE_SECONDS = 5.0
 
 
 class GuardProtectedActionAdapter:
@@ -24,7 +29,7 @@ class GuardProtectedActionAdapter:
         self.clock = clock or time.time
         self._builder = HyperliquidActionBuilder(self.reader, clock=self.clock)
         self._operations: PerpDexOperationStore | None = None
-        self._previews: dict[str, tuple[BuiltPreview, float]] = {}
+        self._previews: dict[str, tuple[BuiltPreview, float, float]] = {}
 
     def configure(self, data_dir: Path) -> None:
         root = Path(data_dir)
@@ -45,11 +50,12 @@ class GuardProtectedActionAdapter:
         built = self._builder.preview(action_type, params, account)
         preview = self._builder.public_preview(built)
         assert preview.preview_digest is not None and preview.expires_at is not None
-        expires = self.clock() + built.intent.review_seconds
+        created = self.clock()
+        expires = created + built.intent.review_seconds
         self._previews = {
             key: value for key, value in self._previews.items() if value[1] > self.clock()
         }
-        self._previews[preview.preview_digest] = (built, expires)
+        self._previews[preview.preview_digest] = (built, expires, created)
         return preview
 
     def prepare(
@@ -61,12 +67,24 @@ class GuardProtectedActionAdapter:
         if cached is None or cached[1] <= self.clock():
             raise AdapterError("PERPDEX_PREVIEW_EXPIRED", "PerpDEX preview expired")
         previous = cached[0]
-        current = self._builder.preview(action_type, params, account)
+        try:
+            requested = PerpDexActionIntent.from_mapping(action_type, params)
+            checked_account = self._builder._account(account)
+        except (ContractError, AdapterError) as exc:
+            raise AdapterError(
+                "PERPDEX_PREVIEW_MISMATCH", "PerpDEX preview does not match the request",
+            ) from exc
         if (
-            previous.intent != current.intent
-            or previous.account["address"] != current.account["address"]
+            previous.intent != requested
+            or previous.account["address"] != checked_account["address"]
         ):
             raise AdapterError("PERPDEX_PREVIEW_MISMATCH", "PerpDEX preview does not match the request")
+        if requested.action_type in {ActionType.OPEN_POSITION, ActionType.CLOSE_POSITION}:
+            if self.clock() - cached[2] > DIRECT_REVIEW_MAX_AGE_SECONDS:
+                raise AdapterError("PERPDEX_PREVIEW_EXPIRED", "PerpDEX preview expired")
+            current = previous
+        else:
+            current = self._builder.preview(action_type, params, checked_account)
         try:
             bundle = self._builder.bundle(operation_id, current)
         except PersistenceError as exc:

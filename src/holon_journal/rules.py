@@ -29,6 +29,11 @@ FAILURE_CATEGORIES = {
     "adapter", "internal", "perpdex_state", "public_data", "public_transport",
     "wallet",
 }
+OPERATION_CLASSES = {
+    "clearinghouseState", "frontendOpenOrders", "l2Book", "metaAndAssetCtxs",
+    "orderStatus", "referral", "userFees", "userFillsByTime",
+    "userNonFundingLedgerUpdates", "userVaultEquities", "vaultDetails",
+}
 
 
 class JournalValidationError(ValueError):
@@ -114,3 +119,7 @@ def validate_optional(name: str, value: Any) -> None:
         not isinstance(value, str) or value not in FAILURE_CATEGORIES
     ):
         raise JournalValidationError("Invalid failure category")
+    elif name == "operation_class" and (
+        not isinstance(value, str) or value not in OPERATION_CLASSES
+    ):
+        raise JournalValidationError("Invalid public operation class")
