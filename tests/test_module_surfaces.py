@@ -7,7 +7,9 @@ import pytest
 
 from holon_contracts import ContractViolation, MessageKind, make_envelope
 from holon_guard.authority import AuthorityService
+from holon_guard_ipc import PipeProtocolError, PipeUnavailable
 from holon_hermes_plugin import plugin
+from holon_hermes_plugin.guard import GuardUnavailableError
 from holon_modules import ModuleLifecycleState, build_composition, load_registry
 
 
@@ -214,6 +216,29 @@ def test_hermes_perpdex_prepare_then_execute_consumes_preview_once(
     assert connector.previews[-1][2:] == ("OPEN_POSITION", {
         "leverage": 2, "market": "ETH", "notional_usdc": "6", "side": "LONG",
     })
+    isolated = json.loads(optional["holon_perpdex_prepare"]["handler"]({
+        "action_type": "OPEN_POSITION", "leverage": 2, "margin_mode": "ISOLATED",
+        "market": "ETH", "notional_usdc": "6", "side": "LONG",
+    }, **dispatch_context))
+    assert isolated["status"] == "PREVIEW_READY"
+    assert connector.previews[-1][2:] == ("OPEN_POSITION", {
+        "leverage": 2, "margin_mode": "ISOLATED", "market": "ETH",
+        "notional_usdc": "6", "side": "LONG",
+    })
+    cross = json.loads(optional["holon_perpdex_prepare"]["handler"]({
+        "action_type": "OPEN_POSITION", "leverage": 50, "margin_mode": "CROSS",
+        "market": "ETH", "notional_usdc": "6", "side": "LONG",
+    }, **dispatch_context))
+    assert cross["status"] == "PREVIEW_READY"
+    assert connector.previews[-1][2:] == ("OPEN_POSITION", {
+        "leverage": 50, "margin_mode": "CROSS", "market": "ETH",
+        "notional_usdc": "6", "side": "LONG",
+    })
+    invalid_open = json.loads(optional["holon_perpdex_prepare"]["handler"]({
+        "action_type": "OPEN_POSITION", "leverage": 2, "margin_mode": "UNIFIED",
+        "market": "ETH", "notional_usdc": "6", "side": "LONG",
+    }, **dispatch_context))
+    assert invalid_open["code"] == "MODULE_ACTION_PREVIEW_INVALID"
     withdrawn = json.loads(optional["holon_perpdex_prepare"]["handler"]({
         "action_type": "HLP_WITHDRAW", "amount_mode": "ALL",
     }, **dispatch_context))
@@ -266,3 +291,34 @@ def test_hermes_perpdex_prepare_then_execute_consumes_preview_once(
     assert connector.executions[-1][1:4] == (
         "holon.perpdex.funding.guard", "FUND_TRADING_ACCOUNT", {"amount_usdc": "25"},
     )
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (GuardUnavailableError("private"), "MODULE_ACTION_PREVIEW_GUARD_UNAVAILABLE"),
+        (PipeUnavailable("private pipe"), "MODULE_ACTION_PREVIEW_GUARD_UNAVAILABLE"),
+        (
+            PipeProtocolError("private timeout", "RESPONSE_TIMEOUT"),
+            "MODULE_ACTION_PREVIEW_RESPONSE_TIMEOUT",
+        ),
+        (PipeProtocolError("private protocol"), "MODULE_ACTION_PREVIEW_IPC_FAILED"),
+        (RuntimeError("private details"), "MODULE_ACTION_PREVIEW_INTERNAL_FAILURE"),
+    ],
+)
+def test_hermes_perpdex_preview_failures_are_specific_and_secret_free(
+    error: Exception, expected: str,
+) -> None:
+    class FailingConnector:
+        def module_action_preview(self, *_args):
+            raise error
+
+    payload = json.loads(plugin.PluginRuntime(FailingConnector()).handle_module_action_prepare(
+        "holon.perpdex", "holon.perpdex.action.guard", {
+            "action_type": "OPEN_POSITION", "leverage": 2, "market": "ETH",
+            "notional_usdc": "12", "side": "LONG",
+        },
+    ))
+    assert payload["code"] == expected
+    for private in ("private", "pipe", "details"):
+        assert private not in json.dumps(payload).lower()

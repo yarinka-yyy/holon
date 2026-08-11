@@ -10,6 +10,7 @@ from holon_hermes_plugin.guard import (
     GuardConnector,
     GuardHealth,
     GuardState,
+    GuardUnavailableError,
     SubprocessGuardLauncher,
 )
 
@@ -111,6 +112,13 @@ class GuardConnectorTests(unittest.TestCase):
         raw = GuardHealth(GuardAvailability.AVAILABLE, GuardState.NORMAL, "PRIVATE_CODE", "private")
         result = GuardConnector(FakeClient(raw), FakeLauncher()).probe()
         self.assertEqual(result, GuardHealth.available(GuardState.NORMAL))
+
+    def test_module_preview_has_a_specific_unavailable_boundary(self) -> None:
+        connector = GuardConnector(FakeClient(GuardHealth.unavailable()), FakeLauncher())
+        with self.assertRaises(GuardUnavailableError):
+            connector.module_action_preview(
+                "holon.perpdex", "holon.perpdex.action.guard", "OPEN_POSITION", {},
+            )
 
     def test_open_wallet_allows_guard_startup_window(self) -> None:
         client = RecordingPipeClient()

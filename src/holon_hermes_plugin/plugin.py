@@ -476,7 +476,10 @@ class PluginRuntime:
         required, allowed = {
             "OPEN_POSITION": (
                 {"action_type", "leverage", "market", "notional_usdc", "side"},
-                {"action_type", "leverage", "market", "notional_usdc", "side"},
+                {
+                    "action_type", "leverage", "margin_mode", "market",
+                    "notional_usdc", "side",
+                },
             ),
             "CLOSE_POSITION": (
                 {"action_type", "amount_mode", "market"},
@@ -502,13 +505,16 @@ class PluginRuntime:
                 values["market"] not in {"BTC", "ETH", "SOL"}
                 or values["side"] not in {"LONG", "SHORT"}
                 or type(values["leverage"]) is not int
-                or not 1 <= values["leverage"] <= 3
+                or values["leverage"] < 1
+                or values.get("margin_mode") not in {None, "CROSS", "ISOLATED"}
                 or not isinstance(values["notional_usdc"], str)
             ):
                 raise ValueError("Invalid open parameters")
             params = {key: values[key] for key in (
                 "leverage", "market", "notional_usdc", "side",
             )}
+            if "margin_mode" in values:
+                params["margin_mode"] = values["margin_mode"]
         elif action_type == "CLOSE_POSITION":
             percent = values.get("percent")
             if (
@@ -580,6 +586,9 @@ class PluginRuntime:
     ) -> str:
         try:
             action_type, semantic = self._module_action_params(values)
+        except ValueError:
+            return self._module_action_failure("MODULE_ACTION_PREVIEW_INVALID")
+        try:
             response = self._connector.module_action_preview(
                 module_id, capability_id, action_type, semantic,
             )
@@ -620,14 +629,36 @@ class PluginRuntime:
                     ),
                 })
             return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        except GuardUnavailableError:
+            return self._module_action_failure("MODULE_ACTION_PREVIEW_GUARD_UNAVAILABLE")
+        except PipeUnavailable:
+            return self._module_action_failure("MODULE_ACTION_PREVIEW_GUARD_UNAVAILABLE")
+        except PipeProtocolError as error:
+            code = (
+                "MODULE_ACTION_PREVIEW_RESPONSE_TIMEOUT"
+                if error.code == "RESPONSE_TIMEOUT"
+                else "MODULE_ACTION_PREVIEW_IPC_FAILED"
+            )
+            return self._module_action_failure(code)
+        except (AttributeError, KeyError, TypeError, ValueError):
+            return self._module_action_failure("MODULE_ACTION_PREVIEW_RESPONSE_INVALID")
         except Exception:
-            return self._module_action_failure("MODULE_ACTION_PREVIEW_UNAVAILABLE")
+            return self._module_action_failure("MODULE_ACTION_PREVIEW_INTERNAL_FAILURE")
 
     @staticmethod
     def _module_action_failure(code: str, action_id: str | None = None) -> str:
+        messages = {
+            "MODULE_ACTION_PREVIEW_INVALID": "Protected action parameters are invalid.",
+            "MODULE_ACTION_PREVIEW_GUARD_UNAVAILABLE": "Local Guard is unavailable.",
+            "MODULE_ACTION_PREVIEW_RESPONSE_TIMEOUT": "Local Guard did not respond in time.",
+            "MODULE_ACTION_PREVIEW_IPC_FAILED": "Local Guard response could not be verified.",
+            "MODULE_ACTION_PREVIEW_RESPONSE_INVALID": "Local Guard returned an invalid preview.",
+            "MODULE_ACTION_PREVIEW_INTERNAL_FAILURE": "Protected action preview could not be created.",
+        }
         value: dict[str, object] = {
             "status": "UNAVAILABLE", "authority_available": False,
-            "code": code, "message": "Protected module action is unavailable.",
+            "code": code,
+            "message": messages.get(code, "Protected module action is unavailable."),
         }
         if action_id is not None:
             value["action_id"] = action_id

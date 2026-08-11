@@ -230,7 +230,7 @@ class GuardConnector:
     ) -> ContractEnvelope:
         health = self.ensure_available()
         if health.availability is not GuardAvailability.AVAILABLE:
-            raise RuntimeError("Guard is unavailable")
+            raise GuardUnavailableError()
         return self._client.module_action_preview(
             module_id, capability_id, action_type, params,
         )
