@@ -397,7 +397,7 @@ def test_direct_eth_long_5_5_reaches_review_reliably_with_bounded_live_reads(
     assert all(call["type"] != "exchange" for call in all_calls)
 
 
-def test_direct_preview_must_be_consumed_immediately(tmp_path: Path) -> None:
+def test_direct_preview_allows_bounded_packaged_wallet_startup(tmp_path: Path) -> None:
     now = [CLOCK]
     adapter = GuardProtectedActionAdapter(
         HyperliquidReader(ActionInfo(referred_by={"code": "EXISTING"})),
@@ -409,9 +409,23 @@ def test_direct_preview_must_be_consumed_immediately(tmp_path: Path) -> None:
         "notional_usdc": "11", "side": "LONG",
     }
     preview = adapter.preview("OPEN_POSITION", params, ACCOUNT)
-    now[0] += 5.001
+    now[0] += 20.0
+    bundle = adapter.prepare(
+        operation_id(), "OPEN_POSITION", params, ACCOUNT,
+        str(preview.preview_digest),
+    )
+    assert bundle.intent.notional_usdc == "11"
+
+    expired_now = [CLOCK]
+    expired = GuardProtectedActionAdapter(
+        HyperliquidReader(ActionInfo(referred_by={"code": "EXISTING"})),
+        clock=lambda: expired_now[0],
+    )
+    expired.configure(tmp_path / "expired")
+    preview = expired.preview("OPEN_POSITION", params, ACCOUNT)
+    expired_now[0] += 30.001
     with pytest.raises(AdapterError) as error:
-        adapter.prepare(
+        expired.prepare(
             operation_id(), "OPEN_POSITION", params, ACCOUNT,
             str(preview.preview_digest),
         )

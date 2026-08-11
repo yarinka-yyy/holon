@@ -192,7 +192,11 @@ def test_wallet_runtime_policy_uses_packaged_file_and_source_baseline(
 
 @pytest.fixture(scope="module")
 def qt_app() -> QGuiApplication:
-    return QGuiApplication.instance() or QGuiApplication([])
+    app = QGuiApplication.instance() or QGuiApplication([])
+    previous = app.quitOnLastWindowClosed()
+    app.setQuitOnLastWindowClosed(False)
+    yield app
+    app.setQuitOnLastWindowClosed(previous)
 
 
 @pytest.fixture

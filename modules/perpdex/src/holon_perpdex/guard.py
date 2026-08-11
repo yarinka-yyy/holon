@@ -14,7 +14,7 @@ from .contracts import (
 from .persistence import PersistenceError, PerpDexNonceStore, PerpDexOperationStore
 from .reader import HyperliquidReader
 
-DIRECT_REVIEW_MAX_AGE_SECONDS = 5.0
+DIRECT_REVIEW_MAX_AGE_SECONDS = 30.0
 
 
 class GuardProtectedActionAdapter:

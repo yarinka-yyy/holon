@@ -22,6 +22,7 @@ from holon_wallet_control import (
 
 WALLET_INITIALIZATION_FAILED_EXIT_CODE = 20
 WALLET_INSTANCE_UNREACHABLE_EXIT_CODE = 21
+WALLET_READINESS_TIMEOUT = 20.0
 WALLET_OPEN_FAILURE_MESSAGES = {
     "WALLET_EXECUTABLE_MISSING": "Wallet executable is missing.",
     "WALLET_START_FAILED": "Wallet could not be started.",
@@ -192,7 +193,7 @@ class VerifiedWalletController(UnavailableWalletController):
         wallet_path: Path,
         control: WalletControlClient | None = None,
         process_factory: Callable[..., WalletHandle] = subprocess.Popen,
-        readiness_timeout: float = 10.0,
+        readiness_timeout: float = WALLET_READINESS_TIMEOUT,
         activation_timeout: float = 0.15,
         public_control: WalletPublicClient | None = None,
         public_response_timeout: float = 22.0,
@@ -314,8 +315,9 @@ class VerifiedWalletController(UnavailableWalletController):
             if not self._wallet_path.is_file():
                 return WalletPreparedResult(False, "WALLET_UNAVAILABLE", None, None)
             creationflags = 0x08000000 if sys.platform == "win32" else 0
+            spawned: WalletHandle | None = None
             try:
-                self._process_factory(
+                spawned = self._process_factory(
                     [str(self._wallet_path)], shell=False, close_fds=True,
                     creationflags=creationflags,
                 )
@@ -327,6 +329,17 @@ class VerifiedWalletController(UnavailableWalletController):
                 return WalletPreparedResult(
                     False, "WALLET_PREPARATION_AMBIGUOUS", None, None,
                 )
+            except ControlUnavailable:
+                exit_code = self._safe_exit_code(spawned)
+                if exit_code in {0, WALLET_INSTANCE_UNREACHABLE_EXIT_CODE}:
+                    code = "WALLET_INSTANCE_UNREACHABLE"
+                elif exit_code == WALLET_INITIALIZATION_FAILED_EXIT_CODE:
+                    code = "WALLET_INITIALIZATION_FAILED"
+                elif exit_code is not None:
+                    code = "WALLET_EXITED"
+                else:
+                    code = "WALLET_STARTUP_TIMEOUT"
+                return WalletPreparedResult(False, code, None, None)
             except Exception:
                 return WalletPreparedResult(False, "WALLET_UNAVAILABLE", None, None)
         except ControlProtocolError:

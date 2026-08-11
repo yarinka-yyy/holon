@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import os
 import subprocess
@@ -22,7 +23,8 @@ from holon_guard.request_store import RequestStateStore
 from holon_guard.store import SnapshotStore
 from holon_journal import JournalStore
 from holon_lending import AAVE_CONTRACTS, BASE_USDC
-from holon_wallet_control import WalletControlClient
+from holon_wallet_control import ControlProtocolError, ControlUnavailable, WalletControlClient
+from holon_wallet_control.protocol import _process_image, _same_path
 from holon_wallet_control.lending_operation import LendingOperationStore
 from holon_wallet.settings import SettingsStore
 from holon_wallet.prices import AssetPrice, PriceSnapshot, PriceStatus
@@ -335,8 +337,72 @@ def _terminate_test_tree(process: subprocess.Popen[object]) -> None:
         check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
     )
     if terminated.returncode != 0:
-        raise RuntimeError("Test process tree could not be terminated")
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError("Test process tree could not be terminated") from exc
+        return
     process.wait(timeout=10)
+
+
+def _verified_test_wallet_pid(wallet: Path, timeout: float) -> int | None:
+    try:
+        return WalletControlClient().activate(
+            str(uuid.uuid4()), wallet.resolve(), timeout,
+        )
+    except ControlUnavailable:
+        return None
+    except ControlProtocolError as exc:
+        raise RuntimeError("Packaged Wallet E2E environment is contaminated") from exc
+
+
+def _test_wallet_process_ids(wallet: Path) -> list[int]:
+    listing = subprocess.run(
+        ["tasklist", "/FI", "IMAGENAME eq HolonWallet.exe", "/FO", "CSV", "/NH"],
+        check=False, capture_output=True, text=True, timeout=10,
+    )
+    if listing.returncode != 0:
+        raise RuntimeError("Packaged Wallet E2E could not inspect Wallet processes")
+    matches: list[int] = []
+    for row in csv.reader(listing.stdout.splitlines()):
+        if len(row) < 2 or row[0].casefold() != "holonwallet.exe":
+            continue
+        try:
+            pid = int(row[1].replace(",", ""))
+            image = _process_image(pid)
+        except (ControlProtocolError, ValueError) as exc:
+            raise RuntimeError(
+                "Packaged Wallet E2E could not verify a Wallet process",
+            ) from exc
+        if _same_path(image, wallet):
+            matches.append(pid)
+    return matches
+
+
+def _assert_test_wallet_absent(wallet: Path) -> None:
+    if _test_wallet_process_ids(wallet) or _verified_test_wallet_pid(wallet, 0.1) is not None:
+        raise RuntimeError("Packaged Wallet E2E found a pre-existing test Wallet")
+
+
+def _cleanup_test_wallet(wallet: Path) -> None:
+    pid = _verified_test_wallet_pid(wallet, 0.5)
+    pids = set(_test_wallet_process_ids(wallet))
+    if pid is not None:
+        pids.add(pid)
+    for process_id in pids:
+        subprocess.run(
+            ["taskkill", "/PID", str(process_id), "/T", "/F"],
+            check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
+        )
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline:
+        if (
+            _verified_test_wallet_pid(wallet, 0.1) is None
+            and not _test_wallet_process_ids(wallet)
+        ):
+            return
+        time.sleep(0.05)
+    raise RuntimeError("Packaged Wallet E2E left a test Wallet running")
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Packaged Windows executables")
@@ -347,6 +413,7 @@ def test_packaged_guard_cold_starts_and_reactivates_wallet(tmp_path: Path) -> No
     wallet = Path(os.environ.get("HOLON_TEST_WALLET_EXE", ""))
     if not guard.is_file() or not wallet.is_file():
         pytest.skip("Packaged Guard and Wallet paths were not provided")
+    _assert_test_wallet_absent(wallet)
 
     local_root = tmp_path / "cold-start-local"
     paths = WalletPaths(local_root / "Holon" / "data")
@@ -385,16 +452,16 @@ def test_packaged_guard_cold_starts_and_reactivates_wallet(tmp_path: Path) -> No
     try:
         wait_for_pipe(first_pipe, 20.0)
         started_at = time.monotonic()
-        opened = PipeClient(first_pipe, 2.0, 20.0).request(MessageKind.OPEN_WALLET)
-        assert time.monotonic() - started_at < 16.0
-        assert opened.kind is MessageKind.WALLET_OPENED
+        opened = PipeClient(first_pipe, 2.0, 30.0).request(MessageKind.OPEN_WALLET)
+        assert time.monotonic() - started_at < 26.0
+        assert opened.kind is MessageKind.WALLET_OPENED, opened.payload
         assert opened.payload["wallet_state"] == "OPENED"
         assert opened.payload["code"] == "WALLET_OPENED"
         wallet_pid = WalletControlClient().activate(
             str(uuid.uuid4()), wallet.resolve(), 2.0,
         )
-        activated = PipeClient(first_pipe, 2.0, 20.0).request(MessageKind.OPEN_WALLET)
-        assert activated.kind is MessageKind.WALLET_OPENED
+        activated = PipeClient(first_pipe, 2.0, 30.0).request(MessageKind.OPEN_WALLET)
+        assert activated.kind is MessageKind.WALLET_OPENED, activated.payload
         assert activated.payload["wallet_state"] == "ACTIVATED"
         assert activated.payload["code"] == "WALLET_ACTIVATED"
         assert WalletControlClient().activate(
@@ -411,15 +478,12 @@ def test_packaged_guard_cold_starts_and_reactivates_wallet(tmp_path: Path) -> No
         health = PipeClient(third_pipe, 2.0, 2.0).request(MessageKind.HEALTH_REQUEST)
         assert health.payload["guard_state"] in {"NORMAL", "SIGNING_DISABLED"}
     finally:
-        for process in (third, second, first):
-            if process is not None:
-                _terminate_test_tree(process)
-        if wallet_pid is not None:
-            subprocess.run(
-                ["taskkill", "/PID", str(wallet_pid), "/T", "/F"],
-                check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                timeout=10,
-            )
+        try:
+            for process in (third, second, first):
+                if process is not None:
+                    _terminate_test_tree(process)
+        finally:
+            _cleanup_test_wallet(wallet)
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Packaged Windows executables")
@@ -497,6 +561,7 @@ def test_packaged_funding_reaches_review_with_bounded_fee_drift(tmp_path: Path) 
     wallet = Path(os.environ.get("HOLON_TEST_WALLET_EXE", ""))
     if not guard.is_file() or not wallet.is_file():
         pytest.skip("Packaged Guard and Wallet paths were not provided")
+    _assert_test_wallet_absent(wallet)
     local_root = tmp_path / "funding-local"
     paths = WalletPaths(local_root / "Holon" / "data")
     repository = VaultRepository(paths)
@@ -537,8 +602,8 @@ def test_packaged_funding_reaches_review_with_bounded_fee_drift(tmp_path: Path) 
     try:
         wait_for_pipe(pipe, 20.0)
         client = PipeClient(pipe, 2.0, 40.0)
-        opened = client.request(MessageKind.OPEN_WALLET, response_timeout=20.0)
-        assert opened.kind is MessageKind.WALLET_OPENED
+        opened = client.request(MessageKind.OPEN_WALLET, response_timeout=30.0)
+        assert opened.kind is MessageKind.WALLET_OPENED, opened.payload
         preview = client.request(
             MessageKind.MODULE_ACTION_INTENT,
             {
@@ -570,15 +635,15 @@ def test_packaged_funding_reaches_review_with_bounded_fee_drift(tmp_path: Path) 
         assert cancelled.payload["code"] == "ACTION_CANCELLED"
         assert "eth_sendRawTransaction" not in FundingRpcFixture.calls
     finally:
-        subprocess.run(
-            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-            check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            timeout=10,
-        )
-        process.wait(timeout=10)
-        server.shutdown()
-        server.server_close()
-        server_thread.join(timeout=2)
+        try:
+            try:
+                _terminate_test_tree(process)
+            finally:
+                _cleanup_test_wallet(wallet)
+        finally:
+            server.shutdown()
+            server.server_close()
+            server_thread.join(timeout=2)
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Packaged Windows executables")
@@ -590,6 +655,7 @@ def test_packaged_direct_position_review_uses_fake_public_info_and_cancels(
     plugin = Path(os.environ.get("HOLON_TEST_PLUGIN_ROOT", ""))
     if not guard.is_file() or not wallet.is_file() or not (plugin / "plugin.py").is_file():
         pytest.skip("Packaged Guard, Wallet, and Hermes plugin paths were not provided")
+    _assert_test_wallet_absent(wallet)
     local_root = tmp_path / "direct-position-local"
     paths = WalletPaths(local_root / "Holon" / "data")
     repository = VaultRepository(paths)
@@ -630,7 +696,12 @@ def test_packaged_direct_position_review_uses_fake_public_info_and_cancels(
             check=True, capture_output=True, text=True, timeout=70, env=environment,
         )
         started = json.loads(response.stdout)
-        assert started["status"] == "AWAITING_LOCAL_CONFIRMATION"
+        safe_failure = {
+            key: started.get(key) for key in (
+                "action_id", "code", "failure_category", "operation_class", "stage", "status",
+            ) if key in started
+        }
+        assert started["status"] == "AWAITING_LOCAL_CONFIRMATION", safe_failure
         assert started["action_type"] == "OPEN_POSITION"
         assert "preview_digest" not in started
         action_id = started["action_id"]
@@ -643,15 +714,15 @@ def test_packaged_direct_position_review_uses_fake_public_info_and_cancels(
         )
         assert "exchange" not in HyperliquidInfoFixture.calls
     finally:
-        subprocess.run(
-            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-            check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            timeout=10,
-        )
-        process.wait(timeout=10)
-        server.shutdown()
-        server.server_close()
-        server_thread.join(timeout=2)
+        try:
+            try:
+                _terminate_test_tree(process)
+            finally:
+                _cleanup_test_wallet(wallet)
+        finally:
+            server.shutdown()
+            server.server_close()
+            server_thread.join(timeout=2)
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Packaged Windows executables")

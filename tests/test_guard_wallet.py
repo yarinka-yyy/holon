@@ -7,7 +7,11 @@ from argparse import Namespace
 from pathlib import Path
 from unittest.mock import patch
 
-from holon_guard.wallet import SubprocessWalletController, VerifiedWalletController
+from holon_guard.wallet import (
+    WALLET_READINESS_TIMEOUT,
+    SubprocessWalletController,
+    VerifiedWalletController,
+)
 from holon_guard.__main__ import _wallet_controller
 from holon_wallet_control import AUTHORITY_VERSION, ControlProtocolError, ControlUnavailable
 
@@ -255,6 +259,29 @@ class GuardWalletTests(unittest.TestCase):
                     if expected_code == "WALLET_EXITED":
                         self.assertIn("exit code 7", result.message)
 
+    def test_default_readiness_timeout_is_twenty_seconds(self) -> None:
+        class Control:
+            def __init__(self) -> None:
+                self.timeouts: list[float] = []
+
+            def activate(self, _launch_id: str, _expected: Path, timeout: float) -> int:
+                self.timeouts.append(timeout)
+                if len(self.timeouts) == 1:
+                    raise ControlUnavailable("not ready")
+                return 202
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "HolonWallet.exe"
+            path.write_bytes(b"fixture")
+            control = Control()
+            result = VerifiedWalletController(
+                path, control, lambda *_args, **_kwargs: FakeProcess(),
+            ).open_public()
+
+        self.assertTrue(result.ok)
+        self.assertEqual(control.timeouts, [0.15, WALLET_READINESS_TIMEOUT])
+        self.assertEqual(WALLET_READINESS_TIMEOUT, 20.0)
+
     def test_process_verification_code_is_preserved_without_private_detail(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "HolonWallet.exe"
@@ -414,6 +441,40 @@ class GuardWalletTests(unittest.TestCase):
         self.assertFalse(failed.ok)
         self.assertEqual(failed.code, "WALLET_PREPARATION_AMBIGUOUS")
         self.assertEqual(untouched, [])
+
+    def test_prepare_transfer_preserves_post_spawn_startup_timeout(self) -> None:
+        request = self.authority_request()
+
+        class Authority:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.timeouts: list[float] = []
+
+            def exchange(
+                self, _request: dict[str, object], _expected: Path,
+                readiness_timeout: float, _response_timeout: float,
+            ) -> dict[str, object]:
+                self.calls += 1
+                self.timeouts.append(readiness_timeout)
+                raise ControlUnavailable("private pipe detail")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "HolonWallet.exe"
+            path.write_bytes(b"fixture")
+            authority = Authority()
+            spawned: list[FakeProcess] = []
+            result = VerifiedWalletController(
+                path,
+                process_factory=lambda *_args, **_kwargs: spawned.append(FakeProcess()) or spawned[-1],
+                authority_control=authority,  # type: ignore[arg-type]
+            ).prepare_transfer(request)
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.code, "WALLET_STARTUP_TIMEOUT")
+        self.assertIsNone(result.payload)
+        self.assertEqual(authority.calls, 2)
+        self.assertEqual(authority.timeouts, [0.15, WALLET_READINESS_TIMEOUT])
+        self.assertEqual(len(spawned), 1)
 
 
 if __name__ == "__main__":

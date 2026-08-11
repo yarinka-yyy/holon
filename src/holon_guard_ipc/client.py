@@ -28,7 +28,7 @@ class PipeProtocolError(RuntimeError):
         self.code = code
 
 
-WALLET_OPEN_RESPONSE_TIMEOUT = 15.0
+WALLET_OPEN_RESPONSE_TIMEOUT = 25.0
 
 
 def wait_for_pipe(pipe_name: str, timeout: float) -> None:
@@ -111,7 +111,7 @@ class PipeGuardClient:
             return GuardHealth.uncertain()
 
     def open_wallet(self) -> ContractEnvelope:
-        # Guard may wait up to ten seconds for a newly spawned Wallet control pipe.
+        # Guard may wait up to twenty seconds for a newly spawned Wallet control pipe.
         return self.client.request(
             MessageKind.OPEN_WALLET, response_timeout=WALLET_OPEN_RESPONSE_TIMEOUT,
         )

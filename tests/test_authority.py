@@ -369,6 +369,7 @@ class AuthorityTests(unittest.TestCase):
                 "HYPERLIQUID_UNAVAILABLE", "public_transport",
             ),
             (AdapterError("PERPDEX_NONCE_STATE_INVALID"), "PERPDEX_NONCE_STATE_INVALID", "perpdex_state"),
+            (AdapterError("PERPDEX_PREVIEW_EXPIRED"), "PERPDEX_PREVIEW_EXPIRED", "perpdex_state"),
             (ValueError("private local detail"), "MODULE_ACTION_INTERNAL_FAILURE", "internal"),
         )
         for error, code, category in cases:

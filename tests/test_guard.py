@@ -127,7 +127,7 @@ class GuardConnectorTests(unittest.TestCase):
 
         self.assertIs(client.kind, MessageKind.OPEN_WALLET)
         self.assertEqual(client.response_timeout, WALLET_OPEN_RESPONSE_TIMEOUT)
-        self.assertGreater(WALLET_OPEN_RESPONSE_TIMEOUT, 10.0)
+        self.assertEqual(WALLET_OPEN_RESPONSE_TIMEOUT, 25.0)
 
     def test_earn_portfolio_uses_public_read_contract(self) -> None:
         client = RecordingPipeClient()
