@@ -4,14 +4,17 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
-from holon_contracts import ActionState, MessageKind, make_envelope
+from holon_contracts import ActionState, MessageKind, make_envelope, new_action_id
 from holon_lending import ACTION_PROFILES_DIGEST, ActionProfilesState
 from holon_guard import GuardLifecycle, SnapshotStore
 from holon_guard.authority import AuthorityService
 from holon_guard.authority_audit import AuthorityAudit
+from holon_guard.model import GuardResult
 from holon_guard.request_control import RequestController
+from holon_guard_ipc import GuardState
 from holon_guard.wallet import (
     WALLET_OPEN_FAILURE_MESSAGES, WalletBalancesResult,
     WalletLendingPreviewResult, WalletOpenResult, WalletPreparedResult,
@@ -151,6 +154,19 @@ def lending_request(
             "protocol_profile_version": "1", "network": "base", "asset": "usdc",
             "beneficiary_mode": "active_wallet_account", "action": action,
             "amount_mode": amount_mode, "amount": amount,
+        },
+        action_id=action_id,
+    )
+
+
+def module_request(action_id: str):
+    return make_envelope(
+        MessageKind.MODULE_AUTHORITY_INTENT,
+        {
+            "module_id": "holon.perpdex",
+            "capability_id": "holon.perpdex.action.guard",
+            "action_type": "OPEN_POSITION", "params": {},
+            "preview_digest": "a" * 64,
         },
         action_id=action_id,
     )
@@ -322,6 +338,109 @@ class AuthorityTests(unittest.TestCase):
         self.assertEqual(response.kind, MessageKind.ERROR)
         self.assertEqual(response.payload["code"], "WALLET_BALANCES_UNAVAILABLE")
         self.assertNotIn("private", str(response.to_dict()).lower())
+
+    def test_module_fresh_prepare_exposes_only_safe_diagnostic_categories(self) -> None:
+        class AdapterError(RuntimeError):
+            def __init__(self, code: str) -> None:
+                self.code = code
+
+        class Adapter:
+            def __init__(self, error: Exception) -> None:
+                self.error = error
+
+            def prepare(self, *_args):
+                raise self.error
+
+        def unavailable_adapter(*_args):
+            raise RuntimeError("private adapter detail")
+
+        self.service.module_action_adapter = unavailable_adapter  # type: ignore[method-assign]
+        unavailable = self.service.handle(module_request(new_action_id()), owner_pid=101)
+        self.assertEqual(unavailable.payload["code"], "MODULE_ADAPTER_UNAVAILABLE")
+        self.assertEqual(unavailable.payload["stage"], "GUARD_FRESH_PREPARE")
+        self.assertEqual(
+            self.audit.journal.events()[-1].public_fields["failure_category"], "adapter",
+        )
+
+        cases = (
+            (AdapterError("HYPERLIQUID_UNAVAILABLE"), "HYPERLIQUID_UNAVAILABLE", "public_transport"),
+            (AdapterError("PERPDEX_NONCE_STATE_INVALID"), "PERPDEX_NONCE_STATE_INVALID", "perpdex_state"),
+            (ValueError("private local detail"), "MODULE_ACTION_INTERNAL_FAILURE", "internal"),
+        )
+        for error, code, category in cases:
+            with self.subTest(code=code):
+                self.service.module_action_adapter = lambda *_args, error=error: (  # type: ignore[method-assign]
+                    object(), Adapter(error),
+                )
+                response = self.service.handle(module_request(new_action_id()), owner_pid=101)
+                self.assertEqual(response.kind, MessageKind.REFUSAL)
+                self.assertEqual(response.payload["code"], code)
+                self.assertEqual(response.payload["stage"], "GUARD_FRESH_PREPARE")
+                event = self.audit.journal.events()[-1]
+                self.assertEqual(event.event_type, EventType.TECHNICAL_ERROR)
+                self.assertEqual(event.public_fields["failure_category"], category)
+                self.assertNotIn("private", str(response.to_dict()).lower())
+
+    def test_module_account_refusal_has_safe_guard_stage(self) -> None:
+        self.service.module_action_adapter = lambda *_args: (object(), object())  # type: ignore[method-assign]
+        self.wallet.read_public_balances = lambda: WalletBalancesResult(  # type: ignore[method-assign]
+            True, {"account": None},
+        )
+        response = self.service.handle(module_request(new_action_id()), owner_pid=101)
+        self.assertEqual(response.kind, MessageKind.REFUSAL)
+        self.assertEqual(response.payload["code"], "WALLET_ACCOUNT_UNAVAILABLE")
+        self.assertEqual(response.payload["stage"], "GUARD_FRESH_PREPARE")
+        event = self.audit.journal.events()[-1]
+        self.assertEqual(event.public_fields["failure_category"], "wallet")
+
+        def unavailable_account():
+            raise RuntimeError("private Wallet process detail")
+
+        self.wallet.read_public_balances = unavailable_account  # type: ignore[method-assign]
+        raised = self.service.handle(module_request(new_action_id()), owner_pid=101)
+        self.assertEqual(raised.payload["code"], "WALLET_ACCOUNT_UNAVAILABLE")
+        self.assertEqual(raised.payload["stage"], "GUARD_FRESH_PREPARE")
+        self.assertNotIn("private", str(raised.to_dict()).lower())
+
+    def test_wallet_live_verify_failure_writes_safe_stage_diagnostic(self) -> None:
+        class Bundle:
+            account = "0x1111111111111111111111111111111111111111"
+
+            @staticmethod
+            def to_mapping():
+                return {}
+
+        class Adapter:
+            wallet_capability_id = "holon.perpdex.action.wallet"
+
+            @staticmethod
+            def prepare(*_args):
+                return Bundle()
+
+            @staticmethod
+            def reject(*_args):
+                return None
+
+        capability = SimpleNamespace(
+            module_id="holon.perpdex",
+            declaration=SimpleNamespace(descriptor={"profile_id": "hyperliquid-mainnet-v1"}),
+        )
+        self.service.module_action_adapter = lambda *_args: (capability, Adapter())  # type: ignore[method-assign]
+        self.lifecycle.start_module_intent = lambda *_args: (  # type: ignore[method-assign]
+            GuardResult(
+                False, "HYPERLIQUID_UNAVAILABLE", GuardState.NORMAL,
+                "Private transport exception", None, "WALLET_LIVE_VERIFY",
+            ),
+            None,
+        )
+        response = self.service.handle(module_request(new_action_id()), owner_pid=101)
+        self.assertEqual(response.kind, MessageKind.ERROR)
+        self.assertEqual(response.payload["code"], "HYPERLIQUID_UNAVAILABLE")
+        self.assertEqual(response.payload["stage"], "WALLET_LIVE_VERIFY")
+        event = self.audit.journal.events()[-1]
+        self.assertEqual(event.event_type, EventType.TECHNICAL_ERROR)
+        self.assertEqual(event.public_fields["failure_category"], "public_transport")
+        self.assertNotIn("private", str(event.to_dict()).lower())
 
     def test_lending_reads_are_public_and_work_when_signing_disabled(self) -> None:
         from holon_lending import (

@@ -111,3 +111,4 @@ class GuardResult:
     state: GuardState
     message: str
     flow_id: str | None = None
+    stage: str | None = None

@@ -112,6 +112,34 @@ def test_module_cancel_uses_action_cancel_and_never_reuses_bundle(tmp_path: Path
     assert item.ledger.find(ACTION_ID).state.value == "REJECTED"
 
 
+def test_wallet_live_verify_refusal_keeps_its_safe_stage(tmp_path: Path) -> None:
+    class RejectingWallet(Wallet):
+        def prepare_module_action(self, request):
+            self.requests.append(dict(request))
+            return WalletPreparedResult(
+                False, "HYPERLIQUID_UNAVAILABLE",
+                {"stage": "WALLET_LIVE_VERIFY"}, Handle(),
+            )
+
+    store = SnapshotStore(tmp_path / "guard-state.json")
+    store.bootstrap_normal_for_test(1_786_000_000.0)
+    wallet = RejectingWallet()
+    item = GuardLifecycle(
+        store, store.load(), wallet, Owner(), make_ledger(tmp_path),
+        clock=lambda: 1_786_000_000.0,
+    )
+    result, prepared = item.start_module_intent(
+        101, ACTION_ID, "f" * 64, "holon.perpdex",
+        "holon.perpdex.action.wallet", "hyperliquid-mainnet-v1",
+        "OPEN_POSITION", bundle(),
+    )
+    assert not result.ok
+    assert result.code == "HYPERLIQUID_UNAVAILABLE"
+    assert result.stage == "WALLET_LIVE_VERIFY"
+    assert prepared == {"stage": "WALLET_LIVE_VERIFY"}
+    assert item.ledger.find(ACTION_ID).state.value == "FAILED"
+
+
 def test_old_recovery_can_release_only_for_fresh_risk_reducing_exit(tmp_path: Path) -> None:
     item, _wallet = lifecycle(tmp_path)
     started, _prepared = item.start_module_intent(

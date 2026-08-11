@@ -60,6 +60,14 @@ PROTECTED_TOOL_ALLOWLIST = frozenset({
     TRANSFER_STATUS_TOOL, CANCEL_TRANSFER_TOOL, RECOVER_TRANSFER_TOOL,
     ACTION_STATUS_TOOL, CANCEL_ACTION_TOOL, RECOVER_ACTION_TOOL,
 })
+DIRECT_MODULE_ACTIONS = frozenset({
+    "FUND_TRADING_ACCOUNT", "OPEN_POSITION", "CLOSE_POSITION",
+})
+SAFE_MODULE_STAGES = frozenset({
+    "GUARD_PREVIEW", "GUARD_FRESH_PREPARE", "WALLET_PREPARE",
+    "WALLET_LIVE_VERIFY", "LOCAL_AUTH", "PHASE_REVALIDATION",
+    "EXCHANGE_SUBMISSION", "RECONCILIATION",
+})
 STATIC_TOOL_NAMES = frozenset({
     HEALTH_TOOL, OPEN_WALLET_TOOL, WALLET_BALANCES_TOOL,
     LENDING_COMPARE_TOOL, LENDING_POSITIONS_TOOL, LENDING_PORTFOLIO_TOOL,
@@ -577,12 +585,10 @@ class PluginRuntime:
         return self._prepare_module_action(
             module_id, capability_id,
             {"action_type": "FUND_TRADING_ACCOUNT", **values},
-            execute_tool="holon_perpdex_fund_execute",
         )
 
     def _prepare_module_action(
-        self, module_id: str, capability_id: str, values: dict[str, Any], *,
-        execute_tool: str = "holon_perpdex_execute",
+        self, module_id: str, capability_id: str, values: dict[str, Any],
     ) -> str:
         try:
             action_type, semantic = self._module_action_params(values)
@@ -592,6 +598,15 @@ class PluginRuntime:
             response = self._connector.module_action_preview(
                 module_id, capability_id, action_type, semantic,
             )
+            if (
+                action_type in DIRECT_MODULE_ACTIONS
+                and response.kind is MessageKind.MODULE_ACTION_PREVIEW
+                and response.payload.get("status") == "PREVIEW_READY"
+                and response.payload.get("execution_available") is not True
+            ):
+                return self._module_action_failure(
+                    "MODULE_ACTION_EXECUTION_UNAVAILABLE", stage="GUARD_PREVIEW",
+                )
             if (
                 response.kind is not MessageKind.MODULE_ACTION_PREVIEW
                 or response.payload["status"] != "PREVIEW_READY"
@@ -610,47 +625,46 @@ class PluginRuntime:
             self._module_previews.move_to_end(digest)
             while len(self._module_previews) > 32:
                 self._module_previews.popitem(last=False)
-            direct_wallet_review = (
-                execute_tool == "holon_perpdex_fund_execute"
-                or action_type in {"OPEN_POSITION", "CLOSE_POSITION"}
-            )
-            if direct_wallet_review:
-                payload.update({
-                    "confirmation_required": False,
-                    "next_step": (
-                        f"Immediately call {execute_tool} once with this preview_digest in "
-                        "the same user turn. Do not show the preview or "
-                        "ask for chat confirmation. This opens Wallet Review only; the "
-                        "fresh local password and Wallet confirmation remain required."
-                    ),
-                })
-            else:
-                payload.update({
-                    "confirmation_required": True,
-                    "next_step": (
-                        "Explain the exact preview and risks. Only after explicit confirmation "
-                        f"in a later user message call {execute_tool} once with preview_digest."
-                    ),
-                })
+            if action_type in DIRECT_MODULE_ACTIONS:
+                return self._execute_cached_module_preview(
+                    module_id, capability_id, digest,
+                )
+            payload.update({
+                "confirmation_required": True,
+                "next_step": (
+                    "Explain the exact preview and risks. Only after explicit confirmation "
+                    "in a later user message call holon_perpdex_execute once with preview_digest."
+                ),
+            })
             return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         except GuardUnavailableError:
-            return self._module_action_failure("MODULE_ACTION_PREVIEW_GUARD_UNAVAILABLE")
+            return self._module_action_failure(
+                "MODULE_ACTION_PREVIEW_GUARD_UNAVAILABLE", stage="GUARD_PREVIEW",
+            )
         except PipeUnavailable:
-            return self._module_action_failure("MODULE_ACTION_PREVIEW_GUARD_UNAVAILABLE")
+            return self._module_action_failure(
+                "MODULE_ACTION_PREVIEW_GUARD_UNAVAILABLE", stage="GUARD_PREVIEW",
+            )
         except PipeProtocolError as error:
             code = (
                 "MODULE_ACTION_PREVIEW_RESPONSE_TIMEOUT"
                 if error.code == "RESPONSE_TIMEOUT"
                 else "MODULE_ACTION_PREVIEW_IPC_FAILED"
             )
-            return self._module_action_failure(code)
+            return self._module_action_failure(code, stage="GUARD_PREVIEW")
         except (AttributeError, KeyError, TypeError, ValueError):
-            return self._module_action_failure("MODULE_ACTION_PREVIEW_RESPONSE_INVALID")
+            return self._module_action_failure(
+                "MODULE_ACTION_PREVIEW_RESPONSE_INVALID", stage="GUARD_PREVIEW",
+            )
         except Exception:
-            return self._module_action_failure("MODULE_ACTION_PREVIEW_INTERNAL_FAILURE")
+            return self._module_action_failure(
+                "MODULE_ACTION_PREVIEW_INTERNAL_FAILURE", stage="GUARD_PREVIEW",
+            )
 
     @staticmethod
-    def _module_action_failure(code: str, action_id: str | None = None) -> str:
+    def _module_action_failure(
+        code: str, action_id: str | None = None, stage: str | None = None,
+    ) -> str:
         messages = {
             "MODULE_ACTION_PREVIEW_INVALID": "Protected action parameters are invalid.",
             "MODULE_ACTION_PREVIEW_GUARD_UNAVAILABLE": "Local Guard is unavailable.",
@@ -658,6 +672,16 @@ class PluginRuntime:
             "MODULE_ACTION_PREVIEW_IPC_FAILED": "Local Guard response could not be verified.",
             "MODULE_ACTION_PREVIEW_RESPONSE_INVALID": "Local Guard returned an invalid preview.",
             "MODULE_ACTION_PREVIEW_INTERNAL_FAILURE": "Protected action preview could not be created.",
+            "MODULE_ACTION_EXECUTE_INVALID": "Protected action confirmation is invalid.",
+            "MODULE_ACTION_EXECUTE_HLP_ONLY": "Only an approved HLP preview requires chat confirmation.",
+            "MODULE_ACTION_EXECUTION_UNAVAILABLE": "Protected action execution is unavailable.",
+            "MODULE_ACTION_EXECUTE_GUARD_UNAVAILABLE": "Local Guard is unavailable.",
+            "MODULE_ACTION_EXECUTE_RESPONSE_TIMEOUT": "Local Guard did not respond in time.",
+            "MODULE_ACTION_EXECUTE_IPC_FAILED": "Local Guard response could not be verified.",
+            "MODULE_ACTION_EXECUTE_INTERNAL_FAILURE": "Protected action could not be prepared.",
+            "MODULE_ACTION_PREVIEW_UNKNOWN": "Protected action preview is unavailable.",
+            "MODULE_ACTION_PREVIEW_EXPIRED": "Protected action preview expired.",
+            "PROTECTED_FLOW_ACTIVE": "Another protected action is active.",
         }
         value: dict[str, object] = {
             "status": "UNAVAILABLE", "authority_available": False,
@@ -666,6 +690,8 @@ class PluginRuntime:
         }
         if action_id is not None:
             value["action_id"] = action_id
+        if stage in SAFE_MODULE_STAGES:
+            value["stage"] = stage
         return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
     def handle_module_action_execute(
@@ -677,13 +703,25 @@ class PluginRuntime:
             or not isinstance(params.get("preview_digest"), str)
         ):
             return self._module_action_failure("MODULE_ACTION_EXECUTE_INVALID")
-        digest = str(params["preview_digest"])
+        return self._execute_cached_module_preview(
+            module_id, capability_id, str(params["preview_digest"]),
+            require_hlp_confirmation=True,
+        )
+
+    def _execute_cached_module_preview(
+        self, module_id: str, capability_id: str, digest: str, *,
+        require_hlp_confirmation: bool = False,
+    ) -> str:
         prepared = self._module_previews.pop(digest, None)
         if (
             prepared is None or prepared["module_id"] != module_id
             or prepared["capability_id"] != capability_id
         ):
             return self._module_action_failure("MODULE_ACTION_PREVIEW_UNKNOWN")
+        if require_hlp_confirmation and prepared["action_type"] not in {
+            "HLP_DEPOSIT", "HLP_WITHDRAW",
+        }:
+            return self._module_action_failure("MODULE_ACTION_EXECUTE_HLP_ONLY")
         try:
             expires = datetime.fromisoformat(
                 str(prepared["expires_at"]).removesuffix("Z") + "+00:00",
@@ -700,11 +738,40 @@ class PluginRuntime:
                 module_id, capability_id, str(prepared["action_type"]),
                 dict(prepared["params"]), digest, action_id,
             )
+        except GuardUnavailableError:
+            if self._protected_action_id == action_id:
+                self._protected_latch = False
+                self._protected_action_id = None
+            return self._module_action_failure(
+                "MODULE_ACTION_EXECUTE_GUARD_UNAVAILABLE", action_id,
+                "GUARD_FRESH_PREPARE",
+            )
+        except PipeUnavailable:
+            if self._protected_action_id == action_id:
+                self._protected_latch = False
+                self._protected_action_id = None
+            return self._module_action_failure(
+                "MODULE_ACTION_EXECUTE_GUARD_UNAVAILABLE", action_id,
+                "GUARD_FRESH_PREPARE",
+            )
+        except PipeProtocolError as error:
+            if self._protected_action_id == action_id:
+                self._protected_latch = False
+                self._protected_action_id = None
+            code = (
+                "MODULE_ACTION_EXECUTE_RESPONSE_TIMEOUT"
+                if error.code == "RESPONSE_TIMEOUT"
+                else "MODULE_ACTION_EXECUTE_IPC_FAILED"
+            )
+            return self._module_action_failure(code, action_id, "GUARD_FRESH_PREPARE")
         except Exception:
             if self._protected_action_id == action_id:
                 self._protected_latch = False
                 self._protected_action_id = None
-            return self._module_action_failure("MODULE_ACTION_EXECUTE_UNAVAILABLE", action_id)
+            return self._module_action_failure(
+                "MODULE_ACTION_EXECUTE_INTERNAL_FAILURE", action_id,
+                "GUARD_FRESH_PREPARE",
+            )
         self._finish_protected_dispatch(response, action_id)
         if response.kind is MessageKind.PROTECTED_FLOW_STARTED:
             return json.dumps({
@@ -718,20 +785,16 @@ class PluginRuntime:
                     "When the user returns, call holon_action_status with this action_id."
                 ),
             }, ensure_ascii=False, separators=(",", ":"))
-        return json.dumps({
+        value: dict[str, object] = {
             "status": "REFUSED", "authority_available": False,
             "action_id": action_id,
             "code": response.payload.get("code", "MODULE_ACTION_REFUSED"),
             "message": response.payload.get("message", "Protected module action was refused."),
-        }, ensure_ascii=False, separators=(",", ":"))
-
-    def handle_module_funding_execute(
-        self, module_id: str, capability_id: str,
-        params: Optional[dict] = None, **kwargs: Any,
-    ) -> str:
-        return self.handle_module_action_execute(
-            module_id, capability_id, params, **kwargs,
-        )
+        }
+        stage = response.payload.get("stage")
+        if stage in SAFE_MODULE_STAGES:
+            value["stage"] = stage
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
     def handle_lending_compare(
         self, params: Optional[dict] = None, **kwargs: Any,

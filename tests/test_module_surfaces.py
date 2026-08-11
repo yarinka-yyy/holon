@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -175,7 +176,7 @@ class _PerpDexConnector(_Connector):
         }, action_id=action_id)
 
 
-def test_hermes_perpdex_prepare_then_execute_consumes_preview_once(
+def test_hermes_perpdex_direct_review_and_hlp_confirmation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     composition = tmp_path / "extended"
@@ -196,7 +197,7 @@ def test_hermes_perpdex_prepare_then_execute_consumes_preview_once(
     assert set(optional) == {
         "holon_perpdex_execute", "holon_perpdex_markets",
         "holon_perpdex_portfolio", "holon_perpdex_prepare",
-        "holon_perpdex_fund_prepare", "holon_perpdex_fund_execute",
+        "holon_perpdex_fund_prepare",
     }
     dispatch_context = {
         "task_id": "task", "session_id": "session", "user_task": "perpdex",
@@ -204,68 +205,87 @@ def test_hermes_perpdex_prepare_then_execute_consumes_preview_once(
     closed = json.loads(optional["holon_perpdex_prepare"]["handler"]({
         "action_type": "CLOSE_POSITION", "amount_mode": "FULL", "market": "BTC",
     }, **dispatch_context))
-    assert closed["status"] == "PREVIEW_READY"
-    assert closed["confirmation_required"] is False
-    assert "Immediately call holon_perpdex_execute" in closed["next_step"]
+    assert closed["status"] == "AWAITING_LOCAL_CONFIRMATION"
+    assert "preview_digest" not in closed
     assert connector.previews[-1][2:] == (
         "CLOSE_POSITION", {"amount_mode": "FULL", "market": "BTC", "percent": None},
     )
-    opened = json.loads(optional["holon_perpdex_prepare"]["handler"]({
+    assert connector.executions[-1][1:5] == (
+        "holon.perpdex.action.guard", "CLOSE_POSITION",
+        {"amount_mode": "FULL", "market": "BTC", "percent": None}, "b" * 64,
+    )
+
+    opened_runtime = plugin.PluginRuntime(connector)
+    monkeypatch.setattr(plugin, "_runtime", opened_runtime)
+    opened_context = _Context()
+    plugin.register(opened_context)
+    opened = json.loads({item["name"]: item for item in opened_context.tools}["holon_perpdex_prepare"]["handler"]({
         "action_type": "OPEN_POSITION", "leverage": 2, "market": "ETH",
         "notional_usdc": "6", "side": "LONG",
     }, **dispatch_context))
-    assert opened["status"] == "PREVIEW_READY"
-    assert opened["confirmation_required"] is False
+    assert opened["status"] == "AWAITING_LOCAL_CONFIRMATION"
+    assert "preview_digest" not in opened
     assert connector.previews[-1][2:] == ("OPEN_POSITION", {
         "leverage": 2, "market": "ETH", "notional_usdc": "6", "side": "LONG",
     })
-    isolated = json.loads(optional["holon_perpdex_prepare"]["handler"]({
-        "action_type": "OPEN_POSITION", "leverage": 2, "margin_mode": "ISOLATED",
-        "market": "ETH", "notional_usdc": "6", "side": "LONG",
-    }, **dispatch_context))
-    assert isolated["status"] == "PREVIEW_READY"
-    assert connector.previews[-1][2:] == ("OPEN_POSITION", {
-        "leverage": 2, "margin_mode": "ISOLATED", "market": "ETH",
-        "notional_usdc": "6", "side": "LONG",
-    })
-    cross = json.loads(optional["holon_perpdex_prepare"]["handler"]({
-        "action_type": "OPEN_POSITION", "leverage": 50, "margin_mode": "CROSS",
-        "market": "ETH", "notional_usdc": "6", "side": "LONG",
-    }, **dispatch_context))
-    assert cross["status"] == "PREVIEW_READY"
-    assert connector.previews[-1][2:] == ("OPEN_POSITION", {
-        "leverage": 50, "margin_mode": "CROSS", "market": "ETH",
-        "notional_usdc": "6", "side": "LONG",
-    })
-    invalid_open = json.loads(optional["holon_perpdex_prepare"]["handler"]({
+
+    class UnavailableConnector:
+        @staticmethod
+        def module_action_preview(*_args):
+            return SimpleNamespace(
+                kind=MessageKind.MODULE_ACTION_PREVIEW,
+                payload={"status": "PREVIEW_READY", "execution_available": False},
+            )
+
+    unavailable = json.loads(
+        plugin.PluginRuntime(UnavailableConnector()).handle_module_action_prepare(
+            "holon.perpdex", "holon.perpdex.action.guard", {
+                "action_type": "OPEN_POSITION", "leverage": 2, "market": "ETH",
+                "notional_usdc": "6", "side": "LONG",
+            },
+        ),
+    )
+    assert unavailable["code"] == "MODULE_ACTION_EXECUTION_UNAVAILABLE"
+    assert unavailable["stage"] == "GUARD_PREVIEW"
+    assert "preview_digest" not in unavailable
+
+    invalid_runtime = plugin.PluginRuntime(connector)
+    invalid_open = json.loads(invalid_runtime.handle_module_action_prepare(
+        "holon.perpdex", "holon.perpdex.action.guard", {
         "action_type": "OPEN_POSITION", "leverage": 2, "margin_mode": "UNIFIED",
         "market": "ETH", "notional_usdc": "6", "side": "LONG",
-    }, **dispatch_context))
+    }))
     assert invalid_open["code"] == "MODULE_ACTION_PREVIEW_INVALID"
-    withdrawn = json.loads(optional["holon_perpdex_prepare"]["handler"]({
+
+    hlp_runtime = plugin.PluginRuntime(connector)
+    monkeypatch.setattr(plugin, "_runtime", hlp_runtime)
+    hlp_context = _Context()
+    plugin.register(hlp_context)
+    hlp_tools = {item["name"]: item for item in hlp_context.tools}
+    withdrawn = json.loads(hlp_tools["holon_perpdex_prepare"]["handler"]({
         "action_type": "HLP_WITHDRAW", "amount_mode": "ALL",
     }, **dispatch_context))
     assert withdrawn["status"] == "PREVIEW_READY"
     assert connector.previews[-1][2:] == (
         "HLP_WITHDRAW", {"amount_mode": "ALL", "amount_usdc": None},
     )
-    prepared = json.loads(optional["holon_perpdex_prepare"]["handler"]({
+    prepared = json.loads(hlp_tools["holon_perpdex_prepare"]["handler"]({
         "action_type": "HLP_DEPOSIT", "amount_usdc": "25",
     }, **dispatch_context))
     assert prepared["status"] == "PREVIEW_READY"
     assert prepared["confirmation_required"] is True
     assert connector.previews[-1][2:] == ("HLP_DEPOSIT", {"amount_usdc": "25"})
 
-    executed = json.loads(optional["holon_perpdex_execute"]["handler"]({
+    executed = json.loads(hlp_tools["holon_perpdex_execute"]["handler"]({
         "preview_digest": prepared["preview_digest"],
     }, **dispatch_context))
     assert executed["status"] == "AWAITING_LOCAL_CONFIRMATION"
-    assert len(connector.executions) == 1
-    repeated = json.loads(optional["holon_perpdex_execute"]["handler"]({
+    execution_count = len(connector.executions)
+    repeated = json.loads(hlp_tools["holon_perpdex_execute"]["handler"]({
         "preview_digest": prepared["preview_digest"],
     }, **dispatch_context))
     assert repeated["code"] == "MODULE_ACTION_PREVIEW_UNKNOWN"
-    assert len(connector.executions) == 1
+    assert len(connector.executions) == execution_count
 
     runtime = plugin.PluginRuntime(connector)
     monkeypatch.setattr(plugin, "_runtime", runtime)
@@ -279,18 +299,12 @@ def test_hermes_perpdex_prepare_then_execute_consumes_preview_once(
     funding = json.loads(funding_tools["holon_perpdex_fund_prepare"]["handler"]({
         "amount_usdc": "25",
     }, **dispatch_context))
-    assert funding["status"] == "PREVIEW_READY"
-    assert funding["confirmation_required"] is False
-    assert "Immediately call holon_perpdex_fund_execute" in funding["next_step"]
-    assert "chat confirmation" in funding["next_step"]
+    assert funding["status"] == "AWAITING_LOCAL_CONFIRMATION"
+    assert "preview_digest" not in funding
     assert connector.previews[-1] == (
         "holon.perpdex", "holon.perpdex.funding.guard",
         "FUND_TRADING_ACCOUNT", {"amount_usdc": "25"},
     )
-    funded = json.loads(funding_tools["holon_perpdex_fund_execute"]["handler"]({
-        "preview_digest": funding["preview_digest"],
-    }, **dispatch_context))
-    assert funded["status"] == "AWAITING_LOCAL_CONFIRMATION"
     assert connector.executions[-1][1:4] == (
         "holon.perpdex.funding.guard", "FUND_TRADING_ACCOUNT", {"amount_usdc": "25"},
     )
@@ -323,5 +337,6 @@ def test_hermes_perpdex_preview_failures_are_specific_and_secret_free(
         },
     ))
     assert payload["code"] == expected
+    assert payload["stage"] == "GUARD_PREVIEW"
     for private in ("private", "pipe", "details"):
         assert private not in json.dumps(payload).lower()

@@ -118,7 +118,7 @@ def test_extended_package_has_only_declared_perpdex_surfaces(tmp_path: Path) -> 
     assert all(name in yaml for name in (
         "holon_perpdex_execute", "holon_perpdex_markets",
         "holon_perpdex_portfolio", "holon_perpdex_prepare",
-        "holon_perpdex_fund_prepare", "holon_perpdex_fund_execute",
+        "holon_perpdex_fund_prepare",
     ))
     module = plugin / "modules/holon.perpdex"
     assert {path.name for path in module.iterdir()} == {

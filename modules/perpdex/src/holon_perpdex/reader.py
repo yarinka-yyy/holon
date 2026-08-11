@@ -3,19 +3,26 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import json
+import os
 import re
+import threading
+import time
 from typing import Any
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from .profile import API_URL, HLP_ADDRESS, HLP_NAME, SUPPORTED_MARKETS
 
 READ_SCHEMA_VERSION = "1"
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
-HTTP_TIMEOUT_SECONDS = 10.0
+LIVE_CHECK_TIMEOUT_SECONDS = 20.0
+HTTP_ATTEMPT_TIMEOUT_SECONDS = 8.0
+HTTP_RETRY_DELAY_SECONDS = 0.2
 _ADDRESS_RE = re.compile(r"^0x[0-9A-Fa-f]{40}$")
 _NUMBER_RE = re.compile(r"^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$")
 _CLOID_RE = re.compile(r"^0x[0-9a-f]{32}$")
@@ -72,12 +79,33 @@ def _active_account(params: Mapping[str, object]) -> dict[str, str]:
 
 
 class HttpInfoTransport:
-    """One-attempt HTTPS JSON transport for the public `/info` endpoint."""
+    """Bounded HTTPS transport for public `/info` data only."""
 
-    def __init__(self, base_url: str = API_URL) -> None:
-        if base_url != API_URL:
+    def __init__(
+        self, base_url: str = API_URL, *, clock: Callable[[], float] | None = None,
+        sleeper: Callable[[float], None] | None = None,
+    ) -> None:
+        if base_url != API_URL and not _is_packaged_test_endpoint(base_url):
             raise ReaderError("HYPERLIQUID_ENDPOINT_INVALID", "Unsupported Hyperliquid endpoint")
         self.endpoint = base_url.rstrip("/") + "/info"
+        self._clock = clock or time.monotonic
+        self._sleeper = sleeper or time.sleep
+        self._local = threading.local()
+
+    @contextmanager
+    def live_check_budget(self):
+        previous = getattr(self._local, "deadline", None)
+        self._local.deadline = self._clock() + LIVE_CHECK_TIMEOUT_SECONDS
+        try:
+            yield
+        finally:
+            self._local.deadline = previous
+
+    def _remaining(self) -> float:
+        deadline = getattr(self._local, "deadline", None)
+        if deadline is None:
+            return HTTP_ATTEMPT_TIMEOUT_SECONDS * 2 + HTTP_RETRY_DELAY_SECONDS
+        return max(0.0, deadline - self._clock())
 
     def __call__(self, payload: Mapping[str, object]) -> object:
         body = json.dumps(
@@ -89,11 +117,25 @@ class HttpInfoTransport:
             headers={"Content-Type": "application/json", "User-Agent": "Holon/0.1"},
             method="POST",
         )
-        try:
-            with urlopen(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
-                raw = response.read(MAX_RESPONSE_BYTES + 1)
-        except (HTTPError, URLError, TimeoutError, OSError) as exc:
-            raise ReaderError("HYPERLIQUID_UNAVAILABLE", "Hyperliquid public data is unavailable") from exc
+        raw: bytes | None = None
+        for attempt in range(2):
+            remaining = self._remaining()
+            if remaining <= 0:
+                break
+            try:
+                with urlopen(
+                    request, timeout=min(HTTP_ATTEMPT_TIMEOUT_SECONDS, remaining),
+                ) as response:
+                    raw = response.read(MAX_RESPONSE_BYTES + 1)
+                break
+            except (HTTPError, URLError, TimeoutError, OSError) as exc:
+                if attempt == 1 or self._remaining() <= HTTP_RETRY_DELAY_SECONDS:
+                    raise ReaderError(
+                        "HYPERLIQUID_UNAVAILABLE", "Hyperliquid public data is unavailable",
+                    ) from exc
+                self._sleeper(HTTP_RETRY_DELAY_SECONDS)
+        if raw is None:
+            raise ReaderError("HYPERLIQUID_UNAVAILABLE", "Hyperliquid public data is unavailable")
         if not raw or len(raw) > MAX_RESPONSE_BYTES:
             raise ReaderError("HYPERLIQUID_DATA_INVALID", "Invalid Hyperliquid response size")
         try:
@@ -102,12 +144,33 @@ class HttpInfoTransport:
             raise ReaderError("HYPERLIQUID_DATA_INVALID", "Invalid Hyperliquid response") from exc
 
 
+def _is_packaged_test_endpoint(value: str) -> bool:
+    if os.environ.get("HOLON_TEST_PACKAGED_E2E") != "1":
+        return False
+    parsed = urlsplit(value)
+    return parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "::1"}
+
+
+def _default_transport() -> HttpInfoTransport:
+    endpoint = os.environ.get("HOLON_TEST_HYPERLIQUID_INFO_URL", API_URL)
+    return HttpInfoTransport(endpoint)
+
+
 class HyperliquidReader:
     OPERATIONS = frozenset({"fees", "hlp", "markets", "portfolio", "referral"})
     ACCOUNT_OPERATIONS = frozenset({"fees", "hlp", "portfolio", "referral"})
 
     def __init__(self, transport: Callable[[Mapping[str, object]], object] | None = None) -> None:
-        self._post = transport or HttpInfoTransport()
+        self._post = transport or _default_transport()
+
+    @contextmanager
+    def live_check_budget(self):
+        budget = getattr(self._post, "live_check_budget", None)
+        if callable(budget):
+            with budget():
+                yield
+            return
+        yield
 
     def __call__(self, operation: str, params: Mapping[str, object]) -> Mapping[str, object]:
         if operation not in self.OPERATIONS or not isinstance(params, Mapping):

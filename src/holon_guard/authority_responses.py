@@ -19,16 +19,28 @@ class ResponseMixin:
             kind, payload, request_id=request.request_id, action_id=request.action_id
         )
 
-    def refusal(self, request: ContractEnvelope, code: str, message: str) -> ContractEnvelope:
+    def refusal(
+        self, request: ContractEnvelope, code: str, message: str, *,
+        stage: str | None = None,
+    ) -> ContractEnvelope:
+        payload = {"code": code, "message": message, "retryable": False}
+        if stage is not None:
+            payload["stage"] = stage
         return self._response(
             request, MessageKind.REFUSAL,
-            {"code": code, "message": message, "retryable": False},
+            payload,
         )
 
-    def error(self, request: ContractEnvelope, code: str, message: str) -> ContractEnvelope:
+    def error(
+        self, request: ContractEnvelope, code: str, message: str, *,
+        stage: str | None = None,
+    ) -> ContractEnvelope:
+        payload = {"code": code, "message": message, "retryable": False}
+        if stage is not None:
+            payload["stage"] = stage
         return self._response(
             request, MessageKind.ERROR,
-            {"code": code, "message": message, "retryable": False},
+            payload,
         )
 
     def _failure(self, request: ContractEnvelope, result) -> ContractEnvelope:
@@ -42,8 +54,8 @@ class ResponseMixin:
                 "Action identifier does not match.",
             )
         if result.code in REFUSAL_CODES:
-            return self.refusal(request, result.code, result.message)
-        return self.error(request, result.code, result.message)
+            return self.refusal(request, result.code, result.message, stage=result.stage)
+        return self.error(request, result.code, result.message, stage=result.stage)
 
     def _signing_disabled(
         self, request: ContractEnvelope, code: str, message: str = "Wallet authority is disabled."

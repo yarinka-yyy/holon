@@ -138,6 +138,11 @@ LENDING_ACTION_CODES = frozenset({
 HEX_64_RE = re.compile(r"^[0-9a-f]{64}$")
 MODULE_ID_RE = re.compile(r"^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$")
 MODULE_ACTION_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+ACTION_FAILURE_STAGES = frozenset({
+    "GUARD_PREVIEW", "GUARD_FRESH_PREPARE", "WALLET_PREPARE",
+    "WALLET_LIVE_VERIFY", "LOCAL_AUTH", "PHASE_REVALIDATION",
+    "EXCHANGE_SUBMISSION", "RECONCILIATION",
+})
 ACTION_ID_RE = re.compile(
     r"^act-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
 )
@@ -1041,6 +1046,9 @@ def _response(kind: MessageKind, payload: Mapping[str, Any]) -> None:
     if kind in {MessageKind.REFUSAL, MessageKind.ERROR}:
         if type(payload.get("retryable")) is not bool:
             raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid retry status.")
+        stage = payload.get("stage")
+        if stage is not None and stage not in ACTION_FAILURE_STAGES:
+            raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid action failure stage.")
         return
     state = payload.get("guard_state")
     if state not in GUARD_STATES:
@@ -1376,6 +1384,12 @@ def validate_payload(kind: MessageKind, payload: Mapping[str, Any]) -> None:
         return
     if kind is MessageKind.LENDING_ACTION_PREVIEW:
         validate_lending_action_preview(payload)
+        return
+    if kind in {MessageKind.REFUSAL, MessageKind.ERROR}:
+        expected = PAYLOAD_FIELDS[kind]
+        if set(payload) not in {expected, expected | {"stage"}}:
+            raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid message payload.")
+        _response(kind, payload)
         return
     if set(payload) != PAYLOAD_FIELDS[kind]:
         raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid message payload.")

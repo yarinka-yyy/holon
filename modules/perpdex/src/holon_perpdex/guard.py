@@ -8,7 +8,7 @@ import time
 
 from .actions import AdapterError, BuiltPreview, HyperliquidActionBuilder
 from .contracts import PerpDexActionPreview, ProtectedActionBundle
-from .persistence import PerpDexNonceStore, PerpDexOperationStore
+from .persistence import PersistenceError, PerpDexNonceStore, PerpDexOperationStore
 from .reader import HyperliquidReader
 
 
@@ -67,10 +67,26 @@ class GuardProtectedActionAdapter:
             or previous.account["address"] != current.account["address"]
         ):
             raise AdapterError("PERPDEX_PREVIEW_MISMATCH", "PerpDEX preview does not match the request")
-        bundle = self._builder.bundle(operation_id, current)
+        try:
+            bundle = self._builder.bundle(operation_id, current)
+        except PersistenceError as exc:
+            code = (
+                "PERPDEX_NONCE_STATE_UNAVAILABLE"
+                if exc.code == "PERPDEX_PERSISTENCE_UNAVAILABLE"
+                else "PERPDEX_NONCE_STATE_INVALID"
+            )
+            raise AdapterError(code, "PerpDEX nonce state is unavailable") from exc
         if self._operations is None:
             raise AdapterError("PERPDEX_OPERATION_STATE_UNAVAILABLE", "PerpDEX operation state is unavailable")
-        self._operations.begin(bundle)
+        try:
+            self._operations.begin(bundle)
+        except PersistenceError as exc:
+            code = (
+                "PERPDEX_OPERATION_STATE_UNAVAILABLE"
+                if exc.code == "PERPDEX_PERSISTENCE_UNAVAILABLE"
+                else "PERPDEX_OPERATION_STATE_INVALID"
+            )
+            raise AdapterError(code, "PerpDEX operation state is unavailable") from exc
         return bundle
 
     def mark_awaiting_confirmation(self, operation_id: str) -> None:

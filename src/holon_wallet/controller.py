@@ -1708,9 +1708,9 @@ class WalletController(QObject):
 
     @staticmethod
     def _external_refusal(
-        request: dict[str, object], code: str,
+        request: dict[str, object], code: str, stage: str | None = None,
     ) -> dict[str, object]:
-        return {
+        response: dict[str, object] = {
             "authority_version": AUTHORITY_VERSION,
             "kind": (
                 "module_action_refused"
@@ -1720,6 +1720,9 @@ class WalletController(QObject):
             "flow_id": request.get("flow_id"), "action_id": request.get("action_id"),
             "code": code,
         }
+        if request.get("kind") == "prepare_module_action" and stage is not None:
+            response["stage"] = stage
+        return response
 
     @Slot(str, str, str, result=bool)
     def requestMaximumTransfer(
@@ -4207,7 +4210,7 @@ class WalletController(QObject):
                 )
             except Exception:
                 pass
-            completion(self._external_refusal(context, code))
+            completion(self._external_refusal(context, code, "WALLET_LIVE_VERIFY"))
             self.perpDexChanged.emit()
             return
         prepared_digest = hashlib.sha256(json.dumps({

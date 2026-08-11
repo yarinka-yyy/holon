@@ -60,7 +60,13 @@ _CODE_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
 
 
 class PersistenceError(RuntimeError):
-    pass
+    """Bounded local-state failure with a safe machine-readable category."""
+
+    def __init__(
+        self, message: str, code: str = "PERPDEX_PERSISTENCE_INVALID",
+    ) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 def _legacy_submission_started(operation: Mapping[str, object]) -> bool:
@@ -113,7 +119,9 @@ def _read(path: Path) -> object:
     except FileNotFoundError:
         return None
     except OSError as exc:
-        raise PersistenceError("PerpDEX state is unavailable") from exc
+        raise PersistenceError(
+            "PerpDEX state is unavailable", "PERPDEX_PERSISTENCE_UNAVAILABLE",
+        ) from exc
     if not raw or len(raw) > MAX_FILE_BYTES or raw.startswith(b"\xef\xbb\xbf"):
         raise PersistenceError("PerpDEX state is invalid")
     try:
@@ -136,12 +144,14 @@ def _atomic_write(path: Path, value: object) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
-    except Exception:
+    except Exception as exc:
         try:
             os.unlink(temporary)
         except OSError:
             pass
-        raise
+        raise PersistenceError(
+            "PerpDEX state is unavailable", "PERPDEX_PERSISTENCE_UNAVAILABLE",
+        ) from exc
 
 
 class PerpDexNonceStore:

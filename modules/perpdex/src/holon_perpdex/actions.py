@@ -154,13 +154,14 @@ class HyperliquidActionBuilder:
     ) -> BuiltPreview:
         intent = PerpDexActionIntent.from_mapping(action_type, params)
         checked_account = self._account(account)
-        if intent.action_type is ActionType.OPEN_POSITION:
-            return self._open(intent, checked_account)
-        if intent.action_type is ActionType.CLOSE_POSITION:
-            return self._close(intent, checked_account)
-        if intent.action_type is ActionType.HLP_DEPOSIT:
-            return self._deposit(intent, checked_account)
-        return self._withdraw(intent, checked_account)
+        with self.reader.live_check_budget():
+            if intent.action_type is ActionType.OPEN_POSITION:
+                return self._open(intent, checked_account)
+            if intent.action_type is ActionType.CLOSE_POSITION:
+                return self._close(intent, checked_account)
+            if intent.action_type is ActionType.HLP_DEPOSIT:
+                return self._deposit(intent, checked_account)
+            return self._withdraw(intent, checked_account)
 
     @staticmethod
     def _account(value: Mapping[str, str]) -> dict[str, str]:

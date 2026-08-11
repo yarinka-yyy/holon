@@ -184,7 +184,7 @@ class PipeGuardClient:
                 "action_type": action_type,
                 "params": params,
             },
-            response_timeout=40.0,
+            response_timeout=55.0,
         )
 
     def module_action_execute(
@@ -207,7 +207,7 @@ class PipeGuardClient:
             },
             action_id=action_id,
             owner_pid=os.getpid(),
-            response_timeout=40.0,
+            response_timeout=55.0,
         )
 
     def module_action_status(

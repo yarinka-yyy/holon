@@ -12,6 +12,41 @@ from holon_journal import EventType
 from .actions import ActionLedgerFailure
 
 
+_SAFE_PREPARE_CODES = frozenset({
+    "HYPERLIQUID_UNAVAILABLE", "HYPERLIQUID_DATA_INVALID",
+    "PERPDEX_NONCE_STATE_UNAVAILABLE", "PERPDEX_NONCE_STATE_INVALID",
+    "PERPDEX_OPERATION_STATE_UNAVAILABLE", "PERPDEX_OPERATION_STATE_INVALID",
+    "WALLET_ACCOUNT_UNAVAILABLE",
+})
+
+
+def _prepare_failure(exc: Exception, *, fallback: str) -> tuple[str, str | None]:
+    code = getattr(exc, "code", None)
+    if isinstance(code, str) and (
+        code in _SAFE_PREPARE_CODES or code.startswith("HYPERLIQUID_")
+    ):
+        if code == "HYPERLIQUID_UNAVAILABLE":
+            return code, "public_transport"
+        if code.startswith("HYPERLIQUID_"):
+            return code, "public_data"
+        if code.startswith("PERPDEX_"):
+            return code, "perpdex_state"
+        return code, "wallet"
+    return fallback, "adapter" if fallback == "MODULE_ADAPTER_UNAVAILABLE" else "internal"
+
+
+def _stage_failure_category(code: str) -> str:
+    if code == "HYPERLIQUID_UNAVAILABLE":
+        return "public_transport"
+    if code.startswith("HYPERLIQUID_"):
+        return "public_data"
+    if code.startswith("PERPDEX_"):
+        return "perpdex_state"
+    if code.startswith("WALLET_"):
+        return "wallet"
+    return "internal"
+
+
 def _fingerprint(request) -> str:
     material = {
         "schema": "module-authority-1",
@@ -26,14 +61,23 @@ def _fingerprint(request) -> str:
     ).hexdigest()
 
 
-def _refuse(service, request, fingerprint: str, code: str, message: str):
+def _refuse(
+    service, request, fingerprint: str, code: str, message: str, *,
+    stage: str | None = None, failure_category: str | None = None,
+):
     try:
         service.lifecycle.ledger.refuse(request.action_id or "", fingerprint, code)
     except ActionLedgerFailure as exc:
         if exc.code == SecurityCode.ACTION_STATE_INVALID.value:
             return service.fail_closed_response(request, exc.code)
         return service.refusal(request, exc.code, "Module action cannot be prepared.")
-    return service.refusal(request, code, message)
+    if failure_category is not None:
+        if not service.audit_system(
+            EventType.TECHNICAL_ERROR, code, action_id=request.action_id,
+            stage=stage, failure_category=failure_category,
+        ):
+            return service.security_response(request)
+    return service.refusal(request, code, message, stage=stage)
 
 
 def prepare_module_authority(service, request, owner_pid: int):
@@ -48,24 +92,42 @@ def prepare_module_authority(service, request, owner_pid: int):
             str(request.payload["capability_id"]),
             str(request.payload["action_type"]),
         )
-        wallet = service.lifecycle.wallet.read_public_balances()
-        account = (
-            wallet.payload.get("account")
-            if wallet.ok and wallet.payload is not None else None
+    except Exception as exc:
+        code, category = _prepare_failure(exc, fallback="MODULE_ADAPTER_UNAVAILABLE")
+        return _refuse(
+            service, request, fingerprint, code,
+            "Module action adapter is unavailable.", stage="GUARD_FRESH_PREPARE",
+            failure_category=category,
         )
-        if not isinstance(account, dict):
-            raise RuntimeError("Wallet account is unavailable")
+    try:
+        wallet = service.lifecycle.wallet.read_public_balances()
+    except Exception:
+        return _refuse(
+            service, request, fingerprint, "WALLET_ACCOUNT_UNAVAILABLE",
+            "Active Wallet account is unavailable.", stage="GUARD_FRESH_PREPARE",
+            failure_category="wallet",
+        )
+    account = (
+        wallet.payload.get("account")
+        if wallet.ok and wallet.payload is not None else None
+    )
+    if not isinstance(account, dict):
+        return _refuse(
+            service, request, fingerprint, "WALLET_ACCOUNT_UNAVAILABLE",
+            "Active Wallet account is unavailable.", stage="GUARD_FRESH_PREPARE",
+            failure_category="wallet",
+        )
+    try:
         bundle = adapter.prepare(
             request.action_id or "", request.payload["action_type"],
             request.payload["params"], account, request.payload["preview_digest"],
         )
     except Exception as exc:
-        code = str(getattr(exc, "code", "MODULE_ACTION_UNAVAILABLE"))
-        if not code or len(code) > 64:
-            code = "MODULE_ACTION_UNAVAILABLE"
+        code, category = _prepare_failure(exc, fallback="MODULE_ACTION_INTERNAL_FAILURE")
         return _refuse(
             service, request, fingerprint, code,
             "Module action could not be prepared from fresh public state.",
+            stage="GUARD_FRESH_PREPARE", failure_category=category,
         )
     if service.lifecycle.snapshot.state is GuardState.RECOVERY_REQUIRED:
         previous_action_id = service.lifecycle.snapshot.action_id
@@ -99,9 +161,17 @@ def prepare_module_authority(service, request, owner_pid: int):
             adapter.reject(request.action_id or "")
         except Exception:
             pass
+        if result.stage is not None and not service.audit_system(
+            EventType.TECHNICAL_ERROR, result.code, action_id=request.action_id,
+            stage=result.stage, failure_category=_stage_failure_category(result.code),
+        ):
+            return service.security_response(request)
         return service._failure(request, result)
     if prepared is None:
-        return service.error(request, "WALLET_UNAVAILABLE", "Wallet is unavailable.")
+        return service.error(
+            request, "WALLET_UNAVAILABLE", "Wallet is unavailable.",
+            stage="WALLET_PREPARE",
+        )
     try:
         adapter.mark_awaiting_confirmation(request.action_id or "")
     except Exception:

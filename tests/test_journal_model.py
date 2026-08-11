@@ -60,3 +60,16 @@ class JournalModelTests(unittest.TestCase):
         value["recipient"] = "not-an-address"
         with self.assertRaises(JournalValidationError):
             parse_event(value)
+
+    def test_safe_module_diagnostic_allows_only_bounded_fields(self) -> None:
+        event = self.factory.create(
+            EventType.TECHNICAL_ERROR, "HYPERLIQUID_UNAVAILABLE",
+            action_id=ACTION_ID, stage="WALLET_LIVE_VERIFY",
+            failure_category="public_transport",
+        )
+        self.assertEqual(parse_event(event.to_dict()), event)
+        self.assertNotIn("url", encode_event(event).decode("utf-8").lower())
+        value = event.to_dict()
+        value["failure_category"] = "exception-text"
+        with self.assertRaises(JournalValidationError):
+            parse_event(value)

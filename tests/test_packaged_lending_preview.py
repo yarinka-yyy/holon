@@ -158,6 +158,113 @@ class FundingRpcFixture(RpcFixture):
         return super()._response(method, params)
 
 
+class HyperliquidInfoFixture(BaseHTTPRequestHandler):
+    calls: list[str] = []
+
+    @classmethod
+    def reset(cls) -> None:
+        cls.calls = []
+
+    def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+        length = int(self.headers.get("Content-Length", "0"))
+        request = json.loads(self.rfile.read(length))
+        kind = str(request["type"])
+        type(self).calls.append(kind)
+        response = self._response(kind, request)
+        body = json.dumps(response).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format: str, *args: object) -> None:
+        del format, args
+
+    @staticmethod
+    def _response(kind: str, request: dict[str, object]) -> object:
+        now = int(time.time() * 1000)
+        if kind == "metaAndAssetCtxs":
+            return [{"universe": [
+                {"maxLeverage": 40, "name": "BTC", "szDecimals": 5},
+                {"maxLeverage": 25, "name": "ETH", "szDecimals": 4},
+                {"maxLeverage": 20, "name": "SOL", "szDecimals": 2},
+            ]}, [
+                {"funding": "0", "markPx": "60000", "openInterest": "10", "oraclePx": "60000"},
+                {"funding": "0", "markPx": "3000", "openInterest": "20", "oraclePx": "3000"},
+                {"funding": "0", "markPx": "150", "openInterest": "30", "oraclePx": "150"},
+            ]]
+        if kind == "l2Book":
+            prices = {"BTC": ("59999", "60001"), "ETH": ("2999", "3001"), "SOL": ("149", "151")}
+            bid, ask = prices[str(request["coin"])]
+            return {"coin": request["coin"], "levels": [[{"px": bid}], [{"px": ask}]], "time": now}
+        if kind == "clearinghouseState":
+            return {
+                "assetPositions": [],
+                "marginSummary": {"accountValue": "200", "totalMarginUsed": "0", "totalNtlPos": "0"},
+                "withdrawable": "200",
+            }
+        if kind == "frontendOpenOrders":
+            return []
+        if kind == "userFees":
+            return {"userAddRate": "0.00015", "userCrossRate": "0.00045"}
+        if kind == "referral":
+            return {"cumVlm": "0", "referredBy": {"code": "EXISTING", "referrer": "0x" + "34" * 20}}
+        raise AssertionError(f"Unexpected Hyperliquid public request: {kind}")
+
+
+def _packaged_direct_position_code(plugin: Path, pipe: str) -> str:
+    return f"""
+import importlib.util
+import json
+import os
+import sys
+import types
+
+root = {str(plugin)!r}
+package_name = "packaged_holon_plugin"
+package = types.ModuleType(package_name)
+package.__path__ = [root]
+sys.modules[package_name] = package
+spec = importlib.util.spec_from_file_location(
+    package_name, root + "/__init__.py", submodule_search_locations=[root],
+)
+module = importlib.util.module_from_spec(spec)
+sys.modules[package_name] = module
+spec.loader.exec_module(module)
+from packaged_holon_plugin import plugin as holon_plugin
+from holon_contracts import MessageKind
+from holon_guard_ipc import PipeClient
+
+class Connector:
+    def __init__(self):
+        self.client = PipeClient({pipe!r}, 2.0, 55.0)
+
+    def module_action_preview(self, module_id, capability_id, action_type, params):
+        return self.client.request(
+            MessageKind.MODULE_ACTION_INTENT,
+            {{"module_id": module_id, "capability_id": capability_id,
+             "action_type": action_type, "params": params}},
+            response_timeout=55.0,
+        )
+
+    def module_action_execute(self, module_id, capability_id, action_type, params, digest, action_id):
+        return self.client.request(
+            MessageKind.MODULE_AUTHORITY_INTENT,
+            {{"module_id": module_id, "capability_id": capability_id,
+             "action_type": action_type, "params": params, "preview_digest": digest}},
+            action_id=action_id, owner_pid=os.getpid(), response_timeout=55.0,
+        )
+
+runtime = holon_plugin.PluginRuntime(Connector())
+print(runtime.handle_module_action_prepare(
+    "holon.perpdex", "holon.perpdex.action.guard",
+    {{"action_type": "OPEN_POSITION", "leverage": 2, "margin_mode": "ISOLATED",
+     "market": "ETH", "notional_usdc": "12", "side": "LONG"}},
+))
+"""
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="Packaged Windows executables")
 def test_packaged_wallet_boots_offline_with_public_cache(tmp_path: Path) -> None:
     wallet = Path(os.environ.get("HOLON_TEST_WALLET_EXE", ""))
@@ -462,6 +569,79 @@ def test_packaged_funding_reaches_review_with_bounded_fee_drift(tmp_path: Path) 
         cancelled = client.request(MessageKind.CANCEL_ACTION, action_id=action_id)
         assert cancelled.payload["code"] == "ACTION_CANCELLED"
         assert "eth_sendRawTransaction" not in FundingRpcFixture.calls
+    finally:
+        subprocess.run(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=10,
+        )
+        process.wait(timeout=10)
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=2)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Packaged Windows executables")
+def test_packaged_direct_position_review_uses_fake_public_info_and_cancels(
+    tmp_path: Path,
+) -> None:
+    guard = Path(os.environ.get("HOLON_TEST_GUARD_EXE", ""))
+    wallet = Path(os.environ.get("HOLON_TEST_WALLET_EXE", ""))
+    plugin = Path(os.environ.get("HOLON_TEST_PLUGIN_ROOT", ""))
+    if not guard.is_file() or not wallet.is_file() or not (plugin / "plugin.py").is_file():
+        pytest.skip("Packaged Guard, Wallet, and Hermes plugin paths were not provided")
+    local_root = tmp_path / "direct-position-local"
+    paths = WalletPaths(local_root / "Holon" / "data")
+    repository = VaultRepository(paths)
+    record = repository.new_record(generate_mnemonic(), "Direct Position Fixture")
+    repository.create_new("fixture-password", record)
+    SettingsStore(paths).save_active_id(record.summary.profile_id)
+    SnapshotStore(paths.data_dir / "guard-state.json").bootstrap_normal_for_test()
+    ActionStateStore(paths.data_dir / "action-state.json").bootstrap_empty_for_test()
+    RequestStateStore(paths.data_dir / "request-control-state.json").bootstrap_empty_for_test()
+    JournalStore(paths.data_dir / "journal.jsonl").bootstrap_empty_for_test()
+
+    HyperliquidInfoFixture.reset()
+    server = ThreadingHTTPServer(("127.0.0.1", 0), HyperliquidInfoFixture)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    pipe = rf"\\.\pipe\Holon.Guard.packaged-direct-position.{uuid.uuid4()}"
+    environment = dict(os.environ)
+    environment.update({
+        "LOCALAPPDATA": str(local_root),
+        "HOLON_TEST_PACKAGED_E2E": "1",
+        "HOLON_TEST_HYPERLIQUID_INFO_URL": f"http://127.0.0.1:{server.server_port}",
+        "QT_QPA_PLATFORM": "offscreen",
+    })
+    process = subprocess.Popen(
+        [
+            str(guard.resolve()), "--data-dir", str(paths.data_dir),
+            "--pipe-name", pipe, "--wallet-path", str(wallet.resolve()),
+            "--wallet-status-pipe-name", f"{pipe}.status",
+            "--policy-control-pipe-name", f"{pipe}.policy",
+        ],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        env=environment, creationflags=0x08000000,
+    )
+    try:
+        wait_for_pipe(pipe, 20.0)
+        response = subprocess.run(
+            [sys.executable, "-I", "-c", _packaged_direct_position_code(plugin, pipe)],
+            check=True, capture_output=True, text=True, timeout=70, env=environment,
+        )
+        started = json.loads(response.stdout)
+        assert started["status"] == "AWAITING_LOCAL_CONFIRMATION"
+        assert started["action_type"] == "OPEN_POSITION"
+        assert "preview_digest" not in started
+        action_id = started["action_id"]
+        cancelled = PipeClient(pipe, 2.0, 55.0).request(
+            MessageKind.CANCEL_ACTION, action_id=action_id,
+        )
+        assert cancelled.payload["code"] == "ACTION_CANCELLED"
+        assert {"metaAndAssetCtxs", "l2Book", "clearinghouseState", "userFees", "referral"}.issubset(
+            HyperliquidInfoFixture.calls,
+        )
+        assert "exchange" not in HyperliquidInfoFixture.calls
     finally:
         subprocess.run(
             ["taskkill", "/PID", str(process.pid), "/T", "/F"],

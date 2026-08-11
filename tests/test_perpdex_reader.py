@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from io import BytesIO
 from pathlib import Path
 import sys
+from urllib.error import URLError
+
+import pytest
 
 from holon_earn import MetricKind, ProviderSource, ProviderState
 
@@ -12,7 +16,8 @@ sys.path.insert(0, str(PERPDEX_SRC))
 
 from holon_perpdex.earn import HlpEarnProvider  # noqa: E402
 from holon_perpdex.profile import HLP_ADDRESS, HLP_NAME  # noqa: E402
-from holon_perpdex.reader import HyperliquidReader  # noqa: E402
+import holon_perpdex.reader as reader_module  # noqa: E402
+from holon_perpdex.reader import HttpInfoTransport, HyperliquidReader, ReaderError  # noqa: E402
 
 ACCOUNT = {"address": "0x" + "12" * 20, "label": "Main"}
 
@@ -145,3 +150,87 @@ def test_hlp_earn_provider_uses_protocol_apr_and_not_assessed_risk() -> None:
     assert product.metrics[1].kind is MetricKind.TRAILING_RETURN
     assert product.metrics[1].value_percent is None
     assert product.risk.state == "NOT_ASSESSED"
+
+
+class _HttpResponse(BytesIO):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args) -> None:
+        self.close()
+
+
+def test_public_transport_retries_one_transient_failure_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts: list[float] = []
+    sleeps: list[float] = []
+
+    def fake_urlopen(_request, *, timeout: float):
+        attempts.append(timeout)
+        if len(attempts) == 1:
+            raise URLError("transient")
+        return _HttpResponse(b'{"ok":true}')
+
+    monkeypatch.setattr(reader_module, "urlopen", fake_urlopen)
+    transport = HttpInfoTransport(sleeper=sleeps.append)
+    assert transport({"type": "metaAndAssetCtxs"}) == {"ok": True}
+    assert len(attempts) == 2
+    assert sleeps == [0.2]
+
+
+def test_public_transport_never_retries_invalid_data_or_more_than_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts: list[float] = []
+
+    def malformed(_request, *, timeout: float):
+        attempts.append(timeout)
+        return _HttpResponse(b"not-json")
+
+    monkeypatch.setattr(reader_module, "urlopen", malformed)
+    with pytest.raises(ReaderError, match="Invalid Hyperliquid response") as invalid:
+        HttpInfoTransport()({"type": "metaAndAssetCtxs"})
+    assert invalid.value.code == "HYPERLIQUID_DATA_INVALID"
+    assert len(attempts) == 1
+
+    attempts.clear()
+
+    def unavailable(_request, *, timeout: float):
+        attempts.append(timeout)
+        raise URLError("offline")
+
+    monkeypatch.setattr(reader_module, "urlopen", unavailable)
+    with pytest.raises(ReaderError, match="public data is unavailable") as exhausted:
+        HttpInfoTransport(sleeper=lambda _delay: None)({"type": "metaAndAssetCtxs"})
+    assert exhausted.value.code == "HYPERLIQUID_UNAVAILABLE"
+    assert len(attempts) == 2
+
+
+def test_test_endpoint_is_loopback_only_and_live_budget_stops_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("HOLON_TEST_PACKAGED_E2E", raising=False)
+    with pytest.raises(ReaderError) as production:
+        HttpInfoTransport("http://127.0.0.1:1")
+    assert production.value.code == "HYPERLIQUID_ENDPOINT_INVALID"
+    monkeypatch.setenv("HOLON_TEST_PACKAGED_E2E", "1")
+    assert HttpInfoTransport("http://127.0.0.1:1").endpoint.endswith(":1/info")
+    with pytest.raises(ReaderError) as external:
+        HttpInfoTransport("http://example.invalid")
+    assert external.value.code == "HYPERLIQUID_ENDPOINT_INVALID"
+
+    elapsed = [0.0]
+    attempts: list[int] = []
+
+    def unavailable(_request, *, timeout: float):
+        attempts.append(int(timeout))
+        elapsed[0] += 19.9
+        raise URLError("offline")
+
+    monkeypatch.setattr(reader_module, "urlopen", unavailable)
+    transport = HttpInfoTransport(clock=lambda: elapsed[0], sleeper=lambda _delay: None)
+    with transport.live_check_budget(), pytest.raises(ReaderError) as exhausted:
+        transport({"type": "metaAndAssetCtxs"})
+    assert exhausted.value.code == "HYPERLIQUID_UNAVAILABLE"
+    assert attempts == [8]

@@ -20,6 +20,15 @@ TX_RE = re.compile(r"^0x[0-9A-Fa-f]{64}$")
 SELECTOR_RE = re.compile(r"^0x[0-9a-f]{8}$")
 GUARD_STATES = {"NORMAL", "ENTERING", "ACTIVE", "EXITING", "RECOVERY_REQUIRED", "SIGNING_DISABLED"}
 POLICY_RESULTS = {"ALLOWED", "REFUSED", "ERROR", "NOT_APPLICABLE"}
+FAILURE_STAGES = {
+    "GUARD_PREVIEW", "GUARD_FRESH_PREPARE", "WALLET_PREPARE",
+    "WALLET_LIVE_VERIFY", "LOCAL_AUTH", "PHASE_REVALIDATION",
+    "EXCHANGE_SUBMISSION", "RECONCILIATION",
+}
+FAILURE_CATEGORIES = {
+    "adapter", "internal", "perpdex_state", "public_data", "public_transport",
+    "wallet",
+}
 
 
 class JournalValidationError(ValueError):
@@ -99,3 +108,9 @@ def validate_optional(name: str, value: Any) -> None:
         raise JournalValidationError("Invalid transaction hash")
     elif name == "simulated" and type(value) is not bool:
         raise JournalValidationError("Invalid simulated marker")
+    elif name == "stage" and (not isinstance(value, str) or value not in FAILURE_STAGES):
+        raise JournalValidationError("Invalid action failure stage")
+    elif name == "failure_category" and (
+        not isinstance(value, str) or value not in FAILURE_CATEGORIES
+    ):
+        raise JournalValidationError("Invalid failure category")

@@ -355,7 +355,14 @@ class GuardLifecycle(GuardCore):
                 except ActionLedgerFailure:
                     return self.disable_signing(SecurityCode.ACTION_STATE_INVALID.value), None
                 self._persist(idle_snapshot(GuardState.NORMAL, prepared.code, self.clock()))
-                return self._result(False, prepared.code, "Wallet could not prepare the module action."), prepared.payload
+                stage = (
+                    prepared.payload.get("stage")
+                    if isinstance(prepared.payload, dict) else None
+                )
+                return self._result(
+                    False, prepared.code, "Wallet could not prepare the module action.",
+                    stage=stage if isinstance(stage, str) else "WALLET_PREPARE",
+                ), prepared.payload
             payload = prepared.payload
             try:
                 digest = str(payload["prepared_digest"])

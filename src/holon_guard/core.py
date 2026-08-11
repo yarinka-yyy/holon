@@ -97,8 +97,12 @@ class GuardCore:
         self.lending_operation_snapshot = snapshot
         return True
 
-    def _result(self, ok: bool, code: str, message: str) -> GuardResult:
-        return GuardResult(ok, code, self.snapshot.state, message, self.snapshot.flow_id)
+    def _result(
+        self, ok: bool, code: str, message: str, *, stage: str | None = None,
+    ) -> GuardResult:
+        return GuardResult(
+            ok, code, self.snapshot.state, message, self.snapshot.flow_id, stage,
+        )
 
     def _set_prepared_audit_context(
         self, payload: dict[str, object], action_type: str,

@@ -25,13 +25,13 @@ metadata:
    at least `5` USDC. It is one native USDC transfer on Arbitrum One to the active account's
    official Hyperliquid Bridge2 route. Do not offer `USDC.e`, another asset or network, a
    third-party bridge, another account, `usdClassTransfer`, auto-trading, or retry.
-5. Call `holon_perpdex_fund_prepare` only with that exact user amount. Do not show its technical
-   preview or ask for another chat confirmation. The original exact funding request authorizes
-   opening a local Wallet Review only; it does not authorize signing or broadcast.
-6. Immediately call `holon_perpdex_fund_execute` once with that preview's exact `preview_digest`
-   in the same turn. Do not repeat route/address/contract data in chat: Wallet Review shows the
-   amount, Arbitrum network, native-USDC route and maximum fee in a human-readable summary, with
-   technical details available on demand. Never substitute a digest, retry, or begin a trade after funding.
+5. Call `holon_perpdex_fund_prepare` only with that exact user amount. It internally performs the
+   one-use preview and opens local Wallet Review itself. Do not show a technical preview, request
+   another chat confirmation, or call an execute tool. The original exact funding request authorizes
+   Review only; it does not authorize signing or broadcast.
+6. Do not repeat route/address/contract data in chat: Wallet Review shows the amount, Arbitrum
+   network, native-USDC route and maximum fee in a human-readable summary, with technical details
+   available on demand. Never retry, substitute an action, or begin a trade after funding.
 7. For `OPEN_POSITION`, ask only for missing market, direction, leverage, or amount. An ordinary
    amount such as "open ETH long 2x with 6 USDC" means **6 USDC margin**; calculate the final
    position notional as margin × leverage. Treat `notional`, `total position`, or `including
@@ -41,9 +41,9 @@ metadata:
    margin at the requested leverage instead of trying to open Wallet Review.
 8. For `CLOSE_POSITION`, ask only for the market or whether to close all/a percentage when those
    facts are missing. A complete open or close request is already sufficient to open a local Wallet
-   Review: call `holon_perpdex_prepare`, then immediately call `holon_perpdex_execute` once with
-   that exact `preview_digest` in the same turn. Do not show a technical preview or request a
-   separate chat confirmation. This authorizes Review only, never signing or external submission.
+   Review: call `holon_perpdex_prepare` once. It internally consumes its one-use preview and opens
+   Review. Do not show a technical preview, request a separate chat confirmation, or call an execute
+   tool. This authorizes Review only, never signing or external submission.
 9. HLP deposit and withdrawal keep the separate chat-confirmation flow. Explain price/slippage,
    size, margin mode, leverage/reduce-only state, HLP lock-up, checks, caveats, and referral
    disclosure when present, then wait for explicit confirmation in a later user message before
