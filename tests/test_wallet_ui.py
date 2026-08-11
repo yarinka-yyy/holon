@@ -1512,6 +1512,25 @@ def test_dashboard_actions_use_one_sized_two_tone_icon_language() -> None:
         assert "#84C7BA" in asset and "#F2F3F1" in asset
 
 
+def test_hyperliquid_funding_pages_use_human_copy_and_scroll_cue() -> None:
+    qml = Path(__file__).parents[1] / "src" / "holon_wallet" / "qml"
+    review = (qml / "ProtectedActionReviewPage.qml").read_text(encoding="utf-8")
+    details = (qml / "FundingReviewDetails.qml").read_text(encoding="utf-8")
+    password = (qml / "ProtectedActionPasswordPage.qml").read_text(encoding="utf-8")
+    result = (qml / "ProtectedActionResultPage.qml").read_text(encoding="utf-8")
+
+    assert 'title: isFunding ? "Fund Hyperliquid"' in review
+    assert '"Deposit to Hyperliquid"' in review
+    assert 'objectName: "perpDexReviewScrollCue"' in review
+    assert "Verified route and maximum fee" in details
+    assert 'title: isFunding ? "Authorize Hyperliquid deposit"' in password
+    assert '"Sign and submit " + root.fundingAmount() + " USDC deposit"' in password
+    assert 'title: isFunding ? "Hyperliquid deposit result"' in result
+    assert '"Hyperliquid USDC deposit"' in result
+    assert 'code === "FUNDING_POLICY_UNAVAILABLE"' in result
+    assert '"Arbitrum is unavailable. Nothing was signed or sent."' in result
+
+
 def test_network_icons_are_accessible_but_new_networks_do_not_enter_send() -> None:
     qml = Path(__file__).parents[1] / "src" / "holon_wallet" / "qml"
     card = (qml / "NetworkCard.qml").read_text(encoding="utf-8")

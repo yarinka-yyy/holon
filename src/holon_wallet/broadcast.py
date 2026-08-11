@@ -51,7 +51,7 @@ from .history import (
     HistoryValidationError,
     WalletHistoryRecord,
 )
-from .public_data import USDC_ABI
+from .public_data import NETWORK_BY_ID, USDC_ABI
 from .signer import (
     OfflineSigningCode,
     OfflineSigningPolicy,
@@ -62,11 +62,9 @@ from .signer import (
 from .storage import StorageError
 from .transfer import (
     BASE_NETWORK_ID,
-    ETH_ASSET_ID,
     TRANSFER_ROUTES,
     PreparedTransferAction,
     SigningPermit,
-    TransferRouteSpec,
     encode_usdc_transfer,
     transfer_route,
 )
@@ -1912,11 +1910,13 @@ def _public_transaction_matches(
 
 
 def _endpoint(environ: Mapping[str, str], network_id: str = BASE_NETWORK_ID) -> str | None:
-    try:
-        route: TransferRouteSpec = transfer_route(network_id, ETH_ASSET_ID)
-    except Exception:
+    network = NETWORK_BY_ID.get(network_id)
+    if network is None:
         return None
-    value = environ.get(route.endpoint_env, route.default_endpoint).strip()
+    value = environ.get(network.endpoint_env, network.default_endpoint)
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
     return value or None
 
 

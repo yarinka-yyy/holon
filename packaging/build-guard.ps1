@@ -77,28 +77,37 @@ try {
     if ($LASTEXITCODE -ne 0 -or $pythonVersion -ne "3.13.14") {
         throw "Guard build requires CPython 3.13.14; found $pythonVersion"
     }
-    & $PythonPath -m PyInstaller `
-        --clean `
-        --noconfirm `
-        --onefile `
-        --windowed `
-        --noupx `
-        --name HolonGuard `
-        --version-file $versionFile `
-        --paths $sourceRoot `
-        --add-data "$lendingProfile;holon_lending" `
-        --add-data "$lendingActionProfile;holon_lending" `
-        --add-data "$baselinePolicy;holon_policy" `
-        --add-data "$networkAssets;holon_contracts" `
-        --add-data "$qmlRoot;holon_wallet/qml" `
-        @moduleBuildArguments `
-        --collect-data web3 `
-        --distpath $distRoot `
-        --workpath (Join-Path $buildRoot "work") `
-        --specpath $buildRoot `
-        $entryPoint
-    if ($LASTEXITCODE -ne 0) {
-        throw "PyInstaller failed with exit code $LASTEXITCODE"
+    $pyInstallerExit = 1
+    $pyInstallerErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        & $PythonPath (Join-Path $PSScriptRoot "run_pyinstaller.py") `
+            --clean `
+            --noconfirm `
+            --onefile `
+            --windowed `
+            --noupx `
+            --name HolonGuard `
+            --version-file $versionFile `
+            --paths $sourceRoot `
+            --add-data "$lendingProfile;holon_lending" `
+            --add-data "$lendingActionProfile;holon_lending" `
+            --add-data "$baselinePolicy;holon_policy" `
+            --add-data "$networkAssets;holon_contracts" `
+            --add-data "$qmlRoot;holon_wallet/qml" `
+            @moduleBuildArguments `
+            --collect-data web3 `
+            --distpath $distRoot `
+            --workpath (Join-Path $buildRoot "work") `
+            --specpath $buildRoot `
+            $entryPoint
+        $pyInstallerExit = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $pyInstallerErrorActionPreference
+    }
+    if ($pyInstallerExit -ne 0) {
+        throw "PyInstaller failed with exit code $pyInstallerExit"
     }
     $artifact = Join-Path $distRoot "HolonGuard.exe"
     if (-not (Test-Path -LiteralPath $artifact -PathType Leaf)) {

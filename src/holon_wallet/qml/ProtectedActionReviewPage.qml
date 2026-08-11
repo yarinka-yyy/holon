@@ -4,12 +4,17 @@ import "."
 
 TransactionFlowShell {
     id: root
-    title: "Confirm Protected Action"
-    subtitle: "Review every phase before one-time authorization"
+    property bool isFunding: root.action.actionType === "FUND_TRADING_ACCOUNT"
+    title: isFunding ? "Fund Hyperliquid" : "Confirm Protected Action"
+    subtitle: isFunding ? "Review the one-time Arbitrum USDC deposit" : "Review every phase before one-time authorization"
     activeStep: 0
     onBackRequested: walletController.cancelPerpDexAction()
     property var action: walletController.perpDexAction
-
+    function fundingAmount() {
+        let phases = root.action.phases || []
+        return phases.length > 0 ? (phases[0].semantic || {}).amount_usdc || "" : ""
+    }
+    function phaseTitle(phase) { return root.isFunding && phase.phaseType === "ARBITRUM_USDC_TRANSFER" ? "Deposit to Hyperliquid" : phase.phaseType }
     function phaseSummary(phase) {
         let value = phase.semantic || {}
         if (phase.phaseType === "SET_REFERRER") return "Assign referral code " + value.code
@@ -27,12 +32,12 @@ TransactionFlowShell {
         return (value.is_deposit ? "Deposit " : "Withdraw ")
             + value.amount_usdc + " USDC · official HLP"
     }
-
     Rectangle {
         x: 0; y: 0; width: 458; height: 42; radius: 12
         color: "#332C261B"; border.width: 1; border.color: "#66D5AA64"
         Text {
-            anchors.centerIn: parent; text: "EXTERNAL PROTOCOL · REAL FUNDS"
+            anchors.centerIn: parent
+            text: root.isFunding ? "HYPERLIQUID DEPOSIT · REAL FUNDS" : "EXTERNAL PROTOCOL · REAL FUNDS"
             color: Design.warning; font.family: Design.fontFamily
             font.pixelSize: 11; font.weight: Font.DemiBold
         }
@@ -41,13 +46,17 @@ TransactionFlowShell {
         x: 0; y: 54; width: 458; height: 76
         Text {
             x: 16; y: 13; width: 426
-            text: root.action.actionType || "Protected action"
+            text: root.isFunding
+                ? "Deposit " + root.fundingAmount() + " USDC to Hyperliquid"
+                : root.action.actionType || "Protected action"
             color: Design.text; font.family: Design.fontFamily
             font.pixelSize: 18; font.weight: Font.DemiBold
         }
         Text {
             x: 16; y: 44; width: 426; elide: Text.ElideMiddle
-            text: root.action.account || ""
+            text: root.isFunding
+                ? "Native USDC · Arbitrum One · official Bridge2"
+                : root.action.account || ""
             color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 11
         }
     }
@@ -71,7 +80,7 @@ TransactionFlowShell {
                         font.pixelSize: 14; font.weight: Font.DemiBold
                     }
                     Text {
-                        x: 48; y: 9; width: 394; text: modelData.phaseType
+                        x: 48; y: 9; width: 394; text: root.phaseTitle(modelData)
                         color: Design.text; font.family: Design.fontFamily; font.pixelSize: 12
                     }
                     Text {
@@ -92,7 +101,7 @@ TransactionFlowShell {
                 }
             }
             Rectangle {
-                visible: (root.action.disclosure || "").length > 0
+                visible: !root.isFunding && (root.action.disclosure || "").length > 0
                 width: 458; height: visible ? 118 : 0; radius: 12
                 color: "#332C261B"; border.width: 1; border.color: "#66D5AA64"
                 Text {
@@ -101,19 +110,13 @@ TransactionFlowShell {
                     color: Design.warning; font.family: Design.fontFamily; font.pixelSize: 11
                 }
             }
-            Rectangle {
-                visible: root.action.actionType === "FUND_TRADING_ACCOUNT"
-                width: 458; height: visible ? 136 : 0; radius: 12
-                color: "#332C261B"; border.width: 1; border.color: "#66D5AA64"
-                Text {
-                    anchors.fill: parent; anchors.margins: 14; wrapMode: Text.Wrap
-                    text: "Arbitrum One (42161) · native USDC only\n"
-                        + "Token: " + (root.action.funding || {}).tokenContract + "\n"
-                        + "Bridge2: " + (root.action.funding || {}).recipient + "\n"
-                        + "Maximum gas: " + (root.action.funding || {}).maxTotalFeeWei
-                        + " wei\nMinimum credit: 5 USDC. Wrong token or network may be irreversible."
-                    color: Design.warning; font.family: Design.fontFamily; font.pixelSize: 11
-                }
+            FundingReviewDetails {
+                visible: root.isFunding
+                width: 458; height: visible ? 314 : 0
+                amount: root.fundingAmount(); account: root.action.account || ""
+                tokenContract: (root.action.funding || {}).tokenContract || ""
+                recipient: (root.action.funding || {}).recipient || ""
+                maxTotalFeeWei: (root.action.funding || {}).maxTotalFeeWei || ""
             }
             Rectangle {
                 visible: root.action.actionType === "HLP_DEPOSIT"
@@ -126,6 +129,13 @@ TransactionFlowShell {
                 }
             }
         }
+    }
+    ScrollCue {
+        objectName: "perpDexReviewScrollCue"
+        anchors.right: phaseScroll.right; anchors.rightMargin: 8
+        anchors.bottom: phaseScroll.bottom; anchors.bottomMargin: 8
+        suggested: phaseScroll.contentHeight > phaseScroll.height
+            && phaseScroll.contentY < phaseScroll.contentHeight - phaseScroll.height - 2
     }
     FormButton {
         objectName: "perpDexContinueButton"; x: 0; y: 466; width: 458; height: 54

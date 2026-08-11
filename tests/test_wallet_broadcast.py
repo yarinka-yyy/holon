@@ -24,6 +24,7 @@ from holon_wallet.broadcast import (
     ReceiptTrackingCode,
     SubmissionRejectedError,
     Web3MainnetRpc,
+    _endpoint,
     mainnet_result_to_map,
 )
 from holon_wallet.history import (
@@ -36,6 +37,7 @@ from holon_wallet.storage import StorageError, WalletPaths
 from holon_wallet.transfer import (
     PendingTransferRequest,
     SigningPermit,
+    TransferPreflightError,
     TransferPreflightService,
     transfer_route,
 )
@@ -277,6 +279,15 @@ def test_transfer_environment_cannot_enable_default_executor(tmp_path) -> None:
     assert not result.broadcast_attempted
     assert rpc.chain_calls == chain_calls_before
     assert rpc.send_calls == 0
+
+
+def test_network_owned_endpoint_keeps_arbitrum_usdc_without_eth_route() -> None:
+    assert _endpoint({}, "arbitrum") == "https://arb1.arbitrum.io/rpc"
+    assert _endpoint({"HOLON_ARBITRUM_RPC_URL": "fixture://arbitrum"}, "arbitrum") == (
+        "fixture://arbitrum"
+    )
+    with pytest.raises(TransferPreflightError):
+        transfer_route("arbitrum", "eth")
 
 
 @pytest.mark.parametrize("profile_type", ["mnemonic", "raw_private_key"])

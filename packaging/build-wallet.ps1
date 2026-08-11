@@ -82,35 +82,44 @@ try {
     & $PythonPath (Join-Path $PSScriptRoot "build_icon.py") `
         (Join-Path $qmlRoot "assets\holon.svg") $iconPath
     if ($LASTEXITCODE -ne 0) { throw "Wallet icon build failed" }
-    & $PythonPath -m PyInstaller `
-        --clean `
-        --noconfirm `
-        --onefile `
-        --windowed `
-        --noupx `
-        --name HolonWallet `
-        --version-file $versionFile `
-        --icon $iconPath `
-        --paths $sourceRoot `
-        --add-data "$qmlRoot;holon_wallet/qml" `
-        --add-data "$resourceRoot;holon_wallet/resources" `
-        --add-data "$lendingReadProfile;holon_lending" `
-        --add-data "$lendingActionProfile;holon_lending" `
-        --add-data "$baselinePolicy;holon_policy" `
-        --add-data "$networkAssets;holon_contracts" `
-        @moduleBuildArguments `
-        --collect-data bip_utils `
-        --collect-all coincurve `
-        --collect-data web3 `
-        --hidden-import PySide6.QtQml `
-        --hidden-import PySide6.QtQuick `
-        --hidden-import PySide6.QtSvg `
-        --distpath $distRoot `
-        --workpath (Join-Path $buildRoot "work") `
-        --specpath $buildRoot `
-        $entryPoint
-    if ($LASTEXITCODE -ne 0) {
-        throw "PyInstaller failed with exit code $LASTEXITCODE"
+    $pyInstallerExit = 1
+    $pyInstallerErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        & $PythonPath (Join-Path $PSScriptRoot "run_pyinstaller.py") `
+            --clean `
+            --noconfirm `
+            --onefile `
+            --windowed `
+            --noupx `
+            --name HolonWallet `
+            --version-file $versionFile `
+            --icon $iconPath `
+            --paths $sourceRoot `
+            --add-data "$qmlRoot;holon_wallet/qml" `
+            --add-data "$resourceRoot;holon_wallet/resources" `
+            --add-data "$lendingReadProfile;holon_lending" `
+            --add-data "$lendingActionProfile;holon_lending" `
+            --add-data "$baselinePolicy;holon_policy" `
+            --add-data "$networkAssets;holon_contracts" `
+            @moduleBuildArguments `
+            --collect-data bip_utils `
+            --collect-all coincurve `
+            --collect-data web3 `
+            --hidden-import PySide6.QtQml `
+            --hidden-import PySide6.QtQuick `
+            --hidden-import PySide6.QtSvg `
+            --distpath $distRoot `
+            --workpath (Join-Path $buildRoot "work") `
+            --specpath $buildRoot `
+            $entryPoint
+        $pyInstallerExit = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $pyInstallerErrorActionPreference
+    }
+    if ($pyInstallerExit -ne 0) {
+        throw "PyInstaller failed with exit code $pyInstallerExit"
     }
     $artifact = Join-Path $distRoot "HolonWallet.exe"
     if (-not (Test-Path -LiteralPath $artifact -PathType Leaf)) {

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 import sys
@@ -13,7 +12,9 @@ from holon_contracts import ContractViolation, MessageKind, make_envelope
 from holon_guard.authority import AuthorityService
 from holon_wallet.broadcast import MainnetTransferCode
 from holon_wallet.model import ProfileSummary
-from holon_wallet.transfer import PreparedTransferAction, UnsignedTransaction
+from holon_wallet.transfer import (
+    PreparedTransferAction, UnsignedTransaction,
+)
 
 ROOT = Path(__file__).parents[1]
 sys.path.insert(0, str(ROOT / "modules" / "perpdex" / "src"))

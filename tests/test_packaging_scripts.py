@@ -29,6 +29,21 @@ def test_wallet_build_embeds_the_holon_application_icon() -> None:
     ).read_text(encoding="utf-8")
 
     assert '"assets\\holon.svg"' in script
+
+
+def test_pyinstaller_diagnostics_preserve_native_exit_codes() -> None:
+    packaging = Path(__file__).parents[1] / "packaging"
+    runner = (packaging / "run_pyinstaller.py").read_text(encoding="utf-8")
+
+    assert '"-m", "PyInstaller"' in runner
+    assert "stderr=STDOUT" in runner
+
+    for name in ("build-guard.ps1", "build-wallet.ps1"):
+        script = (packaging / name).read_text(encoding="utf-8")
+        assert '"run_pyinstaller.py"' in script
+        assert '$ErrorActionPreference = "Continue"' in script
+        assert "$pyInstallerExit = $LASTEXITCODE" in script
+        assert "PyInstaller failed with exit code $pyInstallerExit" in script
     assert "build_icon.py" in script
     assert "--icon $iconPath" in script
 

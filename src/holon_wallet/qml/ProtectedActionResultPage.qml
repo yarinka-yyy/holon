@@ -4,13 +4,55 @@ import "."
 
 TransactionFlowShell {
     id: root
-    title: "Protected Action Result"
-    subtitle: result.status === "PENDING_CREDIT"
+    property bool isFunding: (root.result.actionType || "") === "FUND_TRADING_ACCOUNT"
+    title: isFunding ? "Hyperliquid deposit result" : "Protected Action Result"
+    subtitle: isFunding ? root.fundingSubtitle() : result.status === "PENDING_CREDIT"
         ? "Broadcast is not a Hyperliquid credit · refresh portfolio"
         : "Public reconciliation · no automatic retry"
     activeStep: 3; backVisible: false
     property var result: walletController.perpDexResult
     property bool positive: result.status === "COMPLETED" || result.status === "PENDING_CREDIT"
+
+    function fundingSubtitle() {
+        let code = root.result.code || ""
+        if (code === "FUNDING_POLICY_UNAVAILABLE")
+            return "Arbitrum is unavailable. Nothing was signed or sent."
+        if (code === "FUNDING_GUARD_FEE_CAP_EXCEEDED" || code === "FUNDING_WALLET_FEE_CAP_EXCEEDED")
+            return "The network fee changed beyond the reviewed limit. Nothing was signed or sent."
+        if (code === "FUNDING_INSUFFICIENT_USDC")
+            return "There is not enough native USDC for this deposit. Nothing was signed or sent."
+        if (code === "FUNDING_INSUFFICIENT_ETH")
+            return "There is not enough ETH for the Arbitrum network fee. Nothing was signed or sent."
+        if (code === "FUNDING_ACCOUNT_CHANGED" || code === "FUNDING_AMOUNT_CHANGED"
+                || code === "FUNDING_GUARD_ROUTE_CHANGED" || code === "FUNDING_WALLET_ROUTE_CHANGED")
+            return "The protected deposit changed. Nothing was signed or sent."
+        if (root.result.status === "PENDING_CREDIT")
+            return "Submitted to Arbitrum · Hyperliquid credit is pending"
+        if (root.result.status === "FAILED")
+            return "The Wallet stopped this deposit before it could complete"
+        if (root.result.status === "UNKNOWN")
+            return "Submission status is uncertain · check the public portfolio"
+        return "Public reconciliation · no automatic retry"
+    }
+    function fundingStatus() {
+        if (root.result.status === "PENDING_CREDIT") return "AWAITING HYPERLIQUID CREDIT"
+        if (root.result.status === "FAILED") return "DEPOSIT NOT COMPLETED"
+        return root.result.status || "UNKNOWN"
+    }
+    function phaseTitle(phase) {
+        return root.isFunding && phase.phaseType === "ARBITRUM_USDC_TRANSFER"
+            ? "Hyperliquid USDC deposit" : phase.phaseType || "Phase"
+    }
+    function phaseState(phase) {
+        return root.isFunding && phase.state === "PENDING_CREDIT" ? "SUBMITTED" : phase.state || "UNKNOWN"
+    }
+    function phaseDetail(phase) {
+        if (root.isFunding && phase.state === "PENDING_CREDIT")
+            return phase.publicId ? "Arbitrum transaction submitted · " + phase.publicId : "Arbitrum transaction submitted"
+        if (root.isFunding && phase.state === "FAILED")
+            return "No automatic retry was sent. You can create a new review after checking the issue."
+        return (phase.code || "") + (phase.publicId ? " · " + phase.publicId : "")
+    }
 
     SurfaceCard {
         x: 0; y: 0; width: 458; height: 154
@@ -26,13 +68,13 @@ TransactionFlowShell {
         }
         Text {
             anchors.horizontalCenter: parent.horizontalCenter; y: 92
-            text: root.result.status || "UNKNOWN"
+            text: root.isFunding ? root.fundingStatus() : root.result.status || "UNKNOWN"
             color: Design.text; font.family: Design.fontFamily
             font.pixelSize: 19; font.weight: Font.DemiBold
         }
         Text {
             x: 20; y: 121; width: 418; horizontalAlignment: Text.AlignHCenter
-            text: root.result.code || "PERPDEX_RESULT_UNKNOWN"
+            text: root.isFunding ? root.fundingSubtitle() : root.result.code || "PERPDEX_RESULT_UNKNOWN"
             color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 11
         }
     }
@@ -48,18 +90,18 @@ TransactionFlowShell {
                     required property var modelData
                     width: 458; height: 66
                     Text {
-                        x: 14; y: 10; width: 280; text: modelData.phaseType || "Phase"
+                        x: 14; y: 10; width: 280; text: root.phaseTitle(modelData)
                         color: Design.text; font.family: Design.fontFamily; font.pixelSize: 12
                     }
                     Text {
                         anchors.right: parent.right; anchors.rightMargin: 14; y: 10
-                        text: modelData.state || "UNKNOWN"
+                        text: root.phaseState(modelData)
                         color: modelData.state === "CONFIRMED" ? Design.accent : Design.warning
                         font.family: Design.fontFamily; font.pixelSize: 11; font.weight: Font.DemiBold
                     }
                     Text {
                         x: 14; y: 36; width: 430; elide: Text.ElideMiddle
-                        text: (modelData.code || "") + (modelData.publicId ? " · " + modelData.publicId : "")
+                        text: root.phaseDetail(modelData)
                         color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 10
                     }
                 }
