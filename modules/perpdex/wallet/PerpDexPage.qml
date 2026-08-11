@@ -18,6 +18,17 @@ Item {
     function money(value) {
         return value === undefined || value === null || value === "" ? "—" : value + " USDC"
     }
+    function positionNotional(position) {
+        const value = Number(position.size_asset) * Number(position.entry_price)
+        return Number.isFinite(value) ? "≈ " + value.toFixed(2) + " USDC" : "—"
+    }
+    function positionPrice(value) {
+        return value === undefined || value === null || value === "" ? "—" : "$" + value
+    }
+    function notionalFromMargin(value) {
+        const number = Number(value) * root.leverage
+        return Number.isFinite(number) && number > 0 ? number.toFixed(6).replace(/0+$/, "").replace(/\.$/, "") : ""
+    }
     function refresh() {
         if (root.moduleViewModel && !root.moduleViewModel.busy)
             root.moduleViewModel.refresh()
@@ -179,23 +190,38 @@ Item {
                 model: root.moduleViewModel ? (root.moduleViewModel.portfolio.positions || []) : []
                 delegate: SurfaceCard {
                     required property var modelData
-                    width: content.width; height: 88
+                    width: content.width; height: 124
                     Text {
-                        x: 14; y: 12
+                        x: 16; y: 14
                         text: modelData.market + " · " + modelData.side
                             + (modelData.supported ? "" : " · READ ONLY")
                         color: modelData.supported ? Design.text : Design.warning
-                        font.family: Design.fontFamily; font.pixelSize: 14; font.weight: Font.DemiBold
+                        font.family: Design.fontFamily; font.pixelSize: 17; font.weight: Font.DemiBold
                     }
                     Text {
-                        x: 14; y: 42
-                        text: "Size " + modelData.size_asset + " · Entry " + (modelData.entry_price || "—")
-                        color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 12
+                        x: 16; y: 45
+                        text: modelData.size_asset + " " + modelData.market + " · " + root.positionNotional(modelData)
+                        color: Design.text; font.family: Design.fontFamily; font.pixelSize: 13; font.weight: Font.Medium
                     }
                     Text {
-                        x: 14; y: 64
-                        text: "PnL " + modelData.unrealized_pnl_usdc + " USDC"
-                        color: Number(modelData.unrealized_pnl_usdc) >= 0 ? Design.accent : Design.danger
+                        x: 16; y: 74
+                        text: modelData.leverage_type + " · " + modelData.leverage_value + "x · Margin " + root.money(modelData.margin_used_usdc)
+                        color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 11
+                    }
+                    Text {
+                        x: 16; y: 96; width: 270
+                        text: "Entry " + root.positionPrice(modelData.entry_price) + " · Liquidation " + root.positionPrice(modelData.liquidation_price)
+                        color: Design.textFaint; font.family: Design.fontFamily; font.pixelSize: 10; elide: Text.ElideRight
+                    }
+                    Text {
+                        anchors.right: parent.right; anchors.rightMargin: 16; y: 20
+                        text: "PnL\n" + modelData.unrealized_pnl_usdc + " USDC"
+                        horizontalAlignment: Text.AlignRight; color: Number(modelData.unrealized_pnl_usdc) >= 0 ? Design.accent : Design.danger
+                        font.family: Design.fontFamily; font.pixelSize: 13; font.weight: Font.DemiBold
+                    }
+                    Text {
+                        anchors.right: parent.right; anchors.rightMargin: 16; y: 74
+                        text: "Live position"; color: Design.textFaint
                         font.family: Design.fontFamily; font.pixelSize: 11
                     }
                 }
@@ -260,7 +286,7 @@ Item {
                         visible: root.tradeMode === "OPEN"
                         DraftField {
                             id: openNotional; objectName: "perpDexOpenNotional"
-                            width: parent.width; height: 70; label: "Notional in USDC"
+                            width: parent.width; height: 70; label: "Margin in USDC"
                             placeholderText: "25"
                         }
                     }
@@ -412,7 +438,7 @@ Item {
                         onTriggered: {
                             if (root.tradeMode === "OPEN")
                                 root.moduleViewModel.prepareOpenPosition(
-                                    root.market, root.side, openNotional.text,
+                                    root.market, root.side, root.notionalFromMargin(openNotional.text),
                                     root.leverage, root.marginMode,
                                 )
                             else
@@ -425,43 +451,42 @@ Item {
             SurfaceCard {
                 objectName: "perpDexPreparedCard"
                 visible: root.moduleViewModel && Object.keys(root.moduleViewModel.prepared || {}).length > 0
-                width: parent.width; height: visible ? 214 : 0
+                width: parent.width; height: visible ? 176 : 0
                 Text {
-                    x: 16; y: 14; text: "Prepared · " + (root.moduleViewModel ? root.moduleViewModel.prepared.action_type : "")
+                    x: 16; y: 14; text: "Fresh review is ready"
                     color: Design.text; font.family: Design.fontFamily
                     font.pixelSize: 15; font.weight: Font.DemiBold
                 }
                 Text {
                     x: 16; y: 48; width: parent.width - 32; wrapMode: Text.Wrap
-                    text: root.moduleViewModel
-                        ? JSON.stringify(root.moduleViewModel.prepared.preview || {}) : ""
+                    text: "The Wallet will show the exact position and live protections before it asks for your local password."
                     color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 10
                     maximumLineCount: 4; elide: Text.ElideRight
                 }
                 Text {
-                    x: 16; y: 112; width: parent.width - 32
-                    text: "This is read-only. The exact bundle still requires trusted Wallet Review and a fresh password."
+                    x: 16; y: 98; width: parent.width - 32
+                    text: "Nothing has been signed or submitted."
                     wrapMode: Text.Wrap; color: Design.warning
                     font.family: Design.fontFamily; font.pixelSize: 10
                 }
                 FormButton {
                     objectName: "perpDexExecutePreparedButton"
-                    x: 16; y: 158; width: 276; height: 42; label: "Open exact Wallet Review"
+                    x: 16; y: 126; width: 276; height: 36; label: "Open Wallet Review"
                     onTriggered: root.moduleViewModel.executePrepared()
                 }
                 FormButton {
-                    x: 300; y: 158; width: 142; height: 42; label: "Cancel"; primary: false
+                    x: 300; y: 126; width: 142; height: 36; label: "Cancel"; primary: false
                     onTriggered: root.moduleViewModel.cancelPrepared()
                 }
             }
 
             Text {
-                text: "Open orders"; color: Design.text
+                text: "Active orders"; color: Design.text
                 font.family: Design.fontFamily; font.pixelSize: 17; font.weight: Font.DemiBold
             }
             Text {
                 visible: !root.moduleViewModel || (root.moduleViewModel.portfolio.orders || []).length === 0
-                text: "No open orders"; color: Design.textMuted
+                text: "Unfinished orders only. Your IOC orders normally do not stay active."; color: Design.textMuted
                 font.family: Design.fontFamily; font.pixelSize: 12
             }
             Repeater {
@@ -482,37 +507,6 @@ Item {
                 }
             }
 
-            Text {
-                text: "Operation history"; color: Design.text
-                font.family: Design.fontFamily; font.pixelSize: 17; font.weight: Font.DemiBold
-            }
-            Text {
-                visible: !root.moduleViewModel || root.moduleViewModel.operationHistory.length === 0
-                text: "No Holon PerpDEX operations yet"; color: Design.textMuted
-                font.family: Design.fontFamily; font.pixelSize: 12
-            }
-            Repeater {
-                model: root.moduleViewModel ? root.moduleViewModel.operationHistory : []
-                delegate: SurfaceCard {
-                    required property var modelData
-                    width: content.width; height: 72
-                    Text {
-                        x: 14; y: 11; text: modelData.action_type
-                        color: Design.text; font.family: Design.fontFamily; font.pixelSize: 12
-                    }
-                    Text {
-                        anchors.right: parent.right; anchors.rightMargin: 14; y: 11
-                        text: modelData.state
-                        color: modelData.state === "COMPLETED" ? Design.accent : Design.warning
-                        font.family: Design.fontFamily; font.pixelSize: 11; font.weight: Font.DemiBold
-                    }
-                    Text {
-                        x: 14; y: 41; width: parent.width - 28; elide: Text.ElideMiddle
-                        text: modelData.updated_at + " · " + modelData.operation_id
-                        color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 9
-                    }
-                }
-            }
         }
     }
 

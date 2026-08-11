@@ -3,9 +3,10 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 
-from holon_wallet.broadcast import MainnetBroadcastPolicy, MainnetTransferExecutor
-from holon_wallet.history import HistoryStore
+from holon_wallet.broadcast import MainnetBroadcastPolicy, MainnetTransferCode, MainnetTransferExecutor, MainnetTransferResult
+from holon_wallet.history import HistoryStatus, HistoryStore
 from holon_wallet.storage import WalletPaths
 from holon_wallet.transfer import (
     PreparedTransferAction, SigningPermit, TransferPreflightService, UnsignedTransaction,
@@ -111,3 +112,33 @@ def test_funding_executes_through_the_arbitrum_network_endpoint_only(tmp_path: P
     )
     assert exceeded.code.value == "REVALIDATION_FEE_CAP_EXCEEDED"
     assert rpc.send_calls == 1
+
+
+def test_pre_sign_funding_refusal_changes_history_from_prepared_to_failed(tmp_path: Path) -> None:
+    now = datetime.now(UTC)
+    phase = SimpleNamespace(phase_id="phase-fixture", phase_type=SimpleNamespace(value="ARBITRUM_USDC_TRANSFER"))
+    bundle = SimpleNamespace(operation_id=OPERATION_ID, intent=SimpleNamespace(action_type=SimpleNamespace(value="FUND_TRADING_ACCOUNT")), phases=(phase,))
+    action = SimpleNamespace(action_id="act-history", profile_id="profile", network_id="arbitrum", chain_id=42161,
+        sender="0x" + "11" * 20, recipient=BRIDGE2_ADDRESS, token_contract=NATIVE_USDC, token="USDC",
+        amount_atomic=6_000_000, decimals=6, max_total_fee_wei=100, created_at=now, digest="a" * 64)
+    events: list[tuple[str, str]] = []
+
+    class Adapter:
+        def mark_operation(self, operation_id, state): events.append((operation_id, state))
+        def mark_phase(self, operation_id, phase_id, state, **_kwargs): events.append((phase_id, state))
+        def mark_external_submission_started(self, _operation_id): raise AssertionError("must not sign")
+
+    class Refusal:
+        def __init__(self, store): self.history_store = store
+        def execute(self, prepared, digest, password, permit, on_signed=None):
+            del prepared, digest, password, permit, on_signed
+            return MainnetTransferResult(MainnetTransferCode.REVALIDATION_FAILED, "act-history", "a" * 64,
+                "", "", None, "2026-08-11T12:00:00Z", False, True, False, "perpdex_funding")
+
+    store = HistoryStore(WalletPaths(tmp_path))
+    result = ModuleFundingExecutor(Refusal(store), Adapter()).execute(SimpleNamespace(bundle=bundle, action=action), "fixture")
+    assert result.code == "FUNDING_REVALIDATION_FAILED"
+    assert store.load()[0].status is HistoryStatus.FAILED
+    assert store.load()[0].transaction_hash is None
+    assert events == [(OPERATION_ID, "EXECUTING"), ("phase-fixture", "SUBMITTING"),
+                      ("phase-fixture", "FAILED"), (OPERATION_ID, "FAILED")]

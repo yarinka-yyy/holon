@@ -14,7 +14,8 @@ Item {
     }
     SurfaceCard {
         y: root.showDateHeader ? 32 : 0; width: parent.width; height: 82
-        interactive: true; onTriggered: root.detailsRequested(root.record.actionId || "")
+        interactive: root.record.isOperation !== true
+        onTriggered: root.detailsRequested(root.record.actionId || "")
         Image {
             x: 14; anchors.verticalCenter: parent.verticalCenter; width: 44; height: 44
             source: root.record.token === "ETH" ? "assets/ethereum.svg" : "assets/usdc.webp"
@@ -55,6 +56,7 @@ Item {
                 font.family: Design.fontFamily; font.pixelSize: 11; font.weight: Font.Medium
             }
             Text {
+                visible: root.record.isOperation !== true
                 text: "›"; color: Design.textMuted
                 font.family: Design.fontFamily; font.pixelSize: 18
             }

@@ -45,6 +45,7 @@ class FundingGuardAdapter:
     def configure(self, data_dir) -> None:
         self._operations = PerpDexOperationStore(data_dir / "perpdex-operations.json", clock=self._clock)
         self._operations.contain_stale()
+        self._operations.prune_transient()
 
     def preview(self, action_type: object, params: Mapping[str, object], account: Mapping[str, str]) -> PerpDexActionPreview:
         intent, action = self._quote(action_type, params, account)

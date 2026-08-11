@@ -36,6 +36,7 @@ class GuardProtectedActionAdapter:
             root / "perpdex-operations.json", clock=self.clock,
         )
         self._operations.contain_stale()
+        self._operations.prune_transient()
 
     def preview(
         self, action_type: object, params: Mapping[str, object],

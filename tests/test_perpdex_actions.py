@@ -191,10 +191,21 @@ def test_existing_referrer_is_preserved_and_open_never_assigns_it(tmp_path: Path
     info = ActionInfo(referred_by={"code": "SOMEONE"})
     built = builder(tmp_path, info).preview("OPEN_POSITION", {
         "leverage": 1, "margin_mode": "ISOLATED", "market": "ETH",
-        "notional_usdc": "10", "side": "SHORT",
+        "notional_usdc": "12", "side": "SHORT",
     }, ACCOUNT)
     assert built.referral_assignment is False
     assert PhaseType.SET_REFERRER not in [item[0] for item in built.phase_specs]
+
+
+def test_open_rejects_final_order_under_hyperliquid_ten_usdc_minimum(tmp_path: Path) -> None:
+    with pytest.raises(AdapterError, match="at least 10 USDC") as error:
+        builder(tmp_path, ActionInfo(referred_by={"code": "EXISTING"})).preview(
+            "OPEN_POSITION", {
+                "leverage": 2, "margin_mode": "ISOLATED", "market": "ETH",
+                "notional_usdc": "10", "side": "SHORT",
+            }, ACCOUNT,
+        )
+    assert error.value.code == "PERPDEX_MIN_ORDER_NOTIONAL"
 
 
 def test_cross_uses_live_market_leverage_and_exact_wire_flag(tmp_path: Path) -> None:
@@ -431,7 +442,7 @@ def test_interrupted_submitting_phase_becomes_unknown_without_resubmission(
     bundle = action_builder.bundle(operation_id(), action_builder.preview(
         "OPEN_POSITION", {
             "leverage": 2, "margin_mode": "ISOLATED", "market": "BTC",
-            "notional_usdc": "10", "side": "LONG",
+            "notional_usdc": "12", "side": "LONG",
         }, ACCOUNT,
     ))
     store = PerpDexOperationStore(
@@ -449,3 +460,62 @@ def test_interrupted_submitting_phase_becomes_unknown_without_resubmission(
     contained = store.status(bundle.operation_id)
     assert contained["state"] == "UNKNOWN"
     assert contained["phases"][0]["state"] == "UNKNOWN"
+
+
+def test_operation_store_v2_discards_only_local_cancel_and_prunes_old_refusal(tmp_path: Path) -> None:
+    now = [CLOCK]
+    built = builder(tmp_path, ActionInfo(referred_by={"code": "EXISTING"}))
+    bundle = built.bundle(operation_id(), built.preview("OPEN_POSITION", {
+        "leverage": 2, "margin_mode": "ISOLATED", "market": "BTC",
+        "notional_usdc": "12", "side": "LONG",
+    }, ACCOUNT))
+    store = PerpDexOperationStore(tmp_path / "operations.json", clock=lambda: now[0])
+    store.begin(bundle)
+    assert store.status(bundle.operation_id)["external_submission_started"] is False
+    store.mark_operation(bundle.operation_id, "REJECTED")
+    assert store.discard_pre_submit_cancelled(bundle.operation_id) is True
+    assert store.status(bundle.operation_id) is None
+
+    refused = built.bundle(operation_id(), built.preview("OPEN_POSITION", {
+        "leverage": 2, "margin_mode": "ISOLATED", "market": "BTC",
+        "notional_usdc": "12", "side": "LONG",
+    }, ACCOUNT))
+    store.begin(refused)
+    store.mark_operation(refused.operation_id, "AWAITING_LOCAL_CONFIRMATION")
+    store.mark_operation(refused.operation_id, "FAILED")
+    now[0] += 24 * 60 * 60 + 1
+    assert store.prune_transient() == 1
+    assert store.status(refused.operation_id) is None
+
+    retained = built.bundle(operation_id(), built.preview("OPEN_POSITION", {
+        "leverage": 2, "margin_mode": "ISOLATED", "market": "BTC",
+        "notional_usdc": "12", "side": "LONG",
+    }, ACCOUNT))
+    store.begin(retained)
+    store.mark_operation(retained.operation_id, "AWAITING_LOCAL_CONFIRMATION")
+    store.mark_external_submission_started(retained.operation_id)
+    store.mark_operation(retained.operation_id, "FAILED")
+    now[0] += 24 * 60 * 60 + 1
+    assert store.prune_transient() == 0
+    assert store.status(retained.operation_id)["external_submission_started"] is True
+
+
+def test_v1_operation_migration_preserves_ambiguous_failed_position(tmp_path: Path) -> None:
+    action_builder = builder(tmp_path, ActionInfo(referred_by={"code": "EXISTING"}))
+    bundle = action_builder.bundle(operation_id(), action_builder.preview("OPEN_POSITION", {
+        "leverage": 2, "margin_mode": "ISOLATED", "market": "BTC",
+        "notional_usdc": "12", "side": "LONG",
+    }, ACCOUNT))
+    path = tmp_path / "operations.json"
+    store = PerpDexOperationStore(path)
+    store.begin(bundle)
+    store.mark_operation(bundle.operation_id, "AWAITING_LOCAL_CONFIRMATION")
+    store.mark_operation(bundle.operation_id, "FAILED")
+    legacy = json.loads(path.read_text(encoding="utf-8"))
+    legacy["operations_version"] = "1"
+    del legacy["operations"][0]["external_submission_started"]
+    path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    migrated = PerpDexOperationStore(path).status(bundle.operation_id)
+    assert migrated["external_submission_started"] is True
+    assert '"operations_version":"2"' in path.read_text(encoding="utf-8")

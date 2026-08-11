@@ -29,21 +29,29 @@ metadata:
    preview or ask for another chat confirmation. The original exact funding request authorizes
    opening a local Wallet Review only; it does not authorize signing or broadcast.
 6. Immediately call `holon_perpdex_fund_execute` once with that preview's exact `preview_digest`
-   in the same turn. Wallet Review displays the amount, Arbitrum network, native-USDC contract,
-   Bridge2 address, maximum gas fee, minimum credit, irreversibility, and that broadcast remains
-   `PENDING_CREDIT` until a later public portfolio read. Never substitute a digest, retry, or
-   begin a trade after funding.
-7. Call `holon_perpdex_prepare` only with the user's exact trade or HLP parameters. For an open
-   position, use `ISOLATED` when the user did not state a margin mode; preserve an explicit
-   `CROSS` or `ISOLATED` choice and require a supported integer leverage.
-   Explain price/slippage, size, margin mode, leverage/reduce-only state, HLP lock-up, checks,
-   caveats, and referral disclosure when present. A preview is not an executed action.
-8. End the turn and wait for explicit confirmation in a later user message. Only then call
-   `holon_perpdex_execute` once with that preview's exact `preview_digest`.
-9. After either execute returns `AWAITING_LOCAL_CONFIRMATION`, end the turn. Wallet Review and a
+   in the same turn. Do not repeat route/address/contract data in chat: Wallet Review shows the
+   amount, Arbitrum network, native-USDC route and maximum fee in a human-readable summary, with
+   technical details available on demand. Never substitute a digest, retry, or begin a trade after funding.
+7. For `OPEN_POSITION`, ask only for missing market, direction, leverage, or amount. An ordinary
+   amount such as "open ETH long 2x with 6 USDC" means **6 USDC margin**; calculate the final
+   position notional as margin × leverage. Treat `notional`, `total position`, or `including
+   leverage` as the final position notional instead. Use `ISOLATED` when the user did not state a
+   margin mode and preserve an explicit `CROSS` or `ISOLATED` choice. The final rounded order value
+   must be at least `10 USDC`; if it is smaller, explain the minimum and an approximate required
+   margin at the requested leverage instead of trying to open Wallet Review.
+8. For `CLOSE_POSITION`, ask only for the market or whether to close all/a percentage when those
+   facts are missing. A complete open or close request is already sufficient to open a local Wallet
+   Review: call `holon_perpdex_prepare`, then immediately call `holon_perpdex_execute` once with
+   that exact `preview_digest` in the same turn. Do not show a technical preview or request a
+   separate chat confirmation. This authorizes Review only, never signing or external submission.
+9. HLP deposit and withdrawal keep the separate chat-confirmation flow. Explain price/slippage,
+   size, margin mode, leverage/reduce-only state, HLP lock-up, checks, caveats, and referral
+   disclosure when present, then wait for explicit confirmation in a later user message before
+   calling `holon_perpdex_execute` once with that preview's exact `preview_digest`.
+10. After either execute returns `AWAITING_LOCAL_CONFIRMATION`, end the turn. Wallet Review and a
    fresh local password are required; Hermes is never signing authority and must never ask for a
    password, seed phrase, private key, or signed payload.
-10. Never promise profit, call HLP safe, treat APR as APY, or represent `NOT_ASSESSED` as a risk
-    rating. Never retry a failed, partial, timed-out, or uncertain write automatically.
-11. `CLOSE_POSITION` and `HLP_WITHDRAW` never require referral assignment. Do not present
+11. Never promise profit, call HLP safe, treat APR as APY, or represent `NOT_ASSESSED` as a risk
+   rating. Never retry a failed, partial, timed-out, or uncertain write automatically.
+12. `CLOSE_POSITION` and `HLP_WITHDRAW` never require referral assignment. Do not present
     referral text on ordinary reads; show it only when the prepared entry preview contains it.

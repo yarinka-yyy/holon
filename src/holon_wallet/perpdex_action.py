@@ -197,6 +197,10 @@ class PerpDexExecutor:
                     )
                     if recovered.lower() != bundle.account.lower():
                         raise RuntimeError("PERPDEX_SIGNER_MISMATCH")
+                    # Persist this boundary before handing an exact signed
+                    # payload to the external transport. A later interruption
+                    # is never eligible for automatic history cleanup.
+                    self.adapter.mark_external_submission_started(bundle.operation_id)
                     phase_submission_attempted = True
                     submission_attempted = True
                     response = self.transport({

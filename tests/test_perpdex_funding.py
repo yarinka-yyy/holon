@@ -266,11 +266,15 @@ class Mainnet:
         self.code = code
         self.calls = 0
 
-    def execute(self, action, digest, password, permit):
+    def execute(self, action, digest, password, permit, *, on_signed=None):
         self.calls += 1
         assert action.digest == digest and password == "local-password"
+        if on_signed is not None:
+            on_signed()
         return SimpleNamespace(
-            code=self.code, transaction_hash="0x" + "ab" * 32,
+            code=self.code,
+            transaction_hash="0x" + "ab" * 32,
+            history_status=object(),
         )
 
 

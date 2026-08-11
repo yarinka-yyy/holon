@@ -339,7 +339,12 @@ def test_packaged_guard_wallet_preview_with_offline_rpc(tmp_path: Path) -> None:
         "HOLON_BASE_RPC_URL": f"http://127.0.0.1:{server.server_port}",
     })
     process = subprocess.Popen(
-        [str(guard.resolve()), "--pipe-name", pipe, "--wallet-path", str(wallet.resolve())],
+        [
+            str(guard.resolve()), "--data-dir", str(paths.data_dir),
+            "--pipe-name", pipe, "--wallet-path", str(wallet.resolve()),
+            "--wallet-status-pipe-name", f"{pipe}.status",
+            "--policy-control-pipe-name", f"{pipe}.policy",
+        ],
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         env=environment, creationflags=0x08000000,
     )
@@ -413,7 +418,12 @@ def test_packaged_funding_reaches_review_with_bounded_fee_drift(tmp_path: Path) 
         "QT_QPA_PLATFORM": "offscreen",
     })
     process = subprocess.Popen(
-        [str(guard.resolve()), "--pipe-name", pipe, "--wallet-path", str(wallet.resolve())],
+        [
+            str(guard.resolve()), "--data-dir", str(paths.data_dir),
+            "--pipe-name", pipe, "--wallet-path", str(wallet.resolve()),
+            "--wallet-status-pipe-name", f"{pipe}.status",
+            "--policy-control-pipe-name", f"{pipe}.policy",
+        ],
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         env=environment, creationflags=0x08000000,
     )

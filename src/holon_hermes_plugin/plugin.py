@@ -610,12 +610,16 @@ class PluginRuntime:
             self._module_previews.move_to_end(digest)
             while len(self._module_previews) > 32:
                 self._module_previews.popitem(last=False)
-            if execute_tool == "holon_perpdex_fund_execute":
+            direct_wallet_review = (
+                execute_tool == "holon_perpdex_fund_execute"
+                or action_type in {"OPEN_POSITION", "CLOSE_POSITION"}
+            )
+            if direct_wallet_review:
                 payload.update({
                     "confirmation_required": False,
                     "next_step": (
-                        "Immediately call holon_perpdex_fund_execute once with this "
-                        "preview_digest in the same user turn. Do not show the preview or "
+                        f"Immediately call {execute_tool} once with this preview_digest in "
+                        "the same user turn. Do not show the preview or "
                         "ask for chat confirmation. This opens Wallet Review only; the "
                         "fresh local password and Wallet confirmation remain required."
                     ),

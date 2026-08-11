@@ -3,20 +3,13 @@ import "."
 
 TransactionFlowShell {
     id: root
-    property bool isFunding: root.action.actionType === "FUND_TRADING_ACCOUNT"
-    title: isFunding ? "Authorize Hyperliquid deposit" : "Authorize Protected Action"
-    subtitle: isFunding
-        ? "Your password signs one exact Arbitrum deposit"
-        : "One fresh password authorizes the exact bundle once"
+    property var action: walletController.perpDexAction
+    property var presentation: action.presentation || ({})
+    property bool ready: passwordField.text.length >= 4
+    title: "Authorize action"
+    subtitle: "Your fresh local password authorizes this exact action once"
     activeStep: 1
     onBackRequested: walletController.returnToPerpDexReview()
-    property var action: walletController.perpDexAction
-    property bool ready: passwordField.text.length >= 4
-
-    function fundingAmount() {
-        let phases = root.action.phases || []
-        return phases.length > 0 ? (phases[0].semantic || {}).amount_usdc || "" : ""
-    }
 
     function submit() {
         if (!ready) return
@@ -28,29 +21,21 @@ TransactionFlowShell {
     onEnabledChanged: if (!enabled) passwordField.clear()
 
     SurfaceCard {
-        x: 0; y: 18; width: 458; height: 150
+        x: 0; y: 18; width: 458; height: 136
         Text {
-            x: 18; y: 20; width: 422
-            text: root.isFunding
-                ? "Deposit " + root.fundingAmount() + " USDC to Hyperliquid"
-                : root.action.actionType || "Protected action"
-            color: Design.text; font.family: Design.fontFamily
-            font.pixelSize: 20; font.weight: Font.DemiBold
+            x: 18; y: 19; width: 422; text: presentation.title || "Protected action"
+            color: Design.text; font.family: Design.fontFamily; font.pixelSize: 20; font.weight: Font.DemiBold
         }
         Text {
-            x: 18; y: 60; width: 422
-            text: root.isFunding
-                ? "One unsigned transaction · Arbitrum One"
-                : (root.action.phases || []).length + " sequential phase(s) · no automatic retry"
-            color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 12
+            x: 18; y: 53; width: 422; text: presentation.subtitle || "One-time authorization"
+            color: Design.accent; font.family: Design.fontFamily; font.pixelSize: 13; font.weight: Font.Medium
         }
         Text {
-            x: 18; y: 96; width: 422; wrapMode: Text.Wrap
-            text: root.isFunding
-                ? "Signing sends this deposit once to the official Hyperliquid Bridge2. Credit can take time."
-                : "If any phase fails or becomes uncertain, every later phase stops."
-            color: root.isFunding ? Design.textMuted : Design.warning
-            font.family: Design.fontFamily; font.pixelSize: 11
+            x: 18; y: 82; width: 422; wrapMode: Text.Wrap
+            text: action.actionType === "FUND_TRADING_ACCOUNT"
+                ? "Signing sends this deposit once. Hyperliquid updates your trading balance separately."
+                : "If a check fails or becomes uncertain, later steps stop. Nothing is retried automatically."
+            color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 11
         }
     }
     Text {
@@ -59,25 +44,20 @@ TransactionFlowShell {
     }
     PasswordInput {
         id: passwordField; objectName: "perpDexPasswordInput"
-        x: 0; y: 350; width: 458; height: 56
-        placeholderText: "Enter fresh password"
+        x: 0; y: 350; width: 458; height: 56; placeholderText: "Enter fresh password"
     }
     Text {
         x: 0; y: 418; width: 458; horizontalAlignment: Text.AlignHCenter
-        text: "Password and signatures are never stored or sent to Hermes"
+        text: "Your password and signature stay in the Wallet, never in Hermes"
         color: Design.textFaint; font.family: Design.fontFamily; font.pixelSize: 11
     }
     FormButton {
         objectName: "perpDexSubmitButton"; x: 0; y: 466; width: 458; height: 56
-        label: root.isFunding
-            ? "Sign and submit " + root.fundingAmount() + " USDC deposit"
-            : "Sign and submit exact bundle"
-        controlEnabled: root.ready
-        onTriggered: root.submit()
+        label: action.actionType === "FUND_TRADING_ACCOUNT" ? "Sign and send deposit" : "Sign and submit order"
+        controlEnabled: root.ready; onTriggered: root.submit()
     }
     FormButton {
         objectName: "perpDexCancelPasswordButton"; x: 0; y: 534; width: 458; height: 42
-        label: "Cancel"; primary: false
-        onTriggered: walletController.cancelPerpDexAction()
+        label: "Cancel"; primary: false; onTriggered: walletController.cancelPerpDexAction()
     }
 }

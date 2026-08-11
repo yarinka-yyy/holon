@@ -152,6 +152,22 @@ class ModuleViewModel(QObject):
         return values
 
     @Slot(result=bool)
+    def refreshOperationHistory(self) -> bool:
+        """Refresh local operation history without requiring public RPC data."""
+        account = self._account()
+        if account is None:
+            return False
+        try:
+            history = self._action_adapter.history(account)
+            if not isinstance(history, tuple):
+                raise RuntimeError("Optional module returned invalid operation history")
+            self._history = list(history)
+        except Exception:
+            return False
+        self.changed.emit()
+        return True
+
+    @Slot(result=bool)
     def refresh(self) -> bool:
         account = self._account()
         if self._busy or account is None:

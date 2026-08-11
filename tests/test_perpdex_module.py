@@ -239,7 +239,7 @@ def test_perpdex_qml_exposes_live_margin_controls_and_clean_module_header() -> N
     review = (ROOT / "src" / "holon_wallet" / "qml" / "ProtectedActionReviewPage.qml").read_text(
         encoding="utf-8",
     )
-    funding_details = (ROOT / "src" / "holon_wallet" / "qml" / "FundingReviewDetails.qml").read_text(
+    presentation = (ROOT / "src" / "holon_wallet" / "perpdex_view.py").read_text(
         encoding="utf-8",
     )
     host = (ROOT / "src" / "holon_wallet" / "qml" / "ModulePageHost.qml").read_text(
@@ -258,6 +258,10 @@ def test_perpdex_qml_exposes_live_margin_controls_and_clean_module_header() -> N
     assert "canPrepareTrade()" in page
     assert 'objectName: "perpDexHlpCard"' not in page
     assert "ScrollBar.AlwaysOff" in page and 'objectName: "perpDexScrollCue"' in page
-    assert "Cross margin shares PerpDEX collateral" in review
-    assert "native USDC" in funding_details and "Hyperliquid Bridge2" in funding_details
-    assert "ScreenHeader" in host and "y: 126" in host
+    details = (ROOT / "src" / "holon_wallet" / "qml" / "PerpDexTechnicalDetails.qml").read_text(
+        encoding="utf-8",
+    )
+    assert "presentation.warnings" in review and "Technical details" in details
+    assert "Native USDC contract" in presentation and "Hyperliquid Bridge2" in presentation
+    assert "ScreenHeader" in host and "y: 126" in host and "clip: true" in host
+    assert 'text: "Active orders"' in page and "Operation history" not in page

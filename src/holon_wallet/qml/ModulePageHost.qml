@@ -12,6 +12,7 @@ PageState {
     Loader {
         id: moduleLoader
         x: 0; y: 126; width: parent.width; height: parent.height - 126
+        clip: true
         active: page.active && walletController.modulePageAvailable
         source: active ? walletController.modulePageData.qmlUrl : ""
         onLoaded: {

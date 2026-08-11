@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import UTC, datetime
 
 import pytest
 
@@ -16,11 +17,13 @@ from holon_wallet.history import (
     lending_cashflows,
 )
 from holon_wallet.storage import StorageError, WalletPaths, atomic_write_json
+from holon_wallet.public_data import NETWORK_BY_ID
 
 
 SENDER = "0x" + "11" * 20
 RECIPIENT = "0x" + "22" * 20
 HASH = "0x" + "33" * 32
+BRIDGE2 = "0x2df1c51e09aecf9cacb7bc98cb1742757f163df7"
 
 
 def record(index: int = 1, **changes) -> WalletHistoryRecord:
@@ -43,6 +46,16 @@ def record(index: int = 1, **changes) -> WalletHistoryRecord:
         simulated=False,
     )
     return replace(value, **changes)
+
+
+def funding_record(index: int = 1, **changes) -> WalletHistoryRecord:
+    values = {
+        "action_type": "perpdex_funding", "network": "arbitrum", "chain_id": 42161,
+        "recipient": BRIDGE2, "contract": NETWORK_BY_ID["arbitrum"].usdc_contract,
+        "operation_id": f"act-{index}",
+    }
+    values.update(changes)
+    return record(index, **values)
 
 
 def test_append_update_and_restart_are_atomic_public_history(tmp_path) -> None:
@@ -89,7 +102,7 @@ def test_v1_loads_without_fee_fields_and_migrates_on_next_mutation(tmp_path) -> 
     assert '"receipt_endpoint_class": null' in migrated
 
 
-def test_v5_loads_and_migrates_to_v6_on_next_mutation(tmp_path) -> None:
+def test_v5_loads_and_migrates_to_v7_on_next_mutation(tmp_path) -> None:
     store = HistoryStore(WalletPaths(tmp_path))
     legacy = record(
         action_type="lending_approve",
@@ -116,7 +129,7 @@ def test_v5_loads_and_migrates_to_v6_on_next_mutation(tmp_path) -> None:
     )
 
     migrated = store.path.read_text(encoding="utf-8")
-    assert '"schema_version": 6' in migrated
+    assert f'"schema_version": {HISTORY_SCHEMA_VERSION}' in migrated
     assert '"receipt_code": "RECEIPT_RPC_UNAVAILABLE"' in migrated
     assert '"receipt_endpoint_class": "official"' in migrated
 
@@ -152,6 +165,39 @@ def test_fee_fields_are_public_decimal_strings_and_mapped_as_eth(tmp_path) -> No
     assert mapped["actualFeeWei"] == "250000000000000"
     assert mapped["maxFeeDisplay"].endswith("0.0005 ETH")
     assert mapped["actualFeeDisplay"] == "0.00025 ETH"
+
+
+def test_v6_strictly_migrates_only_known_arbitrum_bridge2_funding(tmp_path) -> None:
+    store = HistoryStore(WalletPaths(tmp_path))
+    old = funding_record(action_type="transfer")
+    atomic_write_json(store.path, {"schema_version": 6, "records": [
+        old.to_dict(include_v5=True, include_v6=True),
+    ]})
+    loaded = store.load()
+    assert loaded[0].action_type == "perpdex_funding"
+    assert '"schema_version": 7' in store.path.read_text(encoding="utf-8")
+
+    other = HistoryStore(WalletPaths(tmp_path / "other"))
+    uncertain = funding_record(action_type="transfer", recipient=RECIPIENT)
+    atomic_write_json(other.path, {"schema_version": 6, "records": [
+        uncertain.to_dict(include_v5=True, include_v6=True),
+    ]})
+    assert other.load()[0].action_type == "transfer"
+
+
+def test_only_old_unsigned_failed_perpdex_funding_is_pruned(tmp_path) -> None:
+    store = HistoryStore(WalletPaths(tmp_path))
+    stale = funding_record(status=HistoryStatus.FAILED, updated_at="2026-07-20T12:00:00Z")
+    unknown = funding_record(2, status=HistoryStatus.UNKNOWN, updated_at="2026-07-20T12:00:00Z")
+    submitted = funding_record(3, status=HistoryStatus.PENDING, transaction_hash=HASH,
+                               updated_at="2026-07-20T12:00:00Z")
+    store.append(stale); store.append(unknown); store.append(submitted)
+    retained = store.prune_transient_perpdex_funding(datetime(2026, 7, 22, tzinfo=UTC))
+    assert [item.action_id for item in retained] == ["act-2", "act-3"]
+    mapped = history_record_to_map(retained[0])
+    assert mapped["summaryTitle"] == "Deposit to Hyperliquid"
+    assert mapped["networkLabel"] == "Arbitrum One"
+    assert mapped["isPerpDex"] is True
 
 
 @pytest.mark.parametrize(

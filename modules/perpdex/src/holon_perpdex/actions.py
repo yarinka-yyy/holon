@@ -23,6 +23,7 @@ from .reader import HyperliquidReader, ReaderError
 
 BOOK_MAX_AGE_MS = 15_000
 BOOK_FUTURE_TOLERANCE_MS = 5_000
+MIN_FINAL_ORDER_NOTIONAL_USDC = Decimal("10")
 
 
 class AdapterError(RuntimeError):
@@ -268,6 +269,12 @@ class HyperliquidActionBuilder:
         except ReaderError as exc:
             raise AdapterError(exc.code, "Hyperliquid fee state is unavailable") from exc
         bounded_notional = size * size_price
+        final_order_notional = size * limit
+        if final_order_notional < MIN_FINAL_ORDER_NOTIONAL_USDC:
+            raise AdapterError(
+                "PERPDEX_MIN_ORDER_NOTIONAL",
+                "Hyperliquid requires a final order value of at least 10 USDC",
+            )
         required = (
             bounded_notional / Decimal(intent.leverage or 1)
             + bounded_notional * _decimal(fees["taker_rate"], "taker fee")
@@ -297,10 +304,12 @@ class HyperliquidActionBuilder:
         snapshot.update({"referral_assignment": referral, "taker_rate": fees["taker_rate"]})
         preview = {
             "action_type": intent.action_type.value,
-            "estimated_margin_usdc": _text(notional / Decimal(intent.leverage or 1)),
+            "estimated_margin_usdc": _text(bounded_notional / Decimal(intent.leverage or 1)),
             "leverage": intent.leverage, "limit_price": _text(limit),
             "margin_mode": intent.margin_mode.value if intent.margin_mode else None,
             "max_slippage_percent": MAX_SLIPPAGE_PERCENT,
+            "max_position_notional_usdc": _text(bounded_notional),
+            "final_order_notional_usdc": _text(final_order_notional),
             "notional_usdc": intent.notional_usdc,
             "phase_types": [item[0].value for item in specs],
             "reference_price": _text(reference), "referral_assignment": referral,
@@ -343,7 +352,7 @@ class HyperliquidActionBuilder:
             "asset_index": market["asset_index"], "is_buy": buy,
             "limit_price": _text(limit), "market": intent.market,
             "max_slippage_percent": MAX_SLIPPAGE_PERCENT, "reduce_only": True,
-            "reference_price": _text(reference), "size_asset": _text(size),
+            "position_side": position["side"], "reference_price": _text(reference), "size_asset": _text(size),
             "position_size_before_asset": _text(position_size),
         }, "IOC"))
         snapshot = self._common_snapshot(market, portfolio, position, orders)

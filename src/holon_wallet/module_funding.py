@@ -23,7 +23,7 @@ class ModuleFundingExecutor:
             self._adapter.mark_operation(bundle.operation_id, "EXECUTING")
             self._adapter.mark_phase(bundle.operation_id, phase.phase_id, "SUBMITTING", code="SUBMITTING")
             self._mainnet.history_store.append(WalletHistoryRecord(
-                action_id=action.action_id, profile_id=action.profile_id, action_type="transfer",
+                action_id=action.action_id, profile_id=action.profile_id, action_type="perpdex_funding",
                 network=action.network_id, chain_id=action.chain_id, sender=action.sender,
                 recipient=action.recipient, contract=action.token_contract, token=action.token,
                 amount_atomic=str(action.amount_atomic), decimals=action.decimals,
@@ -34,7 +34,24 @@ class ModuleFundingExecutor:
             ))
         except Exception:
             return self._terminal(bundle, phase, "FAILED", "FUNDING_HISTORY_UNAVAILABLE", None)
-        result = self._mainnet.execute(action, action.digest, password, SigningPermit())
+        result = self._mainnet.execute(
+            action, action.digest, password, SigningPermit(),
+            on_signed=lambda: self._adapter.mark_external_submission_started(
+                bundle.operation_id,
+            ),
+        )
+        if result.history_status is None:
+            try:
+                self._mainnet.history_store.update_status(
+                    action.action_id,
+                    HistoryStatus.FAILED,
+                    _timestamp(datetime.now(UTC)),
+                    result.transaction_hash or None,
+                )
+            except Exception:
+                return self._terminal(
+                    bundle, phase, "FAILED", "FUNDING_HISTORY_UNAVAILABLE", None,
+                )
         if result.code in {
             MainnetTransferCode.CONFIRMED, MainnetTransferCode.PENDING,
         }:

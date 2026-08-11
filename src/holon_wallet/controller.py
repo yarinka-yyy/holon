@@ -11,8 +11,8 @@ from datetime import UTC, datetime
 from threading import Event
 from typing import Callable, Mapping
 
-from PySide6.QtCore import Property, QLocale, QObject, QTime, QTimer, Signal, Slot
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtCore import Property, QLocale, QObject, QTime, QTimer, QUrl, Signal, Slot
+from PySide6.QtGui import QDesktopServices, QGuiApplication
 from holon_contracts.registry import load_registry
 from holon_guard_ipc import PipeGuardClient
 from holon_wallet_control import AUTHORITY_VERSION
@@ -71,6 +71,7 @@ from .history import (
 )
 from .lending_view import lending_portfolio_to_map
 from .earn_view import earn_portfolio_to_map, module_earn_presentations
+from .perpdex_view import action_presentation, operation_history_to_map, result_presentation
 from .lending_action import prepare_lending_action
 from .model import ProfileSummary, WalletShellState
 from .module_funding import ModuleFundingExecutor
@@ -389,6 +390,10 @@ class WalletController(QObject):
             executor=self._public_data_executor,
             before_execute=self._begin_module_page_dispatch,
         )
+        module_model = self._module_page.get("model")
+        changed = getattr(module_model, "changed", None)
+        if callable(getattr(changed, "connect", None)):
+            changed.connect(self.historyChanged.emit)
         self._current_screen = "welcome"
         self._flow = "none"
         self._error_message = ""
@@ -612,11 +617,16 @@ class WalletController(QObject):
                 "recipient": prepared.recipient,
                 "tokenContract": prepared.token_contract or "",
             }
+        action["presentation"] = action_presentation(action)
         return action
 
     @Property("QVariantMap", notify=perpDexChanged)
     def perpDexResult(self) -> dict[str, object]:
-        return self._perpdex_result.to_mapping() if self._perpdex_result is not None else {}
+        if self._perpdex_result is None:
+            return {}
+        result = self._perpdex_result.to_mapping()
+        result["presentation"] = result_presentation(result, self.perpDexAction)
+        return result
 
     @Property(bool, notify=perpDexChanged)
     def perpDexExecutionInProgress(self) -> bool:
@@ -997,8 +1007,26 @@ class WalletController(QObject):
 
     @Property("QVariantList", notify=historyChanged)
     def historyRecords(self) -> list[dict[str, object]]:
-        mapped: list[dict[str, object]] = []
+        mapped = self._history_maps()
         previous_date = ""
+        for value in mapped:
+            current_date = str(value["dateLabel"])
+            value["showDateHeader"] = current_date != previous_date
+            previous_date = current_date
+        return mapped
+
+    @Property("QVariantList", notify=historyChanged)
+    def perpDexHistoryRecords(self) -> list[dict[str, object]]:
+        mapped = [item for item in self._history_maps() if item.get("isPerpDex") is True]
+        previous_date = ""
+        for value in mapped:
+            current_date = str(value["dateLabel"])
+            value["showDateHeader"] = current_date != previous_date
+            previous_date = current_date
+        return mapped
+
+    def _history_maps(self) -> list[dict[str, object]]:
+        mapped: list[dict[str, object]] = []
         for record in sorted(
             (
                 item for item in self._history_records
@@ -1008,11 +1036,13 @@ class WalletController(QObject):
             reverse=True,
         ):
             value = history_record_to_map(record)
-            current_date = str(value["dateLabel"])
-            value["showDateHeader"] = current_date != previous_date
-            previous_date = current_date
             mapped.append(value)
-        return mapped
+        model = self._module_page.get("model")
+        operations = getattr(model, "operationHistory", []) if model is not None else []
+        for operation in operations:
+            if isinstance(operation, Mapping) and operation.get("action_type") != "FUND_TRADING_ACCOUNT":
+                mapped.append(operation_history_to_map(operation))
+        return sorted(mapped, key=lambda item: str(item.get("createdAt", "")), reverse=True)
 
     @Property(bool, notify=historyChanged)
     def historyAvailable(self) -> bool:
@@ -1767,6 +1797,19 @@ class WalletController(QObject):
         QGuiApplication.clipboard().setText(active.address)
         return True
 
+    @Slot(str, result=bool)
+    def copyArbitrumTransactionHash(self, transaction_hash: str) -> bool:
+        if not _transaction_hash(transaction_hash):
+            return False
+        QGuiApplication.clipboard().setText(transaction_hash)
+        return True
+
+    @Slot(str, result=bool)
+    def openArbitrumTransaction(self, transaction_hash: str) -> bool:
+        if not _transaction_hash(transaction_hash):
+            return False
+        return QDesktopServices.openUrl(QUrl("https://arbiscan.io/tx/" + transaction_hash))
+
     @Slot()
     def toggleBalancesVisibility(self) -> None:
         self._balances_visible = not self._balances_visible
@@ -2018,6 +2061,7 @@ class WalletController(QObject):
         operation_id = str(self._perpdex_external.get("action_id", ""))
         try:
             self._perpdex_active_adapter.mark_operation(operation_id, "REJECTED")
+            self._perpdex_active_adapter.discard_pre_submit_cancelled(operation_id)
         except Exception:
             pass
         target = self._perpdex_return_screen
@@ -2376,6 +2420,10 @@ class WalletController(QObject):
     def showHistory(self) -> None:
         if self._state.profiles and not self._mainnet_in_progress:
             self._load_history()
+            model = self._module_page.get("model")
+            refresher = getattr(model, "refreshOperationHistory", None)
+            if callable(refresher):
+                refresher()
             self._set_screen("history")
 
     @Slot(str, result=bool)
@@ -4523,6 +4571,7 @@ class WalletController(QObject):
             return self._external_refusal(request, "ACTION_MISMATCH")
         try:
             self._perpdex_active_adapter.mark_operation(bundle.operation_id, "REJECTED")
+            self._perpdex_active_adapter.discard_pre_submit_cancelled(bundle.operation_id)
         except Exception:
             return self._external_refusal(request, "PERPDEX_OPERATION_STATE_INVALID")
         response = {
@@ -5233,6 +5282,13 @@ def _perpdex_transaction_hash(result: PerpDexExecutionResult) -> str | None:
         ):
             return value
     return None
+
+
+def _transaction_hash(value: object) -> bool:
+    return (
+        isinstance(value, str) and len(value) == 66 and value.startswith("0x")
+        and all(character in "0123456789abcdefABCDEF" for character in value[2:])
+    )
 
 
 def _transfer_error_message(code: TransferPreflightCode) -> str:

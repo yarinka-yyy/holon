@@ -721,6 +721,7 @@ class MainnetTransferExecutor:
         expected_digest: str,
         password: str,
         permit: SigningPermit,
+        on_signed: Callable[[], None] | None = None,
     ) -> MainnetTransferResult:
         now = self._clock().astimezone(UTC)
         validation = validate_signing_action(action, expected_digest, now)
@@ -818,6 +819,17 @@ class MainnetTransferExecutor:
                 history_status = HistoryStatus.UNKNOWN
             except (HistoryUnavailableError, HistoryValidationError, StorageError):
                 return self._failure(action, MainnetTransferCode.HISTORY_UNAVAILABLE)
+            if on_signed is not None:
+                try:
+                    on_signed()
+                except Exception:
+                    # The signed transaction was deliberately not broadcast:
+                    # without the durable operation marker, its external state
+                    # could not later be classified safely.
+                    return self._result(
+                        action, MainnetTransferCode.HISTORY_UNAVAILABLE,
+                        transaction_hash, recovered, history_status, False,
+                    )
             if permit.cancelled:
                 return self._result(
                     action,

@@ -30,6 +30,7 @@ class WalletProtectedActionAdapter:
             Path(data_dir) / "perpdex-operations.json", clock=self.clock,
         )
         self._operations.contain_stale()
+        self._operations.prune_transient()
 
     def verify(
         self, bundle: Mapping[str, object], account: Mapping[str, str],
@@ -326,6 +327,16 @@ class WalletProtectedActionAdapter:
         if self._operations is None:
             raise RuntimeError("PerpDEX operation state is unavailable")
         return self._operations.mark_operation(operation_id, state)
+
+    def mark_external_submission_started(self, operation_id: str) -> Mapping[str, object]:
+        if self._operations is None:
+            raise RuntimeError("PerpDEX operation state is unavailable")
+        return self._operations.mark_external_submission_started(operation_id)
+
+    def discard_pre_submit_cancelled(self, operation_id: str) -> bool:
+        if self._operations is None:
+            raise RuntimeError("PerpDEX operation state is unavailable")
+        return self._operations.discard_pre_submit_cancelled(operation_id)
 
     @staticmethod
     def wire_action(phase: ProtectedActionPhase) -> Mapping[str, object]:

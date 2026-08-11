@@ -19,10 +19,12 @@ from .contracts import (
 )
 
 NONCE_VERSION = "1"
-OPERATIONS_VERSION = "1"
+OPERATIONS_VERSION = "2"
+LEGACY_OPERATIONS_VERSION = "1"
 MAX_FILE_BYTES = 1024 * 1024
 MAX_OPERATIONS = 128
 STALE_OPERATION_SECONDS = 301
+TRANSIENT_OPERATION_SECONDS = 24 * 60 * 60
 PHASE_STATES = frozenset({
     "PENDING", "SUBMITTING", "CONFIRMED", "FAILED", "PARTIAL", "UNKNOWN",
     "PENDING_CREDIT",
@@ -59,6 +61,50 @@ _CODE_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
 
 class PersistenceError(RuntimeError):
     pass
+
+
+def _legacy_submission_started(operation: Mapping[str, object]) -> bool:
+    """Preserve v1 records unless their local-only outcome is provable."""
+    state = str(operation.get("state", ""))
+    phases = operation.get("phases")
+    if state in {"COMPLETED", "PARTIAL", "UNKNOWN", "PENDING_CREDIT"}:
+        return True
+    if isinstance(phases, list) and any(
+        isinstance(phase, Mapping)
+        and (
+            phase.get("state") in {"CONFIRMED", "PARTIAL", "UNKNOWN", "PENDING_CREDIT"}
+            or phase.get("code") in {
+                "HYPERLIQUID_ACTION_REJECTED", "IOC_ORDER_REJECTED", "IOC_NOT_FILLED",
+            }
+        )
+        for phase in phases
+    ):
+        return True
+    if state in {"REJECTED", "EXPIRED"}:
+        return False
+    # Old funding rows have a narrow set of known pre-sign stops. Everything
+    # else is deliberately retained because v1 did not record this boundary.
+    safe_funding_codes = {
+        "FUNDING_REVALIDATION_FAILED", "FUNDING_POLICY_UNAVAILABLE",
+        "FUNDING_AUTHENTICATION_FAILED", "FUNDING_ACTION_EXPIRED",
+        "FUNDING_ACTION_INVALID", "FUNDING_CANCELLED", "FUNDING_SIGNING_FAILED",
+        "FUNDING_FEE_LIMIT_EXCEEDED", "FUNDING_GUARD_FEE_CAP_EXCEEDED",
+        "FUNDING_WALLET_FEE_CAP_EXCEEDED", "FUNDING_ACCOUNT_CHANGED",
+        "FUNDING_AMOUNT_CHANGED", "FUNDING_WALLET_ROUTE_CHANGED",
+    }
+    if (
+        state == "FAILED"
+        and operation.get("action_type") == "FUND_TRADING_ACCOUNT"
+        and isinstance(phases, list)
+        and all(
+            isinstance(phase, Mapping)
+            and phase.get("public_id") is None
+            and phase.get("code") in safe_funding_codes
+            for phase in phases
+        )
+    ):
+        return False
+    return True
 
 
 def _read(path: Path) -> object:
@@ -159,29 +205,40 @@ class PerpDexOperationStore:
         if (
             not isinstance(value, Mapping)
             or set(value) != {"operations", "operations_version"}
-            or value.get("operations_version") != OPERATIONS_VERSION
+            or value.get("operations_version") not in {
+                LEGACY_OPERATIONS_VERSION, OPERATIONS_VERSION,
+            }
             or not isinstance(value.get("operations"), list)
             or len(value["operations"]) > MAX_OPERATIONS
         ):
             raise PersistenceError("PerpDEX operation state is invalid")
         operations: list[dict[str, object]] = []
         seen: set[str] = set()
+        version = str(value["operations_version"])
         for raw in value["operations"]:
-            operation = self._validate_operation(raw)
+            operation = self._validate_operation(
+                raw, legacy=version == LEGACY_OPERATIONS_VERSION,
+            )
             operation_id = str(operation["operation_id"])
             if operation_id in seen:
                 raise PersistenceError("Duplicate PerpDEX operation")
             seen.add(operation_id)
             operations.append(operation)
+        if version == LEGACY_OPERATIONS_VERSION:
+            self._save(operations)
         return operations
 
     @staticmethod
-    def _validate_operation(raw: object) -> dict[str, object]:
+    def _validate_operation(raw: object, *, legacy: bool = False) -> dict[str, object]:
         fields = {
             "account", "action_type", "bundle_digest", "created_at", "intent",
-            "operation_id", "phases", "state", "updated_at",
+            "external_submission_started", "operation_id", "phases", "state", "updated_at",
         }
-        if not isinstance(raw, Mapping) or set(raw) != fields:
+        legacy_fields = fields - {"external_submission_started"}
+        if (
+            not isinstance(raw, Mapping)
+            or set(raw) != (legacy_fields if legacy else fields)
+        ):
             raise PersistenceError("PerpDEX operation is invalid")
         try:
             action = ActionType(raw["action_type"])
@@ -245,6 +302,10 @@ class PerpDexOperationStore:
             phase_ids.add(item["phase_id"])
             phases.append(dict(item))
         operation = dict(raw)
+        if legacy:
+            operation["external_submission_started"] = _legacy_submission_started(operation)
+        elif type(operation.get("external_submission_started")) is not bool:
+            raise PersistenceError("PerpDEX operation is invalid")
         operation["intent"] = dict(raw["intent"]) if isinstance(raw["intent"], Mapping) else raw["intent"]
         operation["phases"] = phases
         try:
@@ -271,6 +332,7 @@ class PerpDexOperationStore:
                 "action_type": bundle.intent.action_type.value,
                 "bundle_digest": bundle.bundle_digest,
                 "created_at": bundle.created_at,
+                "external_submission_started": False,
                 "intent": bundle.intent.to_mapping(),
                 "operation_id": bundle.operation_id,
                 "phases": [
@@ -292,6 +354,55 @@ class PerpDexOperationStore:
             operations.append(operation)
             self._save(operations)
             return dict(operation)
+
+    def mark_external_submission_started(self, operation_id: str) -> dict[str, object]:
+        """Durably mark the exact moment after signing, before external send."""
+        return self._update(operation_id, None, external_submission_started=True)
+
+    def discard_pre_submit_cancelled(self, operation_id: str) -> bool:
+        """Remove only a cancelled bundle that is provably still local."""
+        with self._lock:
+            operations = self._load()
+            retained: list[dict[str, object]] = []
+            discarded = False
+            for operation in operations:
+                if operation["operation_id"] != operation_id:
+                    retained.append(operation)
+                    continue
+                safe_local_cancel = (
+                    operation["state"] == "REJECTED"
+                    and operation["external_submission_started"] is False
+                    and all(
+                        phase["state"] == "PENDING" and phase["public_id"] is None
+                        for phase in operation["phases"]
+                    )
+                )
+                if safe_local_cancel:
+                    discarded = True
+                else:
+                    retained.append(operation)
+            if discarded:
+                self._save(retained)
+            return discarded
+
+    def prune_transient(self) -> int:
+        """Keep any potentially external result; trim only old local refusals."""
+        with self._lock:
+            operations = self._load()
+            now = self._clock()
+            retained = [
+                operation for operation in operations
+                if not (
+                    operation["external_submission_started"] is False
+                    and operation["state"] in {"FAILED", "EXPIRED", "REJECTED"}
+                    and now - datetime.fromisoformat(
+                        str(operation["updated_at"]).removesuffix("Z") + "+00:00"
+                    ).timestamp() >= TRANSIENT_OPERATION_SECONDS
+                )
+            ]
+            if len(retained) != len(operations):
+                self._save(retained)
+            return len(operations) - len(retained)
 
     def mark_operation(self, operation_id: str, state: str) -> dict[str, object]:
         if state not in OPERATION_STATES:
@@ -328,6 +439,10 @@ class PerpDexOperationStore:
                     ):
                         raise PersistenceError("Invalid PerpDEX operation transition")
                     operation["state"] = changes["state"]
+                if "external_submission_started" in changes:
+                    if changes["external_submission_started"] is not True:
+                        raise PersistenceError("Invalid PerpDEX submission state")
+                    operation["external_submission_started"] = True
                 if phase_id is not None:
                     phase = next(
                         (item for item in operation["phases"] if item["phase_id"] == phase_id),
@@ -391,6 +506,7 @@ class PerpDexOperationStore:
 
     def latest(self, account: str | None = None) -> tuple[dict[str, object], ...]:
         with self._lock:
+            self.prune_transient()
             values = self._load()
         if account is not None:
             values = [item for item in values if item["account"].lower() == account.lower()]

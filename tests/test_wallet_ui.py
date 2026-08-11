@@ -1515,22 +1515,19 @@ def test_dashboard_actions_use_one_sized_two_tone_icon_language() -> None:
 def test_hyperliquid_funding_pages_use_human_copy_and_scroll_cue() -> None:
     qml = Path(__file__).parents[1] / "src" / "holon_wallet" / "qml"
     review = (qml / "ProtectedActionReviewPage.qml").read_text(encoding="utf-8")
-    details = (qml / "FundingReviewDetails.qml").read_text(encoding="utf-8")
+    details = (qml / "PerpDexTechnicalDetails.qml").read_text(encoding="utf-8")
     password = (qml / "ProtectedActionPasswordPage.qml").read_text(encoding="utf-8")
     result = (qml / "ProtectedActionResultPage.qml").read_text(encoding="utf-8")
 
-    assert 'title: isFunding ? "Fund Hyperliquid"' in review
-    assert '"Deposit to Hyperliquid"' in review
+    assert 'title: presentation.label || "Review action"' in review
+    assert '"External protocol · real funds"' in review
     assert 'objectName: "perpDexReviewScrollCue"' in review
-    assert "Verified route and maximum fee" in details
-    assert 'title: isFunding ? "Authorize Hyperliquid deposit"' in password
-    assert '"Sign and submit " + root.fundingAmount() + " USDC deposit"' in password
-    assert 'title: isFunding ? "Hyperliquid deposit result"' in result
-    assert '"Hyperliquid USDC deposit"' in result
-    assert 'code === "FUNDING_POLICY_UNAVAILABLE"' in result
-    assert '"Arbitrum is unavailable. Nothing was signed or sent."' in result
-    assert '"Deposit not completed"' in result
-    assert 'code === "FUNDING_REVALIDATION_FEE_CAP_EXCEEDED"' in result
+    assert 'text: "Technical details"' in details
+    assert 'title: "Authorize action"' in password
+    assert '"Sign and send deposit"' in password
+    assert 'title: funding ? "Hyperliquid deposit result"' in result
+    assert '"Copy transaction hash"' in result and '"Open in Arbiscan"' in result
+    assert "ScrollBar.vertical" not in review and "ScrollBar.vertical" not in result
 
 
 def test_network_icons_are_accessible_but_new_networks_do_not_enter_send() -> None:

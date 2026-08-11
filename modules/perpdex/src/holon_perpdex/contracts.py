@@ -358,15 +358,14 @@ class ProtectedActionPhase:
                 raise ContractError("Invalid cancel phase")
             return
         if self.phase_type is PhaseType.PLACE_IOC_ORDER:
-            _exact(
-                value,
-                {
-                    "asset_index", "is_buy", "limit_price", "market",
-                    "max_slippage_percent", "reduce_only", "reference_price",
-                    "size_asset", "position_size_before_asset",
-                },
-                "IOC order phase",
-            )
+            fields = {
+                "asset_index", "is_buy", "limit_price", "market",
+                "max_slippage_percent", "reduce_only", "reference_price",
+                "size_asset", "position_size_before_asset",
+            }
+            if value.get("reduce_only") is True:
+                fields.add("position_side")
+            _exact(value, fields, "IOC order phase")
             if (
                 type(value["asset_index"]) is not int
                 or value["asset_index"] < 0
@@ -378,6 +377,7 @@ class ProtectedActionPhase:
                 or _decimal(value["size_asset"], "IOC size") <= 0
                 or _decimal(value["position_size_before_asset"], "position before") < 0
                 or value["max_slippage_percent"] != "1"
+                or value["reduce_only"] is True and value["position_side"] not in {"LONG", "SHORT"}
                 or self.cloid is None
             ):
                 raise ContractError("Invalid IOC order phase")

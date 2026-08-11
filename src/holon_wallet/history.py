@@ -11,13 +11,14 @@ from typing import Any, Mapping
 from .public_data import NETWORK_BY_ID
 from .storage import StorageError, WalletPaths, atomic_write_json, read_json
 
-HISTORY_SCHEMA_VERSION = 6
+HISTORY_SCHEMA_VERSION = 7
 LEGACY_HISTORY_SCHEMA_VERSION = 1
 FEE_HISTORY_SCHEMA_VERSION = 2
 OPERATION_HISTORY_SCHEMA_VERSION = 3
 POSITION_HISTORY_SCHEMA_VERSION = 4
 LENDING_HISTORY_SCHEMA_VERSION = 5
 RECEIPT_HISTORY_SCHEMA_VERSION = 6
+PERPDEX_FUNDING_HISTORY_SCHEMA_VERSION = 7
 MAX_HISTORY_RECORDS = 500
 MONTH_LABELS = (
     "Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -32,6 +33,9 @@ RECEIPT_CODES = {
     "RECEIPT_WRONG_CHAIN", "RECEIPT_VALIDATION_FAILED",
 }
 RECEIPT_ENDPOINT_CLASSES = {"configured", "official", "alchemy_public"}
+# This is a public protocol recipient, used only to recognize the former
+# Arbitrum funding history shape during a one-way local migration.
+_HYPERLIQUID_BRIDGE2 = "0x2df1c51e09aecf9cacb7bc98cb1742757f163df7"
 
 
 class HistoryStatus(str, Enum):
@@ -239,7 +243,7 @@ class HistoryStore:
                 LEGACY_HISTORY_SCHEMA_VERSION, FEE_HISTORY_SCHEMA_VERSION,
                 OPERATION_HISTORY_SCHEMA_VERSION,
                 POSITION_HISTORY_SCHEMA_VERSION, LENDING_HISTORY_SCHEMA_VERSION,
-                RECEIPT_HISTORY_SCHEMA_VERSION,
+                RECEIPT_HISTORY_SCHEMA_VERSION, PERPDEX_FUNDING_HISTORY_SCHEMA_VERSION,
             }:
                 raise HistoryValidationError("History schema is unsupported")
             records = value["records"]
@@ -250,7 +254,14 @@ class HistoryStore:
             )
             if len({record.action_id for record in parsed}) != len(parsed):
                 raise HistoryValidationError("History action IDs must be unique")
-            return parsed
+            migrated = tuple(
+                _migrate_perpdex_funding_record(record)
+                if schema_version < PERPDEX_FUNDING_HISTORY_SCHEMA_VERSION else record
+                for record in parsed
+            )
+            if migrated != parsed:
+                self._save(list(migrated))
+            return migrated
         except (StorageError, HistoryValidationError, TypeError) as error:
             raise HistoryUnavailableError("Wallet history is unavailable") from error
 
@@ -319,6 +330,25 @@ class HistoryStore:
             return tuple(records)
         raise HistoryValidationError("History action is unknown")
 
+    def prune_transient_perpdex_funding(self, now: datetime) -> tuple[WalletHistoryRecord, ...]:
+        """Remove only old module funding refusals proved not to have a tx hash."""
+        if now.tzinfo is None:
+            raise HistoryValidationError("History timestamp is invalid")
+        records = list(self.load())
+        cutoff = now.timestamp() - 24 * 60 * 60
+        retained = [
+            record for record in records
+            if not (
+                record.action_type == "perpdex_funding"
+                and record.status is HistoryStatus.FAILED
+                and record.transaction_hash is None
+                and _parse_timestamp(record.updated_at).timestamp() <= cutoff
+            )
+        ]
+        if len(retained) != len(records):
+            self._save(retained)
+        return tuple(retained)
+
     def _save(self, records: list[WalletHistoryRecord]) -> None:
         atomic_write_json(
             self._path,
@@ -336,6 +366,7 @@ def history_record_to_map(record: WalletHistoryRecord) -> dict[str, object]:
     amount = _format_amount(record.amount_atomic, record.decimals, record.token)
     is_revoke = record.action_type == "revoke"
     is_lending = record.action_type.startswith("lending_")
+    is_perpdex_funding = record.action_type == "perpdex_funding"
     is_withdraw = record.action_type.startswith("lending_withdraw") or record.action_type == "lending_redeem"
     is_approve = record.action_type == "lending_approve"
     is_supply = record.action_type in {"lending_supply", "lending_deposit"}
@@ -361,7 +392,8 @@ def history_record_to_map(record: WalletHistoryRecord) -> dict[str, object]:
         "sender": record.sender,
         "recipient": record.recipient,
         "shortRecipient": (
-            protocol_label if is_lending
+            "Hyperliquid" if is_perpdex_funding
+            else protocol_label if is_lending
             else f"{record.recipient[:8]}…{record.recipient[-6:]}"
         ),
         "contract": record.contract or "",
@@ -379,17 +411,24 @@ def history_record_to_map(record: WalletHistoryRecord) -> dict[str, object]:
         "actualFeeWei": record.actual_fee_wei or "",
         "maxFeeDisplay": _format_fee(record.max_total_fee_wei, maximum=True),
         "actualFeeDisplay": _format_fee(record.actual_fee_wei, maximum=False),
+        "isPerpDex": is_perpdex_funding,
+        "isOperation": False,
         "isRevoke": is_revoke,
         "summaryTitle": (
-            "Revoked USDC" if is_revoke
+            "Deposit to Hyperliquid" if is_perpdex_funding
+            else "Revoked USDC" if is_revoke
             else f"Withdrawn from {protocol_label}" if is_withdraw
             else f"Approved {protocol_label}" if is_approve
             else f"Supplied to {protocol_label}" if is_supply
             else f"Sent {record.token}"
         ),
-        "counterpartyLabel": "Spender" if is_revoke else "Protocol" if is_lending else "To",
+        "counterpartyLabel": (
+            "Protocol" if is_perpdex_funding or is_lending
+            else "Spender" if is_revoke else "To"
+        ),
         "amountLabel": (
-            "Allowance → 0" if is_revoke
+            amount if is_perpdex_funding
+            else "Allowance → 0" if is_revoke
             else f"+{amount}" if is_withdraw
             else f"{amount} allowance" if is_approve
             else amount if is_supply
@@ -491,7 +530,7 @@ def _validate_record(record: WalletHistoryRecord) -> None:
     if not isinstance(record.profile_id, str) or not 1 <= len(record.profile_id) <= 128:
         raise HistoryValidationError("History profile ID is invalid")
     if record.action_type not in {
-        "transfer", "revoke", "lending_approve", "lending_supply",
+        "transfer", "perpdex_funding", "revoke", "lending_approve", "lending_supply",
         "lending_deposit", "lending_redeem",
         "lending_withdraw", "lending_withdraw_all",
     }:
@@ -526,6 +565,13 @@ def _validate_record(record: WalletHistoryRecord) -> None:
         or record.recipient.lower() == record.sender.lower()
     ):
         raise HistoryValidationError("History lending action is invalid")
+    if record.action_type == "perpdex_funding" and (
+        record.network != "arbitrum" or record.token != "USDC" or record.contract is None
+        or record.contract.lower() != NETWORK_BY_ID["arbitrum"].usdc_contract.lower()
+        or record.recipient.lower() != _HYPERLIQUID_BRIDGE2
+        or record.recipient.lower() == record.sender.lower()
+    ):
+        raise HistoryValidationError("History PerpDEX funding action is invalid")
     if record.transaction_hash is not None and (
         not isinstance(record.transaction_hash, str)
         or HASH_RE.fullmatch(record.transaction_hash) is None
@@ -568,6 +614,22 @@ def _format_amount(atomic: str, decimals: int, token: str) -> str:
 def _date_label(timestamp: str) -> str:
     parsed = _parse_timestamp(timestamp)
     return f"{MONTH_LABELS[parsed.month - 1]} {parsed.day}, {parsed.year}"
+
+
+def _migrate_perpdex_funding_record(record: WalletHistoryRecord) -> WalletHistoryRecord:
+    """Recognize only the former closed Arbitrum funding record shape."""
+    if (
+        record.action_type != "transfer"
+        or record.network != "arbitrum"
+        or record.chain_id != 42161
+        or record.token != "USDC"
+        or record.contract is None
+        or record.contract.lower() != NETWORK_BY_ID["arbitrum"].usdc_contract.lower()
+        or record.recipient.lower() != _HYPERLIQUID_BRIDGE2
+        or record.operation_id is None
+    ):
+        return record
+    return replace(record, action_type="perpdex_funding")
 
 
 def _format_fee(value: str | None, *, maximum: bool) -> str:

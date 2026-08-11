@@ -65,6 +65,7 @@ class FundingWalletAdapter:
     def configure(self, data_dir) -> None:
         self._operations = PerpDexOperationStore(data_dir / "perpdex-operations.json")
         self._operations.contain_stale()
+        self._operations.prune_transient()
 
     def verify(self, raw_bundle: Mapping[str, object], account: Mapping[str, str]) -> FundingBundle:
         try:
@@ -118,6 +119,12 @@ class FundingWalletAdapter:
 
     def mark_operation(self, operation_id: str, state: str) -> None:
         self._store().mark_operation(operation_id, state)
+
+    def mark_external_submission_started(self, operation_id: str) -> None:
+        self._store().mark_external_submission_started(operation_id)
+
+    def discard_pre_submit_cancelled(self, operation_id: str) -> bool:
+        return self._store().discard_pre_submit_cancelled(operation_id)
 
     def mark_phase(self, operation_id: str, phase_id: str, state: str, **kwargs) -> None:
         self._store().mark_phase(operation_id, phase_id, state, **kwargs)

@@ -4,9 +4,10 @@ import "."
 PageState {
     id: root
     property bool selectorOpen: false
+    property string selectedTab: "all"
     ScreenHeader {
         objectName: "history"; x: 28; y: 54; width: 458
-        title: "History"; subtitle: "Wallet-initiated transactions"
+        title: "History"; subtitle: "Wallet and Hyperliquid activity"
         onBackRequested: walletController.showMain()
     }
     SurfaceCard {
@@ -36,10 +37,25 @@ PageState {
         text: walletController.historyStateLabel; color: Design.textMuted
         font.family: Design.fontFamily; font.pixelSize: 14
     }
+    Row {
+        x: 28; y: 228; width: 458; height: 42; spacing: 10
+        FormButton {
+            objectName: "historyAllActivityTab"; width: 224; height: 42
+            label: "All activity"; primary: root.selectedTab === "all"
+            onTriggered: root.selectedTab = "all"
+        }
+        FormButton {
+            objectName: "historyPerpDexTab"; width: 224; height: 42
+            label: "PerpDEX"; primary: root.selectedTab === "perpdex"
+            onTriggered: root.selectedTab = "perpdex"
+        }
+    }
     ListView {
         id: historyList; objectName: "historyList"
-        x: 28; y: 244; width: 458; height: 552
-        model: walletController.historyRecords; spacing: 12; clip: true
+        x: 28; y: 286; width: 458; height: 510
+        model: root.selectedTab === "perpdex"
+            ? walletController.perpDexHistoryRecords : walletController.historyRecords
+        spacing: 12; clip: true
         delegate: HistoryRow {
             required property var modelData
             width: historyList.width; record: modelData

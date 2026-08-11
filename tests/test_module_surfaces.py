@@ -205,6 +205,8 @@ def test_hermes_perpdex_prepare_then_execute_consumes_preview_once(
         "action_type": "CLOSE_POSITION", "amount_mode": "FULL", "market": "BTC",
     }, **dispatch_context))
     assert closed["status"] == "PREVIEW_READY"
+    assert closed["confirmation_required"] is False
+    assert "Immediately call holon_perpdex_execute" in closed["next_step"]
     assert connector.previews[-1][2:] == (
         "CLOSE_POSITION", {"amount_mode": "FULL", "market": "BTC", "percent": None},
     )
@@ -213,6 +215,7 @@ def test_hermes_perpdex_prepare_then_execute_consumes_preview_once(
         "notional_usdc": "6", "side": "LONG",
     }, **dispatch_context))
     assert opened["status"] == "PREVIEW_READY"
+    assert opened["confirmation_required"] is False
     assert connector.previews[-1][2:] == ("OPEN_POSITION", {
         "leverage": 2, "market": "ETH", "notional_usdc": "6", "side": "LONG",
     })
