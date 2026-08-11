@@ -34,7 +34,8 @@ metadata:
    `PENDING_CREDIT` until a later public portfolio read. Never substitute a digest, retry, or
    begin a trade after funding.
 7. Call `holon_perpdex_prepare` only with the user's exact trade or HLP parameters. For an open
-   position, the user must choose `ISOLATED` or `CROSS` and a supported integer leverage.
+   position, use `ISOLATED` when the user did not state a margin mode; preserve an explicit
+   `CROSS` or `ISOLATED` choice and require a supported integer leverage.
    Explain price/slippage, size, margin mode, leverage/reduce-only state, HLP lock-up, checks,
    caveats, and referral disclosure when present. A preview is not an executed action.
 8. End the turn and wait for explicit confirmation in a later user message. Only then call

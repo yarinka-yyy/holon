@@ -13,6 +13,7 @@ from .funding_contracts import FundingBundle
 from .funding_profile import (
     ARBITRUM_CHAIN_ID, ARBITRUM_NETWORK_ID, BRIDGE2_ADDRESS, NATIVE_USDC,
 )
+from .funding_fee import bounded_funding_action
 from .persistence import PerpDexOperationStore
 
 
@@ -106,12 +107,14 @@ class FundingWalletAdapter:
             raise FundingWalletError("FUNDING_AMOUNT_CHANGED")
         if action.max_total_fee_wei > int(semantic["max_total_fee_wei"]):
             raise FundingWalletError("FUNDING_WALLET_FEE_CAP_EXCEEDED")
-        return FundingPreparedBundle(
-            bundle, replace(
-                action, action_type="perpdex_funding", method="bridge2_deposit",
-                protocol_id="hyperliquid-bridge2",
-            ),
-        )
+        try:
+            final = bounded_funding_action(action, int(semantic["max_total_fee_wei"]))
+        except (TypeError, ValueError) as exc:
+            raise FundingWalletError("FUNDING_WALLET_FEE_CAP_EXCEEDED") from exc
+        return FundingPreparedBundle(bundle, replace(
+            final, action_type="perpdex_funding", method="bridge2_deposit",
+            protocol_id="hyperliquid-bridge2",
+        ))
 
     def mark_operation(self, operation_id: str, state: str) -> None:
         self._store().mark_operation(operation_id, state)

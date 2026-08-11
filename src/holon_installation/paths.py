@@ -52,7 +52,7 @@ def expected_component(
         return "contracts"
     if value.startswith("payload/plugin/holon_modules/"):
         return "modules"
-    if value.startswith("payload/plugin/modules/"):
+    if value.startswith(("payload/app/modules/", "payload/plugin/modules/")):
         parts = PurePosixPath(value).parts
         if len(parts) < 5 or parts[2] != "modules" or parts[3] not in module_ids:
             raise ManifestError("Release module path is outside the composition")

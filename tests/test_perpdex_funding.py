@@ -48,7 +48,7 @@ class Preflight:
             1, request.action_id, current.profile_id, current.label, current.address,
             recipient, "arbitrum", "Arbitrum One", ARBITRUM_CHAIN_ID, "usdc", "USDC",
             NATIVE_USDC, int(request.amount_atomic), 6,
-            UnsignedTransaction(2, ARBITRUM_CHAIN_ID, 7, NATIVE_USDC, 0, "0x", 50_000, 2, 1),
+            UnsignedTransaction(2, ARBITRUM_CHAIN_ID, 7, NATIVE_USDC, 0, "0x", 1, self.fee, 1),
             123, self.fee, request.created_at, request.expires_at,
         )
 
@@ -175,7 +175,7 @@ def test_fee_drift_within_ceiling_reaches_wallet_preparation(tmp_path: Path) -> 
 
     assert preview.preview["max_total_fee_wei"] == "125"
     assert bundle.phases[0].semantic["max_total_fee_wei"] == "125"
-    assert prepared.action.max_total_fee_wei == 103
+    assert prepared.action.max_total_fee_wei == 125
 
 
 def test_guard_refuses_fee_above_preview_ceiling_before_wallet(tmp_path: Path) -> None:

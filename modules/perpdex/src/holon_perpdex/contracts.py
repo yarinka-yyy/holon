@@ -168,11 +168,11 @@ class PerpDexActionIntent:
         if not isinstance(value, Mapping):
             raise ContractError("Invalid action parameters")
         if action is ActionType.OPEN_POSITION:
-            _exact(
-                value,
-                {"leverage", "margin_mode", "market", "notional_usdc", "side"},
-                "open position",
-            )
+            fields = {"leverage", "margin_mode", "market", "notional_usdc", "side"}
+            if set(value) == fields - {"margin_mode"}:
+                value = {**value, "margin_mode": MarginMode.ISOLATED.value}
+            else:
+                _exact(value, fields, "open position")
             market = value["market"]
             if market not in SUPPORTED_MARKETS:
                 raise ContractError("Unsupported market")

@@ -31,7 +31,7 @@ function Test-HolLayout($File, $Manifest) {
     elseif ($path.StartsWith("payload/plugin/holon_contracts/") -or
         $path.StartsWith("payload/plugin/holon_guard_ipc/")) { $component = "contracts" }
     elseif ($path.StartsWith("payload/plugin/holon_modules/")) { $component = "modules" }
-    elseif ($path.StartsWith("payload/plugin/modules/")) {
+    elseif ($path.StartsWith("payload/app/modules/") -or $path.StartsWith("payload/plugin/modules/")) {
         $parts = @($path.Split("/"))
         if ($parts.Count -lt 5 -or $parts[3] -cnotin @($Manifest.module_ids)) {
             throw [System.ArgumentException]::new("Unexpected module path") }
@@ -166,11 +166,13 @@ function Read-HolManifest([string]$Root) {
             $module.manifest_sha256 -cnotmatch "^[0-9a-f]{64}$") {
             throw [System.ArgumentException]::new("Invalid module catalog entry") }
         $catalogIds += $module.module_id
-        $packageManifestPath = "payload/plugin/modules/$($module.module_id)/module-manifest.json"
-        $manifestEntries = @($files | Where-Object { $_.path -ceq $packageManifestPath })
-        if ($manifestEntries.Count -ne 1 -or
-            $manifestEntries[0].sha256 -cne $module.manifest_sha256) {
-            throw [System.ArgumentException]::new("Module manifest declaration mismatch") }
+        foreach ($component in @("app", "plugin")) {
+            $packageManifestPath = "payload/$component/modules/$($module.module_id)/module-manifest.json"
+            $manifestEntries = @($files | Where-Object { $_.path -ceq $packageManifestPath })
+            if ($manifestEntries.Count -ne 1 -or
+                $manifestEntries[0].sha256 -cne $module.manifest_sha256) {
+                throw [System.ArgumentException]::new("Module manifest declaration mismatch") }
+        }
     }
     if (($catalogIds -join "|") -cne ($moduleIds -join "|")) {
         throw [System.ArgumentException]::new("Module catalog id mismatch") }

@@ -206,6 +206,14 @@ def test_hermes_perpdex_prepare_then_execute_consumes_preview_once(
     assert connector.previews[-1][2:] == (
         "CLOSE_POSITION", {"amount_mode": "FULL", "market": "BTC", "percent": None},
     )
+    opened = json.loads(optional["holon_perpdex_prepare"]["handler"]({
+        "action_type": "OPEN_POSITION", "leverage": 2, "market": "ETH",
+        "notional_usdc": "6", "side": "LONG",
+    }, **dispatch_context))
+    assert opened["status"] == "PREVIEW_READY"
+    assert connector.previews[-1][2:] == ("OPEN_POSITION", {
+        "leverage": 2, "market": "ETH", "notional_usdc": "6", "side": "LONG",
+    })
     withdrawn = json.loads(optional["holon_perpdex_prepare"]["handler"]({
         "action_type": "HLP_WITHDRAW", "amount_mode": "ALL",
     }, **dispatch_context))

@@ -8,7 +8,7 @@ from holon_wallet.broadcast import MainnetBroadcastPolicy, MainnetTransferExecut
 from holon_wallet.history import HistoryStore
 from holon_wallet.storage import WalletPaths
 from holon_wallet.transfer import (
-    PreparedTransferAction, TransferPreflightService, UnsignedTransaction,
+    PreparedTransferAction, SigningPermit, TransferPreflightService, UnsignedTransaction,
 )
 from holon_wallet.vault import VaultRepository
 from holon_wallet.wallet_crypto import generate_mnemonic
@@ -31,15 +31,16 @@ class FundingExecutionRpc:
 
     def __init__(self) -> None:
         self.send_calls = 0
+        self.base_fee, self.priority_fee, self.gas_estimate = 10, 2, 50_000
 
     def chain_id(self): return ARBITRUM_CHAIN_ID
-    def latest_block(self): return 300_000_000, 10
+    def latest_block(self): return 300_000_000, self.base_fee
     def native_balance(self, _address): return 10**18
     def token_decimals(self, _contract): return 6
     def token_balance(self, _contract, _address): return 10_000_000
     def pending_nonce(self, _address): return 7
-    def max_priority_fee_per_gas(self): return 2
-    def estimate_gas(self, _transaction): return 50_000
+    def max_priority_fee_per_gas(self): return self.priority_fee
+    def estimate_gas(self, _transaction): return self.gas_estimate
 
     def send_raw_transaction(self, raw_transaction):
         from web3 import Web3
@@ -95,9 +96,18 @@ def test_funding_executes_through_the_arbitrum_network_endpoint_only(tmp_path: P
         repository, HistoryStore(repository.paths), MainnetBroadcastPolicy.unavailable(),
         factory, {"HOLON_ARBITRUM_RPC_URL": "fixture://arbitrum"}, lambda: now,
     )
+    rpc.base_fee = 11
     result = ModuleFundingExecutor(executor, adapter).execute(prepared, password)
 
     assert result.status == "PENDING_CREDIT"
     assert result.code == "FUNDING_BROADCAST_PENDING"
     assert rpc.send_calls == 1
     assert endpoints == ["fixture://arbitrum", "fixture://arbitrum"]
+    assert prepared.action.max_total_fee_wei == 1_375_000
+
+    rpc.base_fee = 12
+    exceeded = executor.execute(
+        prepared.action, prepared.action.digest, password, SigningPermit(),
+    )
+    assert exceeded.code.value == "REVALIDATION_FEE_CAP_EXCEEDED"
+    assert rpc.send_calls == 1

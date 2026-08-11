@@ -1529,6 +1529,8 @@ def test_hyperliquid_funding_pages_use_human_copy_and_scroll_cue() -> None:
     assert '"Hyperliquid USDC deposit"' in result
     assert 'code === "FUNDING_POLICY_UNAVAILABLE"' in result
     assert '"Arbitrum is unavailable. Nothing was signed or sent."' in result
+    assert '"Deposit not completed"' in result
+    assert 'code === "FUNDING_REVALIDATION_FEE_CAP_EXCEEDED"' in result
 
 
 def test_network_icons_are_accessible_but_new_networks_do_not_enter_send() -> None:

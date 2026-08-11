@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from holon_installation import PackageBuilder
-from holon_modules import build_composition
+from holon_modules import build_composition, load_registry
 from package_support import SOURCE_ROOT
 from powershell_support import fake_hermes, invoke
 
@@ -125,6 +125,17 @@ def test_extended_package_has_only_declared_perpdex_surfaces(tmp_path: Path) -> 
         "hermes-tools.json", "module-manifest.json",
     }
     assert (package / "payload/skills/crypto/holon-perpdex/SKILL.md").is_file()
+    app_module = package / "payload/app/modules/holon.perpdex"
+    assert (app_module / "module-manifest.json").is_file()
+    assert (app_module / "src/holon_perpdex/wallet.py").is_file()
+    assert (app_module / "src/holon_perpdex/funding_wallet.py").is_file()
+    assert (app_module / "wallet/PerpDexPage.qml").is_file()
+    assert not (app_module / "src/holon_perpdex/guard.py").exists()
+    registry = load_registry(
+        package / "payload/app/module-catalog.json", "wallet",
+        importer=lambda _entry_point: object(),
+    )
+    assert registry.resolve("holon.perpdex.read.wallet").module_id == "holon.perpdex"
     expected = (composition / "module-catalog.json").read_bytes()
     assert (package / "payload/app/module-catalog.json").read_bytes() == expected
 

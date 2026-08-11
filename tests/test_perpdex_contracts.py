@@ -32,6 +32,11 @@ def test_perpdex_intents_are_closed_decimal_string_contracts() -> None:
     assert opened.is_entry
     assert opened.review_seconds == 90
 
+    defaulted = PerpDexActionIntent.from_mapping("OPEN_POSITION", {
+        "leverage": 2, "market": "ETH", "notional_usdc": "6", "side": "LONG",
+    })
+    assert defaulted.to_mapping()["margin_mode"] == "ISOLATED"
+
     partial = PerpDexActionIntent.from_mapping("CLOSE_POSITION", {
         "amount_mode": "PERCENT", "market": "ETH", "percent": "25.5",
     })

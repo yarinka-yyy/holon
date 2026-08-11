@@ -17,12 +17,25 @@ TransactionFlowShell {
         let code = root.result.code || ""
         if (code === "FUNDING_POLICY_UNAVAILABLE")
             return "Arbitrum is unavailable. Nothing was signed or sent."
-        if (code === "FUNDING_GUARD_FEE_CAP_EXCEEDED" || code === "FUNDING_WALLET_FEE_CAP_EXCEEDED")
+        if (code === "FUNDING_GUARD_FEE_CAP_EXCEEDED" || code === "FUNDING_WALLET_FEE_CAP_EXCEEDED"
+                || code === "FUNDING_REVALIDATION_FEE_CAP_EXCEEDED")
             return "The network fee changed beyond the reviewed limit. Nothing was signed or sent."
+        if (code === "FUNDING_REVALIDATION_GAS_LIMIT_EXCEEDED")
+            return "The gas estimate changed beyond the reviewed limit. Nothing was signed or sent."
+        if (code === "FUNDING_REVALIDATION_NONCE_CHANGED")
+            return "Another pending transaction changed this account. Nothing was signed or sent."
+        if (code === "FUNDING_REVALIDATION_ROUTE_CHANGED" || code === "FUNDING_REVALIDATION_BLOCK_STALE")
+            return "The verified network route changed or became stale. Nothing was signed or sent."
+        if (code === "FUNDING_REVALIDATION_FAILED")
+            return "Network conditions changed after Review. Nothing was signed or sent. Create a new review."
         if (code === "FUNDING_INSUFFICIENT_USDC")
             return "There is not enough native USDC for this deposit. Nothing was signed or sent."
         if (code === "FUNDING_INSUFFICIENT_ETH")
             return "There is not enough ETH for the Arbitrum network fee. Nothing was signed or sent."
+        if (code === "FUNDING_REVALIDATION_INSUFFICIENT_ASSET")
+            return "The native USDC balance changed. Nothing was signed or sent."
+        if (code === "FUNDING_REVALIDATION_INSUFFICIENT_GAS")
+            return "The ETH balance for the network fee changed. Nothing was signed or sent."
         if (code === "FUNDING_ACCOUNT_CHANGED" || code === "FUNDING_AMOUNT_CHANGED"
                 || code === "FUNDING_GUARD_ROUTE_CHANGED" || code === "FUNDING_WALLET_ROUTE_CHANGED")
             return "The protected deposit changed. Nothing was signed or sent."
@@ -35,16 +48,19 @@ TransactionFlowShell {
         return "Public reconciliation · no automatic retry"
     }
     function fundingStatus() {
-        if (root.result.status === "PENDING_CREDIT") return "AWAITING HYPERLIQUID CREDIT"
-        if (root.result.status === "FAILED") return "DEPOSIT NOT COMPLETED"
-        return root.result.status || "UNKNOWN"
+        if (root.result.status === "PENDING_CREDIT") return "Awaiting Hyperliquid credit"
+        if (root.result.status === "FAILED") return "Deposit not completed"
+        return root.result.status === "UNKNOWN" ? "Deposit status unknown" : root.result.status
     }
     function phaseTitle(phase) {
         return root.isFunding && phase.phaseType === "ARBITRUM_USDC_TRANSFER"
             ? "Hyperliquid USDC deposit" : phase.phaseType || "Phase"
     }
     function phaseState(phase) {
-        return root.isFunding && phase.state === "PENDING_CREDIT" ? "SUBMITTED" : phase.state || "UNKNOWN"
+        if (!root.isFunding) return phase.state || "Unknown"
+        if (phase.state === "PENDING_CREDIT") return "Submitted"
+        if (phase.state === "FAILED") return "Not completed"
+        return phase.state || "Unknown"
     }
     function phaseDetail(phase) {
         if (root.isFunding && phase.state === "PENDING_CREDIT")

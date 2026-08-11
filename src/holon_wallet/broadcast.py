@@ -113,6 +113,13 @@ class MainnetTransferCode(str, Enum):
     ACTION_EXPIRED = "ACTION_EXPIRED"
     REVALIDATION_FAILED = "REVALIDATION_FAILED"
     REVALIDATION_RPC_UNAVAILABLE = "REVALIDATION_RPC_UNAVAILABLE"
+    REVALIDATION_ROUTE_CHANGED = "REVALIDATION_ROUTE_CHANGED"
+    REVALIDATION_BLOCK_STALE = "REVALIDATION_BLOCK_STALE"
+    REVALIDATION_INSUFFICIENT_ASSET = "REVALIDATION_INSUFFICIENT_ASSET"
+    REVALIDATION_INSUFFICIENT_GAS = "REVALIDATION_INSUFFICIENT_GAS"
+    REVALIDATION_NONCE_CHANGED = "REVALIDATION_NONCE_CHANGED"
+    REVALIDATION_GAS_LIMIT_EXCEEDED = "REVALIDATION_GAS_LIMIT_EXCEEDED"
+    REVALIDATION_FEE_CAP_EXCEEDED = "REVALIDATION_FEE_CAP_EXCEEDED"
     HISTORY_UNAVAILABLE = "HISTORY_UNAVAILABLE"
     CANCELLED = "CANCELLED"
     SIGNING_FAILED = "SIGNING_FAILED"
@@ -1364,12 +1371,65 @@ def _final_revalidation_with_fallback(
     for _endpoint_class, endpoint in _receipt_endpoints(environ, action.network_id):
         try:
             rpc = rpc_factory(endpoint)
-            if _final_revalidation(rpc, action):
+            code = _final_revalidation_code(rpc, action)
+            if code is MainnetTransferCode.CONFIRMED:
                 return rpc, MainnetTransferCode.CONFIRMED, endpoint
         except Exception:
             continue
-        return None, MainnetTransferCode.REVALIDATION_FAILED, None
+        return None, code, None
     return None, MainnetTransferCode.REVALIDATION_RPC_UNAVAILABLE, None
+
+
+def _final_revalidation_code(
+    rpc: MainnetRpc, action: PreparedTransactionAction,
+) -> MainnetTransferCode:
+    if isinstance(action, PreparedTransferAction) and action.action_type == "perpdex_funding":
+        return _funding_final_revalidation(rpc, action)
+    return (
+        MainnetTransferCode.CONFIRMED if _final_revalidation(rpc, action)
+        else MainnetTransferCode.REVALIDATION_FAILED
+    )
+
+
+def _funding_final_revalidation(
+    rpc: MainnetRpc, action: PreparedTransferAction,
+) -> MainnetTransferCode:
+    try:
+        route = transfer_route(action.network_id, action.asset_id)
+    except Exception:
+        return MainnetTransferCode.REVALIDATION_ROUTE_CHANGED
+    tx = action.transaction
+    if rpc.chain_id() != route.chain_id:
+        return MainnetTransferCode.REVALIDATION_ROUTE_CHANGED
+    block_number, base_fee = rpc.latest_block()
+    if block_number < action.block_number or int(base_fee) <= 0:
+        return MainnetTransferCode.REVALIDATION_BLOCK_STALE
+    if route.token_contract is not None:
+        if int(rpc.token_decimals(route.token_contract)) != route.decimals:
+            return MainnetTransferCode.REVALIDATION_ROUTE_CHANGED
+        if int(rpc.token_balance(route.token_contract, action.sender)) < action.amount_atomic:
+            return MainnetTransferCode.REVALIDATION_INSUFFICIENT_ASSET
+    if int(rpc.native_balance(action.sender)) < action.max_total_fee_wei:
+        return MainnetTransferCode.REVALIDATION_INSUFFICIENT_GAS
+    if int(rpc.pending_nonce(action.sender)) != tx.nonce:
+        return MainnetTransferCode.REVALIDATION_NONCE_CHANGED
+    priority_fee = int(rpc.max_priority_fee_per_gas())
+    estimate = int(rpc.estimate_gas({
+        "from": action.sender, "to": tx.to, "value": tx.value, "data": tx.data,
+        "nonce": tx.nonce, "type": tx.transaction_type, "chainId": tx.chain_id,
+        "maxFeePerGas": tx.max_fee_per_gas,
+        "maxPriorityFeePerGas": tx.max_priority_fee_per_gas,
+    }))
+    if not 0 < estimate <= tx.gas:
+        return MainnetTransferCode.REVALIDATION_GAS_LIMIT_EXCEEDED
+    if not 0 <= priority_fee <= tx.max_priority_fee_per_gas:
+        return MainnetTransferCode.REVALIDATION_FEE_CAP_EXCEEDED
+    current_fee = 2 * int(base_fee) + priority_fee
+    return (
+        MainnetTransferCode.CONFIRMED
+        if 0 < current_fee <= tx.max_fee_per_gas
+        else MainnetTransferCode.REVALIDATION_FEE_CAP_EXCEEDED
+    )
 
 
 def _final_revalidation(rpc: MainnetRpc, action: PreparedTransactionAction) -> bool:
@@ -2083,6 +2143,34 @@ def _result_text(
         MainnetTransferCode.REVALIDATION_RPC_UNAVAILABLE: (
             "Live revalidation unavailable",
             "Nothing was sent. Read-only Base RPC checks could not be completed.",
+        ),
+        MainnetTransferCode.REVALIDATION_ROUTE_CHANGED: (
+            "Verified route changed",
+            "Nothing was sent. The reviewed network or asset route is no longer valid.",
+        ),
+        MainnetTransferCode.REVALIDATION_BLOCK_STALE: (
+            "Live network data is stale",
+            "Nothing was sent. Prepare a new action from current network data.",
+        ),
+        MainnetTransferCode.REVALIDATION_INSUFFICIENT_ASSET: (
+            "Asset balance changed",
+            "Nothing was sent. The reviewed asset balance is no longer sufficient.",
+        ),
+        MainnetTransferCode.REVALIDATION_INSUFFICIENT_GAS: (
+            "Gas balance changed",
+            "Nothing was sent. The reviewed network-fee balance is no longer sufficient.",
+        ),
+        MainnetTransferCode.REVALIDATION_NONCE_CHANGED: (
+            "Account activity changed",
+            "Nothing was sent. Another pending transaction changed the reviewed account state.",
+        ),
+        MainnetTransferCode.REVALIDATION_GAS_LIMIT_EXCEEDED: (
+            "Gas estimate changed",
+            "Nothing was sent. The current estimate exceeds the reviewed transaction limit.",
+        ),
+        MainnetTransferCode.REVALIDATION_FEE_CAP_EXCEEDED: (
+            "Network fee changed",
+            "Nothing was sent. The current fee exceeds the reviewed maximum.",
         ),
         MainnetTransferCode.HISTORY_UNAVAILABLE: (
             "History unavailable",

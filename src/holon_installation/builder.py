@@ -67,7 +67,9 @@ def _component(relative: str) -> str:
         return "contracts"
     if relative.startswith("payload/plugin/holon_guard_ipc/"):
         return "contracts"
-    if relative.startswith(("payload/plugin/holon_modules/", "payload/plugin/modules/")):
+    if relative.startswith((
+        "payload/plugin/holon_modules/", "payload/plugin/modules/", "payload/app/modules/",
+    )):
         return "modules"
     if relative.startswith("payload/plugin/"):
         return "plugin"
@@ -347,20 +349,25 @@ class PackageBuilder:
             target.write_bytes(catalog_raw)
         for entry in catalog.modules:
             source_root = self.composition_root / "modules" / entry.module_id
-            target_root = root / "payload" / "plugin" / "modules" / entry.module_id
-            self._copy_file(
-                source_root / "module-manifest.json",
-                target_root / "module-manifest.json",
+            targets = (
+                ("app", frozenset({"shared", "wallet"})),
+                ("plugin", frozenset({"hermes"})),
             )
-            if not entry.enabled:
-                continue
-            for item in manifests[entry.module_id].files:
-                if "hermes" not in item.targets:
-                    continue
+            for component, allowed_targets in targets:
+                target_root = root / "payload" / component / "modules" / entry.module_id
                 self._copy_file(
-                    source_root.joinpath(*item.path.split("/")),
-                    target_root.joinpath(*item.path.split("/")),
+                    source_root / "module-manifest.json",
+                    target_root / "module-manifest.json",
                 )
+                if not entry.enabled:
+                    continue
+                for item in manifests[entry.module_id].files:
+                    if not allowed_targets.intersection(item.targets):
+                        continue
+                    self._copy_file(
+                        source_root.joinpath(*item.path.split("/")),
+                        target_root.joinpath(*item.path.split("/")),
+                    )
 
     def _copy_licenses(self, root: Path) -> None:
         licenses = root / "payload" / "app" / "licenses"
