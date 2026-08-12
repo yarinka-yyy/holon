@@ -195,6 +195,16 @@ def prepare_module_authority(service, request, owner_pid: int):
         }
         if operation_class in _SAFE_OPERATION_CLASSES:
             diagnostic["operation_class"] = operation_class
+        if (
+            isinstance(prepared, dict)
+            and prepared.get("ipc_outcome") in {
+                "WALLET_PROCESS_MISMATCH", "WALLET_REQUEST_INVALID",
+                "WALLET_RESPONSE_INTERRUPTED", "WALLET_RESPONSE_INVALID",
+                "WALLET_RESPONSE_SCHEMA_INVALID", "WALLET_RESPONSE_TIMEOUT",
+            }
+        ):
+            diagnostic["ipc_outcome"] = prepared["ipc_outcome"]
+            diagnostic["failure_category"] = "wallet_ipc"
         if result.stage is not None and not service.audit_system(
             EventType.TECHNICAL_ERROR, result.code, action_id=request.action_id,
             **diagnostic,

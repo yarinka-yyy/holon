@@ -67,11 +67,7 @@ class WalletProtectedActionAdapter:
                 raise AdapterError("PERPDEX_LIVE_STATE_CHANGED", "Position or metadata changed")
             frozen = Decimal(str(old["limit_price"]))
             reference = Decimal(str(current_order["reference_price"]))
-            safe = (
-                reference <= frozen <= reference * Decimal("1.01")
-                if old["is_buy"]
-                else reference * Decimal("0.99") <= frozen <= reference
-            )
+            safe = reference <= frozen if old["is_buy"] else frozen <= reference
             if not safe:
                 raise AdapterError("PERPDEX_PRICE_MOVED", "Frozen IOC limit is no longer safe")
             if old["reduce_only"] and old["size_asset"] != current_order["size_asset"]:
@@ -323,10 +319,18 @@ class WalletProtectedActionAdapter:
             "public_id": public_id,
         }
 
-    def mark_operation(self, operation_id: str, state: str) -> Mapping[str, object]:
+    def mark_operation(
+        self, operation_id: str, state: str, *, terminal_code: str | None = None,
+        terminal_stage: str | None = None, failure_category: str | None = None,
+        operation_class: str | None = None,
+    ) -> Mapping[str, object]:
         if self._operations is None:
             raise RuntimeError("PerpDEX operation state is unavailable")
-        return self._operations.mark_operation(operation_id, state)
+        return self._operations.mark_operation(
+            operation_id, state, terminal_code=terminal_code,
+            terminal_stage=terminal_stage, failure_category=failure_category,
+            operation_class=operation_class,
+        )
 
     def mark_external_submission_started(self, operation_id: str) -> Mapping[str, object]:
         if self._operations is None:
@@ -373,8 +377,12 @@ class WalletProtectedActionAdapter:
         values = self._operations.latest(str(account["address"]))[:limit]
         return tuple({
             "action_type": item["action_type"],
+            "account": item["account"],
             "created_at": item["created_at"],
+            "external_submission_started": item["external_submission_started"],
+            "failure_category": item["failure_category"],
             "intent": dict(item["intent"]),
+            "operation_class": item["operation_class"],
             "operation_id": item["operation_id"],
             "phases": [{
                 "code": phase["code"],
@@ -383,6 +391,8 @@ class WalletProtectedActionAdapter:
                 "state": phase["state"],
             } for phase in item["phases"]],
             "state": item["state"],
+            "terminal_code": item["terminal_code"],
+            "terminal_stage": item["terminal_stage"],
             "updated_at": item["updated_at"],
         } for item in values)
 

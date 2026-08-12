@@ -143,6 +143,10 @@ ACTION_FAILURE_STAGES = frozenset({
     "WALLET_LIVE_VERIFY", "LOCAL_AUTH", "PHASE_REVALIDATION",
     "EXCHANGE_SUBMISSION", "RECONCILIATION",
 })
+ACTION_DIAGNOSTIC_FIELDS = frozenset({
+    "result_code", "result_stage", "failure_category", "operation_class",
+    "ipc_outcome", "recovery_state",
+})
 ACTION_ID_RE = re.compile(
     r"^act-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
 )
@@ -1061,6 +1065,35 @@ def _response(kind: MessageKind, payload: Mapping[str, Any]) -> None:
         flow_id = payload.get("flow_id")
         if flow_id is not None and (not isinstance(flow_id, str) or FLOW_RE.fullmatch(flow_id) is None):
             raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid flow identifier.")
+        if "result_code" in payload and (
+            not isinstance(payload.get("result_code"), str)
+            or CODE_RE.fullmatch(payload["result_code"]) is None
+            or payload.get("result_stage") is not None
+            and payload.get("result_stage") not in ACTION_FAILURE_STAGES
+            or payload.get("failure_category") is not None
+            and payload.get("failure_category") not in {
+                "adapter", "authentication", "exchange_rejected", "exchange_unknown",
+                "internal", "perpdex_state", "public_data", "public_transport",
+                "wallet", "wallet_ipc",
+            }
+            or payload.get("operation_class") is not None
+            and payload.get("operation_class") not in {
+                "clearinghouseState", "frontendOpenOrders", "l2Book",
+                "metaAndAssetCtxs", "orderStatus", "referral", "userFees",
+                "userFillsByTime", "userNonFundingLedgerUpdates",
+                "userVaultEquities", "vaultDetails",
+            }
+            or payload.get("ipc_outcome") is not None
+            and payload.get("ipc_outcome") not in {
+                "WALLET_PROCESS_MISMATCH", "WALLET_REQUEST_INVALID",
+                "WALLET_RESPONSE_INTERRUPTED", "WALLET_RESPONSE_INVALID",
+                "WALLET_RESPONSE_SCHEMA_INVALID", "WALLET_RESPONSE_TIMEOUT",
+            }
+            or payload.get("recovery_state") not in {
+                "NOT_REQUIRED", "REQUIRED", "COMPLETED",
+            }
+        ):
+            raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid action diagnostics.")
     if "authority_available" in payload and type(payload["authority_available"]) is not bool:
         raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid authority status.")
     if kind is MessageKind.HEALTH_RESPONSE and payload.get("compatibility") not in {"COMPATIBLE", "INCOMPATIBLE"}:
@@ -1391,7 +1424,15 @@ def validate_payload(kind: MessageKind, payload: Mapping[str, Any]) -> None:
             raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid message payload.")
         _response(kind, payload)
         return
-    if set(payload) != PAYLOAD_FIELDS[kind]:
+    expected = PAYLOAD_FIELDS[kind]
+    legacy_action_status = (
+        kind in {
+            MessageKind.PROTECTED_FLOW_STARTED, MessageKind.ACTION_STATUS,
+            MessageKind.RECOVERY_REQUIRED,
+        }
+        and set(payload) == expected - ACTION_DIAGNOSTIC_FIELDS
+    )
+    if set(payload) != expected and not legacy_action_status:
         raise ContractViolation(RefusalCode.REQUEST_INVALID.value, "Invalid message payload.")
     if payload:
         _response(kind, payload)

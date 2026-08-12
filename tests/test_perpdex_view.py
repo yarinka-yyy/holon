@@ -38,7 +38,10 @@ def test_result_and_history_mapping_are_plain_but_keep_diagnostics_collapsed() -
     assert result["resultTitle"] == "Deposit sent"
     assert result["resultSubtitle"] == "Waiting for Hyperliquid balance update"
     assert all(item["value"] != "FUNDING_BROADCAST_PENDING" for item in result["summaryRows"])
-    assert result["technicalDetails"][-1]["value"] == "FUNDING_BROADCAST_PENDING"
+    assert any(
+        item == {"label": "Result code", "value": "FUNDING_BROADCAST_PENDING"}
+        for item in result["technicalDetails"]
+    )
 
     history = operation_history_to_map({"operation_id": "act-3", "action_type": "OPEN_POSITION",
                                         "state": "COMPLETED", "created_at": "2026-08-11T12:00:00Z",
@@ -47,3 +50,77 @@ def test_result_and_history_mapping_are_plain_but_keep_diagnostics_collapsed() -
     assert history["summaryTitle"] == "Open ETH long"
     assert history["statusLabel"] == "Completed"
     assert history["isPerpDex"] is True
+
+
+def test_price_move_result_and_history_prove_order_was_not_sent() -> None:
+    action = {
+        "operationId": "act-1", "actionType": "OPEN_POSITION",
+        "intent": {"market": "ETH", "notional_usdc": "11", "leverage": 2},
+        "phases": [{
+            "phaseType": "PLACE_IOC_ORDER", "semantic": {
+                "market": "ETH", "is_buy": True, "size_asset": "0.006",
+                "reference_price": "1800", "limit_price": "1818",
+                "max_slippage_percent": "1", "reduce_only": False,
+            },
+        }],
+    }
+    result = result_presentation({
+        "actionType": "OPEN_POSITION", "status": "FAILED",
+        "code": "PERPDEX_PRICE_MOVED", "phases": [],
+        "terminalStage": "WALLET_EXECUTION_PRE_VERIFY",
+        "externalSubmissionStarted": False,
+    }, action)
+    assert result["resultTitle"] == "Price changed before signing"
+    assert "Order was not sent" in result["resultSubtitle"]
+    details = {item["label"]: item["value"] for item in result["technicalDetails"]}
+    assert details["Result code"] == "PERPDEX_PRICE_MOVED"
+    assert details["External submission"] == "Not attempted"
+    assert details["Signature"] == "Not created"
+
+    history = operation_history_to_map({
+        "operation_id": "act-3", "action_type": "OPEN_POSITION",
+        "account": "0x" + "11" * 20, "state": "FAILED",
+        "created_at": "2026-08-12T07:34:47Z", "updated_at": "2026-08-12T07:35:17Z",
+        "external_submission_started": False, "terminal_code": None,
+        "terminal_stage": None, "failure_category": None, "operation_class": None,
+        "intent": {"market": "ETH", "side": "LONG", "notional_usdc": "11",
+                   "leverage": 2, "margin_mode": "ISOLATED"},
+        "phases": [
+            {"phase_type": "SET_ISOLATED_LEVERAGE", "state": "PENDING", "code": None,
+             "public_id": None},
+            {"phase_type": "PLACE_IOC_ORDER", "state": "PENDING", "code": None,
+             "public_id": None},
+        ],
+    }, {
+        "result_code": "PERPDEX_PRICE_MOVED",
+        "stage": "WALLET_EXECUTION_PRE_VERIFY",
+        "failure_category": "perpdex_state", "recovery_state": "NOT_REQUIRED",
+    })
+    assert history["statusLabel"] == "Failed · price changed before signing"
+    assert history["externalSubmissionStarted"] is False
+    assert "Result code: PERPDEX_PRICE_MOVED" in history["diagnosticsText"]
+    assert "Wallet: 0x1111111111111111111111111111111111111111" in history["diagnosticsText"]
+    assert "PLACE_IOC_ORDER: PENDING" in history["diagnosticsText"]
+    assert "External submission started: false" in history["diagnosticsText"]
+
+
+def test_ambiguous_history_explains_completed_recovery_without_resuming_action() -> None:
+    history = operation_history_to_map({
+        "operation_id": "act-4", "action_type": "OPEN_POSITION",
+        "account": "0x" + "11" * 20, "state": "FAILED",
+        "created_at": "2026-08-12T07:37:59Z", "updated_at": "2026-08-12T07:38:19Z",
+        "external_submission_started": False, "terminal_code": None,
+        "terminal_stage": None, "failure_category": None, "operation_class": None,
+        "intent": {"market": "ETH", "side": "LONG", "notional_usdc": "11",
+                   "leverage": 2, "margin_mode": "ISOLATED"}, "phases": [],
+    }, {
+        "result_code": "WALLET_PREPARATION_AMBIGUOUS", "stage": "WALLET_PREPARE",
+        "failure_category": "wallet_ipc", "ipc_outcome": "WALLET_RESPONSE_SCHEMA_INVALID",
+        "recovery_state": "COMPLETED",
+    })
+    assert "response could not be safely validated" in history["resultExplanation"]
+    assert "original action was not resumed" in history["resultExplanation"]
+    assert any(
+        item == {"label": "Recovery", "value": "Completed · original action not resumed"}
+        for item in history["detailRows"]
+    )

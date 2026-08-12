@@ -187,7 +187,7 @@ class GuardCore:
             best_effort_save(self.store, self.snapshot)
             return False
 
-    def _recover(self, code: str) -> GuardResult:
+    def _recover(self, code: str, *, stage: str | None = None) -> GuardResult:
         try:
             self.ledger.terminalize(ActionState.RECOVERY_REQUIRED, code)
         except ActionLedgerFailure:
@@ -225,7 +225,7 @@ class GuardCore:
             if not saved:
                 return self.disable_signing("LENDING_OPERATION_STATE_INVALID")
         self._persist(recovery)
-        return self._result(False, code, "Protected flow requires recovery.")
+        return self._result(False, code, "Protected flow requires recovery.", stage=stage)
 
     def health(self) -> GuardResult:
         with self._lock:

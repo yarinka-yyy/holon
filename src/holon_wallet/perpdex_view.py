@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from datetime import datetime
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Mapping
+
+from holon_guard.action_store import ActionStateStore
+from holon_journal import EventType, JournalStore
 
 
 def action_presentation(action: Mapping[str, object]) -> dict[str, object]:
@@ -64,6 +68,17 @@ def result_presentation(result: Mapping[str, object], action: Mapping[str, objec
         title, subtitle = "Deposit sent", "Waiting for Hyperliquid balance update"
     elif funding and status == "FAILED":
         title, subtitle = "Deposit stopped", "Nothing was sent if the Wallet stopped before signing."
+    elif code == "PERPDEX_PRICE_MOVED":
+        title = "Price changed before signing"
+        subtitle = "Order was not sent. Review a fresh quote to try again."
+    elif code == "HYPERLIQUID_ACTION_REJECTED":
+        title, subtitle = "Hyperliquid rejected the action", "No phase was automatically retried."
+    elif code in {"IOC_NOT_FILLED", "IOC_PARTIAL_FILL"}:
+        title = "IOC order was not fully filled"
+        subtitle = "Check the current position before creating another order."
+    elif code in {"HYPERLIQUID_RESULT_UNKNOWN", "PERPDEX_RESULT_UNKNOWN"}:
+        title = "Order result needs checking"
+        subtitle = "Do not repeat it until the current position and order history are verified."
     elif status == "COMPLETED":
         title, subtitle = "Position order processed", "Check your updated position in PerpDEX."
     elif status == "PARTIAL":
@@ -76,12 +91,71 @@ def result_presentation(result: Mapping[str, object], action: Mapping[str, objec
                        if isinstance(item, Mapping) and str(item.get("publicId", "")).startswith("0x") and len(str(item.get("publicId"))) == 66), "")
     technical = list(base["technicalDetails"])
     technical.append({"label": "Result code", "value": code})
+    if not funding:
+        stage = result.get("terminalStage")
+        if stage: technical.append({"label": "Failure stage", "value": str(stage)})
+        submitted = result.get("externalSubmissionStarted") is True
+        technical.append({
+            "label": "External submission",
+            "value": "Started" if submitted else "Not attempted",
+        })
+        if code == "PERPDEX_PRICE_MOVED" and not submitted:
+            technical.append({"label": "Signature", "value": "Not created"})
     if hash_value: technical.append({"label": "Arbitrum hash", "value": hash_value})
     return {**base, "resultTitle": title, "resultSubtitle": subtitle, "resultCode": code,
             "transactionHash": hash_value, "status": status, "technicalDetails": technical}
 
 
-def operation_history_to_map(operation: Mapping[str, object]) -> dict[str, object]:
+def load_action_diagnostics(
+    data_dir: Path, action_ids: set[str],
+) -> dict[str, dict[str, object]]:
+    """Join strict local Guard evidence for Wallet presentation only."""
+    values = {action_id: {} for action_id in action_ids}
+    try:
+        snapshot = ActionStateStore(Path(data_dir) / "action-state.json").load()
+        records = (() if snapshot.current is None else (snapshot.current,)) + snapshot.terminal
+        for record in records:
+            if record.action_id in values:
+                values[record.action_id].update({
+                    "action_state": record.state.value,
+                    "result_code": record.code,
+                })
+    except Exception:
+        pass
+    try:
+        for event in JournalStore(Path(data_dir) / "journal.jsonl").read_events():
+            action_id = event.public_fields.get("action_id")
+            if action_id not in values:
+                continue
+            item = values[str(action_id)]
+            if event.event_type is EventType.TECHNICAL_ERROR:
+                item["result_code"] = event.code
+                for field in (
+                    "stage", "failure_category", "operation_class", "ipc_outcome",
+                ):
+                    if field in event.public_fields:
+                        item[field] = event.public_fields[field]
+            elif event.event_type is EventType.RECOVERY_COMPLETED:
+                item["recovery_state"] = "COMPLETED"
+    except Exception:
+        pass
+    for item in values.values():
+        code = str(item.get("result_code", ""))
+        item.setdefault("stage", _stage_for_code(code))
+        item.setdefault("failure_category", _category_for_code(code))
+        if code == "WALLET_PREPARATION_AMBIGUOUS":
+            item.setdefault("ipc_outcome", "UNKNOWN")
+        item.setdefault(
+            "recovery_state",
+            "REQUIRED" if item.get("action_state") == "RECOVERY_REQUIRED" else "NOT_REQUIRED",
+        )
+    return values
+
+
+def operation_history_to_map(
+    operation: Mapping[str, object], diagnostic: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    diagnostic = diagnostic or {}
     kind = str(operation.get("action_type", ""))
     intent = operation.get("intent") if isinstance(operation.get("intent"), Mapping) else {}
     market, side = str(intent.get("market", "")), str(intent.get("side", "")).lower()
@@ -89,15 +163,147 @@ def operation_history_to_map(operation: Mapping[str, object]) -> dict[str, objec
         "OPEN_POSITION": f"Open {market} {side}",
         "CLOSE_POSITION": f"Close {market} position",
     }.get(kind, "Hyperliquid action")
-    status = str(operation.get("state", "")).replace("_", " ").title()
+    state = str(operation.get("state", ""))
+    status = state.replace("_", " ").title()
     amount = str(intent.get("notional_usdc", ""))
+    leverage = intent.get("leverage")
+    margin = _divided(amount, leverage) if amount and leverage else ""
+    code = str(operation.get("terminal_code") or diagnostic.get("result_code") or "")
+    stage = str(operation.get("terminal_stage") or diagnostic.get("stage") or "")
+    category = str(operation.get("failure_category") or diagnostic.get("failure_category") or "")
+    operation_class = str(operation.get("operation_class") or diagnostic.get("operation_class") or "")
+    external_started = operation.get("external_submission_started") is True
+    recovery = str(diagnostic.get("recovery_state", "NOT_REQUIRED"))
+    signature = (
+        "Not created" if not external_started and stage in {
+            "WALLET_LIVE_VERIFY", "WALLET_EXECUTION_PRE_VERIFY", "WALLET_AUTHENTICATION",
+            "WALLET_PREPARE",
+        } else "Created before external attempt" if external_started
+        else "No external signature recorded"
+    )
+    explanation = _result_explanation(code, recovery)
+    if code == "PERPDEX_PRICE_MOVED":
+        status = "Failed · price changed before signing"
+    elif code == "WALLET_PREPARATION_AMBIGUOUS":
+        status = "Failed · Wallet response was not validated"
+    rows = [
+        ("Status", status or "Unavailable"),
+        ("Action", kind.replace("_", " ").title()),
+        ("Market", market or "Unavailable"),
+        ("Side", side.upper() if side else "Unavailable"),
+        ("Margin", f"≈ {margin} USDC" if margin else "Unavailable"),
+        ("Maximum position", f"≤ {amount} USDC" if amount else "Unavailable"),
+        ("Margin mode", str(intent.get("margin_mode", "Unavailable")).title()),
+        ("Leverage", f"{leverage}x" if leverage else "Unavailable"),
+        ("Wallet", str(operation.get("account", "Unavailable"))),
+        ("Protocol", "Hyperliquid"),
+        ("Result code", code or "Unavailable"),
+        ("Failure stage", stage or "Unavailable"),
+        ("Signature", signature),
+        ("External submission", "Started" if external_started else "Not attempted"),
+        ("Recovery", _recovery_label(recovery)),
+        ("Updated", str(operation.get("updated_at", "Unavailable"))),
+    ]
+    phases = operation.get("phases") if isinstance(operation.get("phases"), list) else []
+    technical = [
+        ("Operation ID", str(operation.get("operation_id", ""))),
+        ("Result code", code), ("Failure stage", stage),
+        ("Failure category", category), ("Hyperliquid read", operation_class),
+        ("IPC outcome", str(diagnostic.get("ipc_outcome", ""))),
+        ("External submission", "Started" if external_started else "Not attempted"),
+    ]
+    for phase in phases:
+        if not isinstance(phase, Mapping):
+            continue
+        phase_value = str(phase.get("state", "Unavailable"))
+        if phase.get("code"): phase_value += " · " + str(phase["code"])
+        if phase.get("public_id"): phase_value += " · " + str(phase["public_id"])
+        technical.append((str(phase.get("phase_type", "Phase")), phase_value))
+    diagnostic_items = [
+        ("Action ID", str(operation.get("operation_id", ""))),
+        ("Action", kind), ("Market", market), ("Side", side.upper()),
+        ("Margin", f"{margin} USDC" if margin else "Unavailable"),
+        ("Notional", f"{amount} USDC" if amount else "Unavailable"),
+        ("Leverage", f"{leverage}x" if leverage else "Unavailable"),
+        ("Wallet", str(operation.get("account", "Unavailable"))),
+        ("Status", state), ("Result code", code or "Unavailable"),
+        ("Failure stage", stage or "Unavailable"),
+        ("Failure category", category or "Unavailable"),
+        ("Hyperliquid read", operation_class or "Unavailable"),
+        ("IPC outcome", str(diagnostic.get("ipc_outcome") or "Unavailable")),
+        ("Signature", signature),
+        ("External submission started", str(external_started).lower()),
+        ("Recovery", _recovery_label(recovery)),
+        ("Reason", explanation),
+    ]
+    for phase in phases:
+        if not isinstance(phase, Mapping):
+            continue
+        phase_value = str(phase.get("state", "Unavailable"))
+        if phase.get("code"): phase_value += " · " + str(phase["code"])
+        if phase.get("public_id"): phase_value += " · " + str(phase["public_id"])
+        diagnostic_items.append((str(phase.get("phase_type", "Phase")), phase_value))
+    diagnostics_text = "\n".join(
+        f"{label}: {value}" for label, value in diagnostic_items
+    )
     return {"actionId": str(operation.get("operation_id", "")), "actionType": kind,
             "summaryTitle": title, "counterpartyLabel": "Protocol", "shortRecipient": "Hyperliquid",
-            "amountLabel": f"≤ {amount} USDC" if amount else "", "status": str(operation.get("state", "")).lower(),
+            "amount": f"≤ {amount} USDC" if amount else "", "amountLabel": f"≤ {amount} USDC" if amount else "",
+            "status": state.lower(),
             "statusLabel": status, "createdAt": str(operation.get("created_at", "")),
             "updatedAt": str(operation.get("updated_at", "")), "dateLabel": _date(str(operation.get("created_at", ""))),
             "isPerpDex": True, "operationId": str(operation.get("operation_id", "")), "token": "USDC",
-            "transactionHash": "", "simulated": False, "isOperation": True}
+            "transactionHash": "", "simulated": False, "isOperation": True,
+            "detailRows": [{"label": label, "value": value} for label, value in rows],
+            "technicalDetails": [
+                {"label": label, "value": value} for label, value in technical if value
+            ],
+            "diagnosticsText": diagnostics_text, "resultExplanation": explanation,
+            "externalSubmissionStarted": external_started}
+
+
+def _stage_for_code(code: str) -> str:
+    if code in {"PERPDEX_PRICE_MOVED", "PERPDEX_POSITION_CHANGED", "HYPERLIQUID_UNAVAILABLE"}:
+        return "WALLET_EXECUTION_PRE_VERIFY"
+    if code == "AUTHENTICATION_FAILED": return "WALLET_AUTHENTICATION"
+    if code == "WALLET_PREPARATION_AMBIGUOUS": return "WALLET_PREPARE"
+    if code in {"HYPERLIQUID_ACTION_REJECTED", "HYPERLIQUID_RESULT_UNKNOWN"}:
+        return "RECONCILIATION"
+    return ""
+
+
+def _category_for_code(code: str) -> str:
+    if code == "HYPERLIQUID_UNAVAILABLE": return "public_transport"
+    if code == "WALLET_PREPARATION_AMBIGUOUS": return "wallet_ipc"
+    if code == "AUTHENTICATION_FAILED": return "authentication"
+    if code == "HYPERLIQUID_ACTION_REJECTED": return "exchange_rejected"
+    if code in {"HYPERLIQUID_RESULT_UNKNOWN", "PERPDEX_RESULT_UNKNOWN"}: return "exchange_unknown"
+    if code.startswith("PERPDEX_"): return "perpdex_state"
+    return ""
+
+
+def _result_explanation(code: str, recovery: str) -> str:
+    values = {
+        "PERPDEX_PRICE_MOVED": "Price moved outside the protected limit before signing. The order was not sent.",
+        "HYPERLIQUID_ACTION_REJECTED": "Hyperliquid rejected the submitted action.",
+        "IOC_NOT_FILLED": "The IOC order was submitted but did not fill.",
+        "IOC_PARTIAL_FILL": "The IOC order filled only partially.",
+        "HYPERLIQUID_RESULT_UNKNOWN": "Submission started, but the external result could not be confirmed.",
+        "WALLET_PREPARATION_AMBIGUOUS": "The Wallet preparation response could not be safely validated. No action was retried.",
+        "HYPERLIQUID_UNAVAILABLE": "Required public Hyperliquid data was unavailable.",
+    }
+    value = values.get(code, "No action was automatically retried.")
+    if recovery == "COMPLETED":
+        value += " Guard recovery completed; the original action was not resumed."
+    return value
+
+
+def _recovery_label(value: str) -> str:
+    return {
+        "COMPLETED": "Completed · original action not resumed",
+        "REQUIRED": "Required before a new protected action",
+        "NOT_REQUIRED": "Not required",
+    }.get(value, "Unavailable")
 
 
 def _base(label, title, subtitle, rows, warnings, action, extra):

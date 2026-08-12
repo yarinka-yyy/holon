@@ -104,6 +104,21 @@ class WalletPreparedResult:
     handle: WalletHandle | None
 
 
+_SAFE_IPC_OUTCOMES = frozenset({
+    "WALLET_PROCESS_MISMATCH", "WALLET_REQUEST_INVALID",
+    "WALLET_RESPONSE_INTERRUPTED", "WALLET_RESPONSE_SCHEMA_INVALID",
+    "WALLET_RESPONSE_TIMEOUT",
+})
+
+
+def _ambiguous_preparation(error: ControlProtocolError) -> WalletPreparedResult:
+    outcome = error.code if error.code in _SAFE_IPC_OUTCOMES else "WALLET_RESPONSE_INVALID"
+    return WalletPreparedResult(False, "WALLET_PREPARATION_AMBIGUOUS", {
+        "stage": "WALLET_PREPARE", "failure_category": "wallet_ipc",
+        "ipc_outcome": outcome,
+    }, None)
+
+
 @dataclass(frozen=True)
 class WalletLendingPreviewResult:
     ok: bool
@@ -325,10 +340,8 @@ class VerifiedWalletController(UnavailableWalletController):
                     request, self._wallet_path, self._readiness_timeout,
                     self._authority_timeout,
                 )
-            except ControlProtocolError:
-                return WalletPreparedResult(
-                    False, "WALLET_PREPARATION_AMBIGUOUS", None, None,
-                )
+            except ControlProtocolError as error:
+                return _ambiguous_preparation(error)
             except ControlUnavailable:
                 exit_code = self._safe_exit_code(spawned)
                 if exit_code in {0, WALLET_INSTANCE_UNREACHABLE_EXIT_CODE}:
@@ -342,10 +355,8 @@ class VerifiedWalletController(UnavailableWalletController):
                 return WalletPreparedResult(False, code, None, None)
             except Exception:
                 return WalletPreparedResult(False, "WALLET_UNAVAILABLE", None, None)
-        except ControlProtocolError:
-            return WalletPreparedResult(
-                False, "WALLET_PREPARATION_AMBIGUOUS", None, None,
-            )
+        except ControlProtocolError as error:
+            return _ambiguous_preparation(error)
         except Exception:
             return WalletPreparedResult(False, "WALLET_UNAVAILABLE", None, None)
         if response is None:

@@ -149,6 +149,29 @@ def test_unknown_submit_stops_later_phases_and_wrong_password_submits_nothing(tm
     assert transport.calls == []
 
 
+def test_price_move_before_auth_persists_safe_terminal_details_and_submits_nothing(
+    tmp_path: Path,
+) -> None:
+    repository, record, password, account, bundle, wallet = fixture(tmp_path)
+    wallet.reader._post.prices["BTC"] = ("60999", "61001")
+    transport = SubmitFixture()
+
+    result = PerpDexExecutor(repository, wallet, transport).execute(
+        bundle.to_mapping(), password, record.summary.profile_id, account,
+    )
+
+    assert result.status == "FAILED"
+    assert result.code == "PERPDEX_PRICE_MOVED"
+    assert result.terminal_stage == "WALLET_EXECUTION_PRE_VERIFY"
+    assert result.external_submission_started is False
+    assert transport.calls == []
+    stored = wallet.status(bundle.operation_id)
+    assert stored["terminal_code"] == "PERPDEX_PRICE_MOVED"
+    assert stored["terminal_stage"] == "WALLET_EXECUTION_PRE_VERIFY"
+    assert stored["failure_category"] == "perpdex_state"
+    assert stored["external_submission_started"] is False
+
+
 def test_persistence_failure_after_submit_is_unknown_not_failed(tmp_path: Path) -> None:
     repository, record, password, account, bundle, wallet = fixture(tmp_path)
     original = wallet.mark_phase

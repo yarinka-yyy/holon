@@ -248,6 +248,13 @@ class AuthorityService(ResponseMixin):
                     EventType.BROADCAST_RESULT, str(update["code"]), **common,
                 )
             if event == "FAILED":
+                for field in (
+                    "stage", "failure_category", "operation_class",
+                    "external_submission_started",
+                ):
+                    value = update.get(field)
+                    if value is not None:
+                        common[field] = value
                 return self.audit_system(
                     EventType.TECHNICAL_ERROR, str(update["code"]), **common,
                 )

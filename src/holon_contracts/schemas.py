@@ -172,15 +172,27 @@ PAYLOAD_FIELDS = {
         }
     ),
     MessageKind.PROTECTED_FLOW_STARTED: frozenset(
-        {"guard_state", "action_state", "flow_id", "code", "message"}
+        {
+            "guard_state", "action_state", "flow_id", "code", "message",
+            "result_code", "result_stage", "failure_category", "operation_class",
+            "ipc_outcome", "recovery_state",
+        }
     ),
     MessageKind.ACTION_STATUS: frozenset(
-        {"guard_state", "action_state", "flow_id", "code", "message"}
+        {
+            "guard_state", "action_state", "flow_id", "code", "message",
+            "result_code", "result_stage", "failure_category", "operation_class",
+            "ipc_outcome", "recovery_state",
+        }
     ),
     MessageKind.REFUSAL: frozenset({"code", "message", "retryable"}),
     MessageKind.ERROR: frozenset({"code", "message", "retryable"}),
     MessageKind.RECOVERY_REQUIRED: frozenset(
-        {"guard_state", "action_state", "flow_id", "code", "message"}
+        {
+            "guard_state", "action_state", "flow_id", "code", "message",
+            "result_code", "result_stage", "failure_category", "operation_class",
+            "ipc_outcome", "recovery_state",
+        }
     ),
     MessageKind.SIGNING_DISABLED: frozenset(
         {"guard_state", "authority_available", "code", "message"}

@@ -69,6 +69,11 @@ MODULE_PREPARED_FIELDS = frozenset({
 REFUSED_FIELDS = frozenset({
     "authority_version", "kind", "flow_id", "action_id", "wallet_pid", "code",
 })
+MODULE_REFUSAL_STAGES = frozenset({"WALLET_LIVE_VERIFY", "WALLET_PREPARE"})
+MODULE_OPERATION_CLASSES = frozenset({
+    "clearinghouseState", "frontendOpenOrders", "l2Book", "metaAndAssetCtxs",
+    "referral", "userFees", "userVaultEquities", "vaultDetails",
+})
 
 
 def _uuid(value: object) -> str:
@@ -282,8 +287,18 @@ def validate_response(
         else MODULE_PREPARED_FIELDS if kind == "module_action_prepared"
         else REFUSED_FIELDS
     )
+    module_refusal = kind == "module_action_refused"
+    module_refusal_fields = (
+        frozenset(value) in {
+            REFUSED_FIELDS,
+            REFUSED_FIELDS | {"stage"},
+            REFUSED_FIELDS | {"stage", "operation_class"},
+        }
+        if module_refusal else False
+    )
     if (
-        set(value) != expected or kind not in allowed_kinds
+        (set(value) != expected and not module_refusal_fields)
+        or kind not in allowed_kinds
         or value.get("authority_version") != AUTHORITY_VERSION
         or value.get("flow_id") != request.get("flow_id")
         or value.get("action_id") != request.get("action_id")
@@ -292,6 +307,14 @@ def validate_response(
         or CODE_RE.fullmatch(value["code"]) is None
     ):
         raise ControlProtocolError("Invalid authority response")
+    if module_refusal and "stage" in value:
+        if value.get("stage") not in MODULE_REFUSAL_STAGES:
+            raise ControlProtocolError("Invalid module authority refusal")
+        if (
+            "operation_class" in value
+            and value.get("operation_class") not in MODULE_OPERATION_CLASSES
+        ):
+            raise ControlProtocolError("Invalid module authority refusal")
     if kind not in {"transfer_prepared", "lending_action_prepared", "module_action_prepared"}:
         return dict(value)
     if kind == "module_action_prepared":
@@ -404,7 +427,12 @@ class WalletAuthorityClient:
         self, request: Mapping[str, object], expected_path: Path,
         readiness_timeout: float, response_timeout: float | None = None,
     ) -> dict[str, object]:
-        checked = validate_request(request)
+        try:
+            checked = validate_request(request)
+        except ControlProtocolError as error:
+            raise ControlProtocolError(
+                "Wallet authority request is invalid", "WALLET_REQUEST_INVALID",
+            ) from error
         self._waiter(self.pipe_name, readiness_timeout)
         try:
             connection = self._connector(self.pipe_name, family="AF_PIPE", authkey=None)
@@ -417,15 +445,31 @@ class WalletAuthorityClient:
                 if not connection.poll(
                     readiness_timeout if response_timeout is None else response_timeout
                 ):
-                    raise ControlProtocolError("Wallet authority response timed out")
-                response = _decode(connection.recv_bytes(MAX_AUTHORITY_BYTES + 1))
+                    raise ControlProtocolError(
+                        "Wallet authority response timed out", "WALLET_RESPONSE_TIMEOUT",
+                    )
+                try:
+                    response = _decode(connection.recv_bytes(MAX_AUTHORITY_BYTES + 1))
+                except ControlProtocolError as error:
+                    raise ControlProtocolError(
+                        "Wallet authority response is invalid", "WALLET_RESPONSE_SCHEMA_INVALID",
+                    ) from error
         except (ControlProtocolError, ControlUnavailable):
             raise
         except Exception as error:
-            raise ControlProtocolError("Wallet authority response failed") from error
+            raise ControlProtocolError(
+                "Wallet authority response failed", "WALLET_RESPONSE_INTERRUPTED",
+            ) from error
         if not _same_path(self._process_image(peer_pid), expected_path):
-            raise ControlProtocolError("Wallet process verification failed")
-        return validate_response(response, checked, peer_pid)
+            raise ControlProtocolError(
+                "Wallet process verification failed", "WALLET_PROCESS_MISMATCH",
+            )
+        try:
+            return validate_response(response, checked, peer_pid)
+        except ControlProtocolError as error:
+            raise ControlProtocolError(
+                "Wallet authority response is invalid", "WALLET_RESPONSE_SCHEMA_INVALID",
+            ) from error
 
 
 class WalletAuthorityServer:

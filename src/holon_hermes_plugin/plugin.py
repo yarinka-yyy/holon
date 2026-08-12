@@ -1052,6 +1052,12 @@ class PluginRuntime:
                 "action_id": action_id,
                 "code": payload["code"],
                 "message": payload["message"],
+                "result_code": payload.get("result_code", payload["code"]),
+                "stage": payload.get("result_stage"),
+                "failure_category": payload.get("failure_category"),
+                "operation_class": payload.get("operation_class"),
+                "ipc_outcome": payload.get("ipc_outcome"),
+                "recovery_state": payload.get("recovery_state", "NOT_REQUIRED"),
             }
             remembered = self._lending_requests.get(action_id)
             if state == "FAILED" and remembered is not None:

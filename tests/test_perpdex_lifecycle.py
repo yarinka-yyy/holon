@@ -166,6 +166,41 @@ def test_wallet_startup_timeout_uses_wallet_prepare_stage(tmp_path: Path) -> Non
     assert item.ledger.find(ACTION_ID).state.value == "FAILED"
 
 
+def test_wallet_protocol_ambiguity_keeps_safe_ipc_outcome_and_requires_recovery(
+    tmp_path: Path,
+) -> None:
+    class AmbiguousWallet(Wallet):
+        def prepare_module_action(self, request):
+            self.requests.append(dict(request))
+            return WalletPreparedResult(
+                False, "WALLET_PREPARATION_AMBIGUOUS", {
+                    "stage": "WALLET_PREPARE", "failure_category": "wallet_ipc",
+                    "ipc_outcome": "WALLET_RESPONSE_SCHEMA_INVALID",
+                }, None,
+            )
+
+    store = SnapshotStore(tmp_path / "guard-state.json")
+    store.bootstrap_normal_for_test(1_786_000_000.0)
+    wallet = AmbiguousWallet()
+    item = GuardLifecycle(
+        store, store.load(), wallet, Owner(), make_ledger(tmp_path),
+        clock=lambda: 1_786_000_000.0,
+    )
+    result, prepared = item.start_module_intent(
+        101, ACTION_ID, "f" * 64, "holon.perpdex",
+        "holon.perpdex.action.wallet", "hyperliquid-mainnet-v1",
+        "OPEN_POSITION", bundle(),
+    )
+
+    assert not result.ok and result.code == "WALLET_PREPARATION_AMBIGUOUS"
+    assert result.stage == "WALLET_PREPARE"
+    assert prepared["ipc_outcome"] == "WALLET_RESPONSE_SCHEMA_INVALID"
+    assert item.snapshot.state is GuardState.RECOVERY_REQUIRED
+    record = item.ledger.find(ACTION_ID)
+    assert record.state.value == "RECOVERY_REQUIRED"
+    assert record.code == "WALLET_PREPARATION_AMBIGUOUS"
+
+
 def test_old_recovery_can_release_only_for_fresh_risk_reducing_exit(tmp_path: Path) -> None:
     item, _wallet = lifecycle(tmp_path)
     started, _prepared = item.start_module_intent(

@@ -127,6 +127,10 @@ class PerpDexExecutionResult:
     code: str
     message: str
     phase_states: tuple[dict[str, object], ...]
+    terminal_stage: str | None = None
+    failure_category: str | None = None
+    operation_class: str | None = None
+    external_submission_started: bool = False
 
     def to_mapping(self) -> dict[str, object]:
         return {
@@ -136,7 +140,32 @@ class PerpDexExecutionResult:
             "code": self.code,
             "message": self.message,
             "phases": [dict(item) for item in self.phase_states],
+            "terminalStage": self.terminal_stage,
+            "failureCategory": self.failure_category,
+            "operationClass": self.operation_class,
+            "externalSubmissionStarted": self.external_submission_started,
         }
+
+
+def _failure_category(code: str, submission_attempted: bool) -> str:
+    if code == "AUTHENTICATION_FAILED":
+        return "authentication"
+    if code == "HYPERLIQUID_UNAVAILABLE":
+        return "public_transport"
+    if code.startswith("HYPERLIQUID_") and code not in {
+        "HYPERLIQUID_ACTION_REJECTED", "HYPERLIQUID_RESULT_UNKNOWN",
+    }:
+        return "public_data"
+    if code == "HYPERLIQUID_ACTION_REJECTED":
+        return "exchange_rejected"
+    if submission_attempted or code in {
+        "HYPERLIQUID_RESULT_UNKNOWN", "PERPDEX_RESULT_UNKNOWN",
+        "PERPDEX_RECONCILIATION_UNKNOWN", "PERPDEX_RECONCILIATION_INVALID",
+    }:
+        return "exchange_unknown"
+    if code.startswith("PERPDEX_"):
+        return "perpdex_state"
+    return "internal"
 
 
 class PerpDexExecutor:
@@ -165,10 +194,15 @@ class PerpDexExecutor:
         submission_attempted = False
         terminal_status = "FAILED"
         terminal_code = "PERPDEX_EXECUTION_FAILED"
+        terminal_stage = "WALLET_EXECUTION_PRE_VERIFY"
+        failure_category = "internal"
+        operation_class = None
         terminal_message = "Nothing was automatically retried."
+        operation_id = str(raw_bundle.get("operation_id", ""))
         try:
             bundle = self.adapter.verify(raw_bundle, account)
             self.adapter.mark_operation(bundle.operation_id, "EXECUTING")
+            terminal_stage = "WALLET_AUTHENTICATION"
             record = self.repository._authenticate_profile(password, profile_id)
             if (
                 record.summary.address.lower() != bundle.account.lower()
@@ -182,6 +216,7 @@ class PerpDexExecutor:
             expires_after = self._expires_ms(bundle.expires_at)
             for index, phase in enumerate(bundle.phases):
                 phase_submission_attempted = False
+                terminal_stage = f"PHASE_{phase.phase_type.value}"
                 try:
                     self.adapter.verify_phase(bundle, index, account)
                     action = dict(self.adapter.wire_action(phase))
@@ -211,6 +246,7 @@ class PerpDexExecutor:
                         "vaultAddress": None,
                     })
                     del signature, action
+                    terminal_stage = "RECONCILIATION"
                     try:
                         reconciled = dict(self.adapter.reconcile(phase, response, account))
                     except Exception as exc:
@@ -299,8 +335,17 @@ class PerpDexExecutor:
             else:
                 terminal_status = "COMPLETED"
                 terminal_code = "PERPDEX_ACTION_COMPLETED"
+                terminal_stage = "TERMINAL"
             operation_state = terminal_status
-            self.adapter.mark_operation(bundle.operation_id, operation_state)
+            failure_category = (
+                None if terminal_status == "COMPLETED"
+                else _failure_category(terminal_code, submission_attempted)
+            )
+            self.adapter.mark_operation(
+                bundle.operation_id, operation_state, terminal_code=terminal_code,
+                terminal_stage=terminal_stage, failure_category=failure_category,
+                operation_class=operation_class,
+            )
             terminal_message = (
                 "Protected Hyperliquid action completed."
                 if terminal_status == "COMPLETED"
@@ -308,10 +353,15 @@ class PerpDexExecutor:
             )
         except (AuthenticationFailedError, VaultUnavailableError, InvalidSecretError):
             terminal_status, terminal_code = "FAILED", "AUTHENTICATION_FAILED"
+            terminal_stage = "WALLET_AUTHENTICATION"
+            failure_category = "authentication"
             terminal_message = "Nothing was signed or sent."
-            if bundle is not None:
+            if operation_id:
                 try:
-                    self.adapter.mark_operation(bundle.operation_id, terminal_status)
+                    self.adapter.mark_operation(
+                        operation_id, terminal_status, terminal_code=terminal_code,
+                        terminal_stage=terminal_stage, failure_category=failure_category,
+                    )
                 except Exception:
                     pass
         except Exception as exc:
@@ -322,10 +372,17 @@ class PerpDexExecutor:
                     "PERPDEX_RESULT_UNKNOWN"
                     if submission_attempted else "PERPDEX_EXECUTION_FAILED"
                 )
+            failure_category = _failure_category(terminal_code, submission_attempted)
+            requested_class = getattr(exc, "operation_class", None)
+            operation_class = requested_class if isinstance(requested_class, str) else None
             terminal_message = "Nothing was automatically retried."
-            if bundle is not None:
+            if operation_id:
                 try:
-                    self.adapter.mark_operation(bundle.operation_id, terminal_status)
+                    self.adapter.mark_operation(
+                        operation_id, terminal_status, terminal_code=terminal_code,
+                        terminal_stage=terminal_stage, failure_category=failure_category,
+                        operation_class=operation_class,
+                    )
                 except Exception:
                     pass
         finally:
@@ -335,7 +392,7 @@ class PerpDexExecutor:
             del private_key, signer, password
         operation_id = (
             str(bundle.operation_id) if bundle is not None
-            else str(raw_bundle.get("operation_id", ""))
+            else operation_id
         )
         action_type = (
             bundle.intent.action_type.value if bundle is not None
@@ -343,5 +400,6 @@ class PerpDexExecutor:
         )
         return PerpDexExecutionResult(
             operation_id, action_type, terminal_status, terminal_code,
-            terminal_message, tuple(phase_states),
+            terminal_message, tuple(phase_states), terminal_stage,
+            failure_category, operation_class, submission_attempted,
         )

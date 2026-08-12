@@ -212,6 +212,8 @@ class AuthorityTests(unittest.TestCase):
         )
         status = self.service.handle(status_request, owner_pid=None)
         self.assertEqual(status.payload["action_state"], "AWAITING_LOCAL_CONFIRMATION")
+        self.assertEqual(status.payload["result_code"], "AWAITING_LOCAL_CONFIRMATION")
+        self.assertEqual(status.payload["recovery_state"], "NOT_REQUIRED")
         wrong_cancel = replace(
             status_request, kind=MessageKind.CANCEL_ACTION, action_id=ACTION_ID_2
         )
@@ -234,6 +236,9 @@ class AuthorityTests(unittest.TestCase):
         request = replace(transfer_request(), kind=MessageKind.RECOVER_ACTION, payload={})
         recovered = self.service.handle(request, owner_pid=None)
         self.assertEqual(recovered.payload["guard_state"], "NORMAL")
+        self.assertEqual(recovered.payload["action_state"], "RECOVERY_REQUIRED")
+        self.assertEqual(recovered.payload["recovery_state"], "COMPLETED")
+        self.assertEqual(recovered.payload["result_code"], "WALLET_INTERRUPTED")
         replay = self.service.handle(transfer_request(), owner_pid=101)
         self.assertEqual(replay.payload["code"], "ACTION_REPLAYED")
 
@@ -448,6 +453,46 @@ class AuthorityTests(unittest.TestCase):
         self.assertEqual(event.event_type, EventType.TECHNICAL_ERROR)
         self.assertEqual(event.public_fields["failure_category"], "public_transport")
         self.assertEqual(event.public_fields["operation_class"], "userFees")
+
+    def test_wallet_ipc_ambiguity_writes_only_safe_subcode(self) -> None:
+        class Bundle:
+            account = "0x1111111111111111111111111111111111111111"
+
+            @staticmethod
+            def to_mapping(): return {}
+
+        class Adapter:
+            wallet_capability_id = "holon.perpdex.action.wallet"
+
+            @staticmethod
+            def prepare(*_args): return Bundle()
+
+            @staticmethod
+            def reject(*_args): return None
+
+        capability = SimpleNamespace(
+            module_id="holon.perpdex",
+            declaration=SimpleNamespace(descriptor={"profile_id": "hyperliquid-mainnet-v1"}),
+        )
+        self.service.module_action_adapter = lambda *_args: (capability, Adapter())  # type: ignore[method-assign]
+        self.lifecycle.start_module_intent = lambda *_args: (  # type: ignore[method-assign]
+            GuardResult(
+                False, "WALLET_PREPARATION_AMBIGUOUS", GuardState.RECOVERY_REQUIRED,
+                "Private pipe exception", None, "WALLET_PREPARE",
+            ),
+            {
+                "stage": "WALLET_PREPARE", "failure_category": "wallet_ipc",
+                "ipc_outcome": "WALLET_RESPONSE_SCHEMA_INVALID",
+            },
+        )
+
+        response = self.service.handle(module_request(new_action_id()), owner_pid=101)
+        self.assertNotIn("Private", str(response.to_dict()))
+        event = self.audit.journal.events()[-1]
+        self.assertEqual(event.event_type, EventType.TECHNICAL_ERROR)
+        self.assertEqual(event.public_fields["failure_category"], "wallet_ipc")
+        self.assertEqual(event.public_fields["ipc_outcome"], "WALLET_RESPONSE_SCHEMA_INVALID")
+        self.assertNotIn("pipe", str(event.to_dict()).lower())
         self.assertNotIn("private", str(event.to_dict()).lower())
 
     def test_lending_reads_are_public_and_work_when_signing_disabled(self) -> None:

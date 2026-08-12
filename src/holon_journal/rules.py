@@ -27,12 +27,17 @@ FAILURE_STAGES = {
 }
 FAILURE_CATEGORIES = {
     "adapter", "internal", "perpdex_state", "public_data", "public_transport",
-    "wallet",
+    "wallet", "wallet_ipc",
 }
 OPERATION_CLASSES = {
     "clearinghouseState", "frontendOpenOrders", "l2Book", "metaAndAssetCtxs",
     "orderStatus", "referral", "userFees", "userFillsByTime",
     "userNonFundingLedgerUpdates", "userVaultEquities", "vaultDetails",
+}
+IPC_OUTCOMES = {
+    "WALLET_PROCESS_MISMATCH", "WALLET_REQUEST_INVALID",
+    "WALLET_RESPONSE_INTERRUPTED", "WALLET_RESPONSE_INVALID",
+    "WALLET_RESPONSE_SCHEMA_INVALID", "WALLET_RESPONSE_TIMEOUT",
 }
 
 
@@ -111,7 +116,7 @@ def validate_optional(name: str, value: Any) -> None:
         raise JournalValidationError("Invalid calldata hash")
     elif name == "transaction_hash" and (not isinstance(value, str) or TX_RE.fullmatch(value) is None):
         raise JournalValidationError("Invalid transaction hash")
-    elif name == "simulated" and type(value) is not bool:
+    elif name in {"simulated", "external_submission_started"} and type(value) is not bool:
         raise JournalValidationError("Invalid simulated marker")
     elif name == "stage" and (not isinstance(value, str) or value not in FAILURE_STAGES):
         raise JournalValidationError("Invalid action failure stage")
@@ -123,3 +128,7 @@ def validate_optional(name: str, value: Any) -> None:
         not isinstance(value, str) or value not in OPERATION_CLASSES
     ):
         raise JournalValidationError("Invalid public operation class")
+    elif name == "ipc_outcome" and (
+        not isinstance(value, str) or value not in IPC_OUTCOMES
+    ):
+        raise JournalValidationError("Invalid Wallet IPC outcome")

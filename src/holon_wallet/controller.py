@@ -71,7 +71,10 @@ from .history import (
 )
 from .lending_view import lending_portfolio_to_map
 from .earn_view import earn_portfolio_to_map, module_earn_presentations
-from .perpdex_view import action_presentation, operation_history_to_map, result_presentation
+from .perpdex_view import (
+    action_presentation, load_action_diagnostics, operation_history_to_map,
+    result_presentation,
+)
 from .lending_action import prepare_lending_action
 from .model import ProfileSummary, WalletShellState
 from .module_funding import ModuleFundingExecutor
@@ -180,6 +183,26 @@ def _profile_map(profile: ProfileSummary) -> dict[str, object]:
         "createdAt": profile.created_at,
         "initials": _initials(profile),
     }
+
+
+def _perpdex_failure_category(code: str) -> str:
+    if code == "HYPERLIQUID_UNAVAILABLE":
+        return "public_transport"
+    if code.startswith("HYPERLIQUID_"):
+        return "public_data"
+    if code.startswith("PERPDEX_"):
+        return "perpdex_state"
+    return "wallet"
+
+
+def _perpdex_journal_stage(result: PerpDexExecutionResult) -> str:
+    if result.terminal_stage == "WALLET_AUTHENTICATION":
+        return "LOCAL_AUTH"
+    if result.terminal_stage == "RECONCILIATION":
+        return "RECONCILIATION"
+    if result.external_submission_started:
+        return "EXCHANGE_SUBMISSION"
+    return "PHASE_REVALIDATION"
 
 
 class WalletController(QObject):
@@ -1039,9 +1062,18 @@ class WalletController(QObject):
             mapped.append(value)
         model = self._module_page.get("model")
         operations = getattr(model, "operationHistory", []) if model is not None else []
+        operation_ids = {
+            str(operation.get("operation_id")) for operation in operations
+            if isinstance(operation, Mapping) and operation.get("operation_id")
+        }
+        diagnostics = load_action_diagnostics(
+            self._repository.paths.data_dir, operation_ids,
+        )
         for operation in operations:
             if isinstance(operation, Mapping) and operation.get("action_type") != "FUND_TRADING_ACCOUNT":
-                mapped.append(operation_history_to_map(operation))
+                mapped.append(operation_history_to_map(
+                    operation, diagnostics.get(str(operation.get("operation_id")), {}),
+                ))
         return sorted(mapped, key=lambda item: str(item.get("createdAt", "")), reverse=True)
 
     @Property(bool, notify=historyChanged)
@@ -1058,15 +1090,12 @@ class WalletController(QObject):
 
     @Property("QVariantMap", notify=historyChanged)
     def selectedHistoryRecord(self) -> dict[str, object]:
-        record = next(
+        return next(
             (
-                item for item in self._history_records
-                if item.action_id == self._selected_history_action_id
-                and item.profile_id == self._state.active_profile_id
-            ),
-            None,
+                item for item in self._history_maps()
+                if item.get("actionId") == self._selected_history_action_id
+            ), {},
         )
-        return history_record_to_map(record) if record is not None else {}
 
     @Property(str, notify=settingsSectionChanged)
     def settingsSection(self) -> str:
@@ -2438,16 +2467,20 @@ class WalletController(QObject):
 
     @Slot(str, result=bool)
     def showTransactionDetails(self, action_id: str) -> bool:
-        if not any(
-            item.action_id == action_id
-            and item.profile_id == self._state.active_profile_id
-            for item in self._history_records
-        ):
+        if not any(item.get("actionId") == action_id for item in self._history_maps()):
             return False
         self._selected_history_action_id = action_id
         self.historySelectionChanged.emit()
         self.historyChanged.emit()
         self._set_screen("transaction_details")
+        return True
+
+    @Slot(result=bool)
+    def copySelectedHistoryDiagnostics(self) -> bool:
+        value = self.selectedHistoryRecord.get("diagnosticsText")
+        if not isinstance(value, str) or not value:
+            return False
+        QGuiApplication.clipboard().setText(value)
         return True
 
     @Slot()
@@ -4214,7 +4247,12 @@ class WalletController(QObject):
             self._perpdex_external = None
             try:
                 self._perpdex_active_adapter.mark_operation(
-                    str(context["action_id"]), "FAILED",
+                    str(context["action_id"]), "FAILED", terminal_code=code,
+                    terminal_stage="WALLET_LIVE_VERIFY",
+                    failure_category=_perpdex_failure_category(code),
+                    operation_class=(
+                        operation_class if isinstance(operation_class, str) else None
+                    ),
                 )
             except Exception:
                 pass
@@ -4295,7 +4333,12 @@ class WalletController(QObject):
                 "confirmed" if result.status == "COMPLETED" else "partial",
             )
         else:
-            self._notify_perpdex("FAILED", result.code)
+            self._notify_perpdex(
+                "FAILED", result.code, stage=_perpdex_journal_stage(result),
+                failure_category=result.failure_category,
+                operation_class=result.operation_class,
+                external_submission_started=result.external_submission_started,
+            )
         self.perpDexChanged.emit()
         self._set_screen("perpdex_result")
 
@@ -4523,6 +4566,11 @@ class WalletController(QObject):
                 and self._mainnet_result.transaction_hash
                 and self._mainnet_result.history_status is not None else "none"
             ),
+            "stage": None, "failure_category": None, "operation_class": None,
+            "external_submission_started": bool(
+                self._mainnet_result is not None
+                and self._mainnet_result.transaction_hash
+            ),
         }
         if not keep:
             self._external_transfer = None
@@ -4547,6 +4595,8 @@ class WalletController(QObject):
     def _notify_perpdex(
         self, event: str, code: str, outcome: str | None = None,
         transaction_hash: str | None = None, receipt_state: str = "none",
+        *, stage: str | None = None, failure_category: str | None = None,
+        operation_class: str | None = None, external_submission_started: bool = False,
     ) -> None:
         context = self._perpdex_external
         sender = self._guard_status_sender
@@ -4560,6 +4610,9 @@ class WalletController(QObject):
             "prepared_digest": context["prepared_digest"], "event": event,
             "code": code, "outcome": outcome,
             "transaction_hash": transaction_hash, "receipt_state": receipt_state,
+            "stage": stage, "failure_category": failure_category,
+            "operation_class": operation_class,
+            "external_submission_started": external_submission_started,
         }
         self._perpdex_external = None
         self._perpdex_completion = None

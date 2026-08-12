@@ -23,11 +23,25 @@ STATUS_FIELDS = frozenset({
     "wallet_pid", "event", "code", "outcome", "operation_id",
     "phase_action_id", "phase",
     "transaction_hash", "receipt_state",
+    "stage", "failure_category", "operation_class", "external_submission_started",
 })
 ACK_FIELDS = frozenset({"status_version", "kind", "flow_id", "action_id", "status"})
 ACTION_RE = re.compile(r"^act-[0-9a-f-]{36}$")
 HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 CODE_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+FAILURE_STAGES = frozenset({
+    "WALLET_PREPARE", "WALLET_LIVE_VERIFY", "LOCAL_AUTH", "PHASE_REVALIDATION",
+    "EXCHANGE_SUBMISSION", "RECONCILIATION",
+})
+FAILURE_CATEGORIES = frozenset({
+    "authentication", "exchange_rejected", "exchange_unknown", "internal",
+    "perpdex_state", "public_data", "public_transport", "wallet", "wallet_ipc",
+})
+OPERATION_CLASSES = frozenset({
+    "clearinghouseState", "frontendOpenOrders", "l2Book", "metaAndAssetCtxs",
+    "orderStatus", "referral", "userFees", "userFillsByTime",
+    "userNonFundingLedgerUpdates", "userVaultEquities", "vaultDetails",
+})
 
 
 class WalletStatusError(RuntimeError):
@@ -162,6 +176,15 @@ def validate_update(value: Mapping[str, object]) -> dict[str, object]:
         raise WalletStatusError("Invalid status update")
     if (transaction_hash is None) != (receipt_state == "none"):
         raise WalletStatusError("Invalid status update")
+    if (
+        value.get("stage") is not None and value.get("stage") not in FAILURE_STAGES
+        or value.get("failure_category") is not None
+        and value.get("failure_category") not in FAILURE_CATEGORIES
+        or value.get("operation_class") is not None
+        and value.get("operation_class") not in OPERATION_CLASSES
+        or type(value.get("external_submission_started")) is not bool
+    ):
+        raise WalletStatusError("Invalid status diagnostics")
     return dict(value)
 
 

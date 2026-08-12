@@ -20,6 +20,8 @@ OPTIONAL_FIELDS = frozenset(
         "policy_result", "guard_state", "contract", "selector", "calldata_hash",
         "transaction_hash", "simulated", "stage", "failure_category",
         "operation_class",
+        "ipc_outcome",
+        "external_submission_started",
     }
 )
 

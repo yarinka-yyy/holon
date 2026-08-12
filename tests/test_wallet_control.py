@@ -13,6 +13,7 @@ from holon_guard_ipc.wallet_status import validate_update as validate_wallet_sta
 from holon_wallet_control import (
     AUTHORITY_VERSION,
     ControlProtocolError,
+    WalletAuthorityClient,
     WalletControlClient,
     WalletControlServer,
     WalletPublicClient,
@@ -369,6 +370,15 @@ def test_module_authority_protocol_carries_only_exact_bundle_hashes_and_semantic
         "code": "MODULE_ACTION_PREPARED",
     }
     assert validate_authority_response(response, checked, 202) == response
+    live_refusal = {
+        "authority_version": AUTHORITY_VERSION, "kind": "module_action_refused",
+        "flow_id": request["flow_id"], "action_id": action_id, "wallet_pid": 202,
+        "code": "HYPERLIQUID_UNAVAILABLE", "stage": "WALLET_LIVE_VERIFY",
+        "operation_class": "frontendOpenOrders",
+    }
+    assert validate_authority_response(live_refusal, checked, 202) == live_refusal
+    with pytest.raises(ControlProtocolError):
+        validate_authority_response({**live_refusal, "operation_class": "raw_url"}, checked, 202)
     raw = _authority_encode(request)
     assert b'"wire_digest"' in raw
     assert all(token not in raw.lower() for token in (
@@ -396,6 +406,22 @@ def test_module_authority_protocol_carries_only_exact_bundle_hashes_and_semantic
             **funding_request, "capability_id": "holon.perpdex.action.wallet",
         })
 
+    class TimeoutConnection(FakeConnection):
+        def poll(self, timeout: float) -> bool:
+            del timeout
+            return False
+
+    timeout_client = WalletAuthorityClient(
+        pipe_name="fixture",
+        connector=lambda *args, **kwargs: TimeoutConnection(b""),
+        waiter=lambda name, timeout: None,
+        peer_pid=lambda handle: 202,
+        process_image=lambda pid: Path("HolonWallet.exe"),
+    )
+    with pytest.raises(ControlProtocolError) as timed_out:
+        timeout_client.exchange(request, Path("HolonWallet.exe"), 0.1, 0.2)
+    assert timed_out.value.code == "WALLET_RESPONSE_TIMEOUT"
+
 
 def test_wallet_status_accepts_module_bundle_partial_without_transaction_payload() -> None:
     update = {
@@ -407,6 +433,8 @@ def test_wallet_status_accepts_module_bundle_partial_without_transaction_payload
         "phase": "module_bundle", "prepared_digest": "a" * 64,
         "wallet_pid": 202, "event": "COMPLETED", "code": "IOC_PARTIAL_FILL",
         "outcome": "partial", "transaction_hash": None, "receipt_state": "none",
+        "stage": None, "failure_category": None, "operation_class": None,
+        "external_submission_started": True,
     }
     assert validate_wallet_status(update) == update
 
@@ -423,6 +451,8 @@ def test_wallet_status_accepts_morpho_phases(phase) -> None:
         "wallet_pid": 202, "event": "RECEIPT_CONFIRMED",
         "code": "CONFIRMED", "outcome": None,
         "transaction_hash": "0x" + "b" * 64, "receipt_state": "confirmed",
+        "stage": None, "failure_category": None, "operation_class": None,
+        "external_submission_started": True,
     }
 
     assert validate_wallet_status(update) == update

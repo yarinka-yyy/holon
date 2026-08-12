@@ -528,10 +528,13 @@ class HyperliquidActionBuilder:
                     raise AdapterError("PERPDEX_LIVE_STATE_CHANGED", "Position or metadata changed")
                 frozen_limit = _decimal(old["limit_price"], "frozen limit")
                 current_reference = _decimal(current_order["reference_price"], "current BBO")
-                if old["is_buy"]:
-                    safe = current_reference <= frozen_limit <= current_reference * Decimal("1.01")
-                else:
-                    safe = current_reference * Decimal("0.99") <= frozen_limit <= current_reference
+                # The user reviewed this exact absolute IOC cap/floor. A
+                # favorable BBO move cannot expand that authority; only an
+                # adverse move beyond the frozen boundary must stop signing.
+                safe = (
+                    current_reference <= frozen_limit
+                    if old["is_buy"] else frozen_limit <= current_reference
+                )
                 if not safe:
                     raise AdapterError("PERPDEX_PRICE_MOVED", "Frozen IOC limit is no longer safe")
                 if old["reduce_only"] and old["size_asset"] != current_order["size_asset"]:

@@ -346,10 +346,14 @@ class GuardLifecycle(GuardCore):
             try:
                 prepared = self.wallet.prepare_module_action(request)
             except Exception:
-                return self._recover("WALLET_PREPARATION_FAILED"), None
+                return self._recover(
+                    "WALLET_PREPARATION_FAILED", stage="WALLET_PREPARE",
+                ), None
             if not prepared.ok or prepared.payload is None or prepared.handle is None:
                 if prepared.code == "WALLET_PREPARATION_AMBIGUOUS":
-                    return self._recover(prepared.code), None
+                    return self._recover(
+                        prepared.code, stage="WALLET_PREPARE",
+                    ), prepared.payload
                 try:
                     self.ledger.terminalize(ActionState.FAILED, prepared.code)
                 except ActionLedgerFailure:

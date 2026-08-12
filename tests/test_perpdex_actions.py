@@ -326,16 +326,49 @@ def test_wallet_verify_rejects_tamper_price_move_and_position_change(tmp_path: P
         action_builder.verify(tampered, ACCOUNT)
     assert error.value.code == "PERPDEX_BUNDLE_INVALID"
 
-    info.prices["BTC"] = ("61000", "62000")
+    info.prices["BTC"] = ("58000", "59000")
     with pytest.raises(AdapterError) as error:
         action_builder.verify(bundle.to_mapping(), ACCOUNT)
     assert error.value.code == "PERPDEX_PRICE_MOVED"
+
+    info.prices["BTC"] = ("61000", "62000")
+    assert action_builder.verify(bundle.to_mapping(), ACCOUNT) == bundle
 
     info.prices["BTC"] = ("59999", "60001")
     info.position = "0.001"
     with pytest.raises(AdapterError) as error:
         action_builder.verify(bundle.to_mapping(), ACCOUNT)
     assert error.value.code == "PERPDEX_POSITION_CHANGED"
+
+
+def test_frozen_ioc_boundary_accepts_favorable_move_and_rejects_adverse_move(
+    tmp_path: Path,
+) -> None:
+    info = ActionInfo(referred_by={"code": "EXISTING"})
+    action_builder = builder(tmp_path, info)
+    built = action_builder.preview("OPEN_POSITION", {
+        "leverage": 2, "margin_mode": "ISOLATED", "market": "BTC",
+        "notional_usdc": "12", "side": "LONG",
+    }, ACCOUNT)
+    bundle = action_builder.bundle(operation_id(), built)
+    order_index = next(
+        index for index, phase in enumerate(bundle.phases)
+        if phase.phase_type is PhaseType.PLACE_IOC_ORDER
+    )
+    wallet = WalletProtectedActionAdapter(
+        HyperliquidReader(info), clock=lambda: CLOCK,
+    )
+
+    info.prices["BTC"] = ("58999", "59001")
+    assert action_builder.verify(bundle.to_mapping(), ACCOUNT) == bundle
+    wallet.verify_phase(bundle, order_index, ACCOUNT)
+
+    info.prices["BTC"] = ("60999", "61001")
+    with pytest.raises(AdapterError) as builder_error:
+        action_builder.verify(bundle.to_mapping(), ACCOUNT)
+    with pytest.raises(AdapterError) as wallet_error:
+        wallet.verify_phase(bundle, order_index, ACCOUNT)
+    assert builder_error.value.code == wallet_error.value.code == "PERPDEX_PRICE_MOVED"
 
 
 def test_guard_preview_is_single_use_and_operation_state_is_secret_free(tmp_path: Path) -> None:
@@ -549,7 +582,7 @@ def test_interrupted_submitting_phase_becomes_unknown_without_resubmission(
     assert contained["phases"][0]["state"] == "UNKNOWN"
 
 
-def test_operation_store_v2_discards_only_local_cancel_and_prunes_old_refusal(tmp_path: Path) -> None:
+def test_operation_store_v3_discards_only_local_cancel_and_keeps_diagnostics_30_days(tmp_path: Path) -> None:
     now = [CLOCK]
     built = builder(tmp_path, ActionInfo(referred_by={"code": "EXISTING"}))
     bundle = built.bundle(operation_id(), built.preview("OPEN_POSITION", {
@@ -571,6 +604,8 @@ def test_operation_store_v2_discards_only_local_cancel_and_prunes_old_refusal(tm
     store.mark_operation(refused.operation_id, "AWAITING_LOCAL_CONFIRMATION")
     store.mark_operation(refused.operation_id, "FAILED")
     now[0] += 24 * 60 * 60 + 1
+    assert store.prune_transient() == 0
+    now[0] += 29 * 24 * 60 * 60
     assert store.prune_transient() == 1
     assert store.status(refused.operation_id) is None
 
@@ -600,9 +635,13 @@ def test_v1_operation_migration_preserves_ambiguous_failed_position(tmp_path: Pa
     store.mark_operation(bundle.operation_id, "FAILED")
     legacy = json.loads(path.read_text(encoding="utf-8"))
     legacy["operations_version"] = "1"
-    del legacy["operations"][0]["external_submission_started"]
+    for field in (
+        "external_submission_started", "failure_category", "operation_class",
+        "terminal_code", "terminal_stage",
+    ):
+        del legacy["operations"][0][field]
     path.write_text(json.dumps(legacy), encoding="utf-8")
 
     migrated = PerpDexOperationStore(path).status(bundle.operation_id)
     assert migrated["external_submission_started"] is True
-    assert '"operations_version":"2"' in path.read_text(encoding="utf-8")
+    assert '"operations_version":"3"' in path.read_text(encoding="utf-8")

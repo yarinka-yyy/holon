@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from holon_contracts import ContractEnvelope, MessageKind, RefusalCode, SecurityCode, make_envelope
 from holon_guard_ipc import GuardState
+from holon_journal import EventType
 
 REFUSAL_CODES = frozenset(item.value for item in RefusalCode)
 SAFE_HEALTH_CODES = frozenset(
@@ -79,9 +80,36 @@ class ResponseMixin:
             return self.refusal(request, RefusalCode.ACTION_ID_INVALID.value, "Action was not found.")
         snapshot = self.lifecycle.snapshot
         flow_id = snapshot.flow_id if snapshot.action_id == record.action_id else None
+        diagnostic: dict[str, object] = {}
+        recovered = False
+        try:
+            for event in self.audit.journal.events():
+                if event.public_fields.get("action_id") != record.action_id:
+                    continue
+                if event.event_type is EventType.TECHNICAL_ERROR:
+                    diagnostic = {
+                        "result_stage": event.public_fields.get("stage"),
+                        "failure_category": event.public_fields.get("failure_category"),
+                        "operation_class": event.public_fields.get("operation_class"),
+                        "ipc_outcome": event.public_fields.get("ipc_outcome"),
+                    }
+                elif event.event_type is EventType.RECOVERY_COMPLETED:
+                    recovered = True
+        except Exception:
+            pass
         payload = {
             "guard_state": snapshot.state.value, "action_state": record.state.value,
             "flow_id": flow_id, "code": code, "message": "Action status is available.",
+            "result_code": record.code,
+            "result_stage": diagnostic.get("result_stage"),
+            "failure_category": diagnostic.get("failure_category"),
+            "operation_class": diagnostic.get("operation_class"),
+            "ipc_outcome": diagnostic.get("ipc_outcome"),
+            "recovery_state": (
+                "COMPLETED" if recovered
+                else "REQUIRED" if record.state.value == "RECOVERY_REQUIRED"
+                else "NOT_REQUIRED"
+            ),
         }
         return self._response(request, kind, payload)
 

@@ -19,12 +19,13 @@ from .contracts import (
 )
 
 NONCE_VERSION = "1"
-OPERATIONS_VERSION = "2"
+OPERATIONS_VERSION = "3"
+PREVIOUS_OPERATIONS_VERSION = "2"
 LEGACY_OPERATIONS_VERSION = "1"
 MAX_FILE_BYTES = 1024 * 1024
 MAX_OPERATIONS = 128
 STALE_OPERATION_SECONDS = 301
-TRANSIENT_OPERATION_SECONDS = 24 * 60 * 60
+TRANSIENT_OPERATION_SECONDS = 30 * 24 * 60 * 60
 PHASE_STATES = frozenset({
     "PENDING", "SUBMITTING", "CONFIRMED", "FAILED", "PARTIAL", "UNKNOWN",
     "PENDING_CREDIT",
@@ -57,6 +58,58 @@ _PHASE_RE = re.compile(r"^phase-[0-9a-f]{32}$")
 _CLOID_RE = re.compile(r"^0x[0-9a-f]{32}$")
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 _CODE_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+TERMINAL_STAGES = frozenset({
+    "WALLET_LIVE_VERIFY", "WALLET_EXECUTION_PRE_VERIFY", "WALLET_AUTHENTICATION",
+    "PHASE_SET_ISOLATED_LEVERAGE", "PHASE_CANCEL_MARKET_ORDERS",
+    "PHASE_SET_REFERRER", "PHASE_PLACE_IOC_ORDER", "PHASE_VAULT_TRANSFER",
+    "RECONCILIATION", "TERMINAL",
+})
+FAILURE_CATEGORIES = frozenset({
+    "authentication", "cancelled", "exchange_rejected", "exchange_unknown",
+    "expired", "internal", "perpdex_state", "public_data", "public_transport",
+    "wallet", "wallet_ipc",
+})
+OPERATION_CLASSES = frozenset({
+    "clearinghouseState", "frontendOpenOrders", "l2Book", "metaAndAssetCtxs",
+    "orderStatus", "referral", "userFees", "userFillsByTime",
+    "userNonFundingLedgerUpdates", "userVaultEquities", "vaultDetails",
+})
+
+
+def _legacy_terminal_diagnostics(operation: Mapping[str, object]) -> dict[str, object | None]:
+    """Migrate v1/v2 without inventing a specific failure that was never stored."""
+    state = str(operation.get("state", ""))
+    phase = next((
+        item for item in operation.get("phases", [])
+        if isinstance(item, Mapping)
+        and item.get("state") in {"CONFIRMED", "FAILED", "PARTIAL", "UNKNOWN", "PENDING_CREDIT"}
+        and isinstance(item.get("code"), str)
+    ), None)
+    phase_type = str(phase.get("phase_type", "")) if isinstance(phase, Mapping) else ""
+    code = str(phase["code"]) if isinstance(phase, Mapping) else {
+        "COMPLETED": "PERPDEX_ACTION_COMPLETED",
+        "PARTIAL": "IOC_PARTIAL_FILL",
+        "UNKNOWN": "PERPDEX_RESULT_UNKNOWN",
+        "PENDING_CREDIT": "HYPERLIQUID_CREDIT_PENDING",
+        "REJECTED": "ACTION_CANCELLED",
+        "EXPIRED": "ACTION_EXPIRED",
+    }.get(state)
+    stage = f"PHASE_{phase_type}" if phase_type else (
+        "RECONCILIATION" if state in {"COMPLETED", "PARTIAL", "UNKNOWN", "PENDING_CREDIT"}
+        else "TERMINAL" if code is not None else None
+    )
+    category = (
+        "cancelled" if state == "REJECTED"
+        else "expired" if state == "EXPIRED"
+        else "exchange_unknown" if state in {"PARTIAL", "UNKNOWN", "PENDING_CREDIT"}
+        else None
+    )
+    return {
+        "failure_category": category,
+        "operation_class": None,
+        "terminal_code": code,
+        "terminal_stage": stage,
+    }
 
 
 class PersistenceError(RuntimeError):
@@ -216,7 +269,8 @@ class PerpDexOperationStore:
             not isinstance(value, Mapping)
             or set(value) != {"operations", "operations_version"}
             or value.get("operations_version") not in {
-                LEGACY_OPERATIONS_VERSION, OPERATIONS_VERSION,
+                LEGACY_OPERATIONS_VERSION, PREVIOUS_OPERATIONS_VERSION,
+                OPERATIONS_VERSION,
             }
             or not isinstance(value.get("operations"), list)
             or len(value["operations"]) > MAX_OPERATIONS
@@ -226,28 +280,39 @@ class PerpDexOperationStore:
         seen: set[str] = set()
         version = str(value["operations_version"])
         for raw in value["operations"]:
-            operation = self._validate_operation(
-                raw, legacy=version == LEGACY_OPERATIONS_VERSION,
-            )
+            operation = self._validate_operation(raw, version=version)
             operation_id = str(operation["operation_id"])
             if operation_id in seen:
                 raise PersistenceError("Duplicate PerpDEX operation")
             seen.add(operation_id)
             operations.append(operation)
-        if version == LEGACY_OPERATIONS_VERSION:
+        if version != OPERATIONS_VERSION:
             self._save(operations)
         return operations
 
     @staticmethod
-    def _validate_operation(raw: object, *, legacy: bool = False) -> dict[str, object]:
+    def _validate_operation(raw: object, *, version: str = OPERATIONS_VERSION) -> dict[str, object]:
         fields = {
             "account", "action_type", "bundle_digest", "created_at", "intent",
-            "external_submission_started", "operation_id", "phases", "state", "updated_at",
+            "external_submission_started", "failure_category", "operation_class",
+            "operation_id", "phases", "state", "terminal_code", "terminal_stage",
+            "updated_at",
         }
-        legacy_fields = fields - {"external_submission_started"}
+        previous_fields = fields - {
+            "failure_category", "operation_class", "terminal_code", "terminal_stage",
+        }
+        legacy_fields = previous_fields - {"external_submission_started"}
+        expected_fields = (
+            legacy_fields if version == LEGACY_OPERATIONS_VERSION
+            else previous_fields if version == PREVIOUS_OPERATIONS_VERSION
+            else fields
+        )
         if (
             not isinstance(raw, Mapping)
-            or set(raw) != (legacy_fields if legacy else fields)
+            or version not in {
+                LEGACY_OPERATIONS_VERSION, PREVIOUS_OPERATIONS_VERSION, OPERATIONS_VERSION,
+            }
+            or set(raw) != expected_fields
         ):
             raise PersistenceError("PerpDEX operation is invalid")
         try:
@@ -312,10 +377,32 @@ class PerpDexOperationStore:
             phase_ids.add(item["phase_id"])
             phases.append(dict(item))
         operation = dict(raw)
-        if legacy:
+        if version == LEGACY_OPERATIONS_VERSION:
             operation["external_submission_started"] = _legacy_submission_started(operation)
         elif type(operation.get("external_submission_started")) is not bool:
             raise PersistenceError("PerpDEX operation is invalid")
+        if version != OPERATIONS_VERSION:
+            operation.update(_legacy_terminal_diagnostics(operation))
+        if (
+            operation.get("terminal_code") is not None
+            and (
+                not isinstance(operation["terminal_code"], str)
+                or _CODE_RE.fullmatch(operation["terminal_code"]) is None
+            )
+            or operation.get("terminal_stage") is not None
+            and operation.get("terminal_stage") not in TERMINAL_STAGES
+            or operation.get("failure_category") is not None
+            and operation.get("failure_category") not in FAILURE_CATEGORIES
+            or operation.get("operation_class") is not None
+            and operation.get("operation_class") not in OPERATION_CLASSES
+            or operation["state"] not in TERMINAL_STATES
+            and any(
+                operation.get(field) is not None for field in (
+                    "terminal_code", "terminal_stage", "failure_category", "operation_class",
+                )
+            )
+        ):
+            raise PersistenceError("PerpDEX terminal diagnostics are invalid")
         operation["intent"] = dict(raw["intent"]) if isinstance(raw["intent"], Mapping) else raw["intent"]
         operation["phases"] = phases
         try:
@@ -343,7 +430,9 @@ class PerpDexOperationStore:
                 "bundle_digest": bundle.bundle_digest,
                 "created_at": bundle.created_at,
                 "external_submission_started": False,
+                "failure_category": None,
                 "intent": bundle.intent.to_mapping(),
+                "operation_class": None,
                 "operation_id": bundle.operation_id,
                 "phases": [
                     {
@@ -359,6 +448,8 @@ class PerpDexOperationStore:
                     for phase in bundle.phases
                 ],
                 "state": "PREPARED",
+                "terminal_code": None,
+                "terminal_stage": None,
                 "updated_at": now,
             }
             operations.append(operation)
@@ -414,10 +505,50 @@ class PerpDexOperationStore:
                 self._save(retained)
             return len(operations) - len(retained)
 
-    def mark_operation(self, operation_id: str, state: str) -> dict[str, object]:
+    def mark_operation(
+        self, operation_id: str, state: str, *, terminal_code: str | None = None,
+        terminal_stage: str | None = None, failure_category: str | None = None,
+        operation_class: str | None = None,
+    ) -> dict[str, object]:
         if state not in OPERATION_STATES:
             raise PersistenceError("Invalid PerpDEX operation state")
-        return self._update(operation_id, None, state=state)
+        if state in TERMINAL_STATES and terminal_code is None:
+            terminal_code = {
+                "COMPLETED": "PERPDEX_ACTION_COMPLETED",
+                "FAILED": "PERPDEX_ACTION_FAILED",
+                "PARTIAL": "IOC_PARTIAL_FILL",
+                "UNKNOWN": "PERPDEX_RESULT_UNKNOWN",
+                "PENDING_CREDIT": "HYPERLIQUID_CREDIT_PENDING",
+                "REJECTED": "ACTION_CANCELLED",
+                "EXPIRED": "ACTION_EXPIRED",
+            }[state]
+        if state in TERMINAL_STATES and terminal_stage is None:
+            terminal_stage = (
+                "RECONCILIATION"
+                if state in {"COMPLETED", "PARTIAL", "UNKNOWN", "PENDING_CREDIT"}
+                else "TERMINAL"
+            )
+        if state == "REJECTED" and failure_category is None:
+            failure_category = "cancelled"
+        elif state == "EXPIRED" and failure_category is None:
+            failure_category = "expired"
+        if (
+            terminal_code is not None
+            and (not isinstance(terminal_code, str) or _CODE_RE.fullmatch(terminal_code) is None)
+            or terminal_stage is not None and terminal_stage not in TERMINAL_STAGES
+            or failure_category is not None and failure_category not in FAILURE_CATEGORIES
+            or operation_class is not None and operation_class not in OPERATION_CLASSES
+            or state not in TERMINAL_STATES
+            and any(item is not None for item in (
+                terminal_code, terminal_stage, failure_category, operation_class,
+            ))
+        ):
+            raise PersistenceError("Invalid PerpDEX terminal diagnostics")
+        return self._update(
+            operation_id, None, state=state, terminal_code=terminal_code,
+            terminal_stage=terminal_stage, failure_category=failure_category,
+            operation_class=operation_class,
+        )
 
     def mark_phase(
         self, operation_id: str, phase_id: str, state: str, *,
@@ -453,6 +584,11 @@ class PerpDexOperationStore:
                     if changes["external_submission_started"] is not True:
                         raise PersistenceError("Invalid PerpDEX submission state")
                     operation["external_submission_started"] = True
+                for field in (
+                    "terminal_code", "terminal_stage", "failure_category", "operation_class",
+                ):
+                    if field in changes:
+                        operation[field] = changes[field]
                 if phase_id is not None:
                     phase = next(
                         (item for item in operation["phases"] if item["phase_id"] == phase_id),
@@ -502,12 +638,18 @@ class PerpDexOperationStore:
                     continue
                 if operation["state"] == "EXECUTING":
                     operation["state"] = "UNKNOWN"
+                    operation["terminal_code"] = "PERPDEX_INTERRUPTED_RESULT_UNKNOWN"
+                    operation["terminal_stage"] = "RECONCILIATION"
+                    operation["failure_category"] = "exchange_unknown"
                     for phase in operation["phases"]:
                         if phase["state"] == "SUBMITTING":
                             phase["state"] = "UNKNOWN"
                             phase["code"] = "PERPDEX_INTERRUPTED_RESULT_UNKNOWN"
                 else:
                     operation["state"] = "EXPIRED"
+                    operation["terminal_code"] = "ACTION_EXPIRED"
+                    operation["terminal_stage"] = "TERMINAL"
+                    operation["failure_category"] = "expired"
                 operation["updated_at"] = self._timestamp(now)
                 changed += 1
             if changed:

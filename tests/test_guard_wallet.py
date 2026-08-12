@@ -440,6 +440,10 @@ class GuardWalletTests(unittest.TestCase):
             ).prepare_transfer(request)
         self.assertFalse(failed.ok)
         self.assertEqual(failed.code, "WALLET_PREPARATION_AMBIGUOUS")
+        self.assertEqual(failed.payload, {
+            "stage": "WALLET_PREPARE", "failure_category": "wallet_ipc",
+            "ipc_outcome": "WALLET_RESPONSE_INVALID",
+        })
         self.assertEqual(untouched, [])
 
     def test_prepare_transfer_preserves_post_spawn_startup_timeout(self) -> None:

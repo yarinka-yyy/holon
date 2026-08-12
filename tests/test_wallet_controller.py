@@ -197,13 +197,15 @@ class _ModuleBundle:
 class _ModuleAdapter:
     def __init__(self) -> None:
         self.states = []
+        self.diagnostics = []
 
     def verify(self, bundle, account):
         del bundle, account
         return _ModuleBundle()
 
-    def mark_operation(self, operation_id, state):
+    def mark_operation(self, operation_id, state, **diagnostics):
         self.states.append((operation_id, state))
+        self.diagnostics.append(dict(diagnostics))
 
 
 class _UnavailableModuleAdapter(_ModuleAdapter):
@@ -361,9 +363,11 @@ def test_external_perpdex_review_password_and_result_are_one_bundle(tmp_path) ->
         "flow_id": request["flow_id"], "action_id": request["action_id"],
         "operation_id": request["action_id"], "phase_action_id": request["action_id"],
         "phase": "module_bundle", "prepared_digest": callbacks[0]["prepared_digest"],
-        "event": "COMPLETED", "code": "PERPDEX_ACTION_COMPLETED",
-        "outcome": "confirmed", "transaction_hash": None, "receipt_state": "none",
-    }]
+            "event": "COMPLETED", "code": "PERPDEX_ACTION_COMPLETED",
+            "outcome": "confirmed", "transaction_hash": None, "receipt_state": "none",
+            "stage": None, "failure_category": None, "operation_class": None,
+            "external_submission_started": False,
+        }]
     assert adapter.states == [
         (_ModuleBundle.operation_id, "AWAITING_LOCAL_CONFIRMATION"),
     ]
@@ -406,7 +410,45 @@ def test_external_perpdex_live_failure_returns_only_safe_operation_class(
         "operation_class": "frontendOpenOrders",
     }]
     assert adapter.states == [(_ModuleBundle.operation_id, "FAILED")]
+    assert adapter.diagnostics == [{
+        "terminal_code": "HYPERLIQUID_UNAVAILABLE",
+        "terminal_stage": "WALLET_LIVE_VERIFY",
+        "failure_category": "public_transport",
+        "operation_class": "frontendOpenOrders",
+    }]
     assert "private" not in str(callbacks).lower()
+
+
+def test_perpdex_history_row_opens_persisted_safe_failure_details(tmp_path) -> None:
+    item = controller(tmp_path)
+    secret = password()
+    item.beginCreate()
+    assert item.submitPassword(secret, secret) and item.finishBackup()
+    action_id = "act-44444444-4444-4444-8444-444444444444"
+    item._module_page["model"] = SimpleNamespace(operationHistory=[{
+        "operation_id": action_id, "action_type": "OPEN_POSITION",
+        "account": item.activeProfile["address"], "state": "FAILED",
+        "created_at": "2026-08-12T07:34:47Z", "updated_at": "2026-08-12T07:35:17Z",
+        "external_submission_started": False,
+        "terminal_code": "PERPDEX_PRICE_MOVED",
+        "terminal_stage": "WALLET_EXECUTION_PRE_VERIFY",
+        "failure_category": "perpdex_state", "operation_class": None,
+        "intent": {"market": "ETH", "side": "LONG", "notional_usdc": "11",
+                   "leverage": 2, "margin_mode": "ISOLATED"},
+        "phases": [{"phase_type": "PLACE_IOC_ORDER", "state": "PENDING",
+                    "code": None, "public_id": None}],
+    }])
+
+    item.showHistory()
+    assert item.showTransactionDetails(action_id)
+    selected = item.selectedHistoryRecord
+    assert selected["isPerpDex"] is True
+    assert selected["statusLabel"] == "Failed · price changed before signing"
+    assert any(
+        row == {"label": "Signature", "value": "Not created"}
+        for row in selected["detailRows"]
+    )
+    assert "External submission started: false" in selected["diagnosticsText"]
 
 
 class StubPolicyControl:
