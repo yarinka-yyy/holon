@@ -1,5 +1,5 @@
 ---
-name: holon-lending
+name: lending-holon
 description: "Use for any Holon Lending, Aave, Compound, Morpho, or Base USDC request. Covers yield, positions, earnings, supply, withdraw, approval, status, cancellation, and recovery."
 version: "0.2.0-alpha"
 author: Holon
@@ -8,14 +8,14 @@ platforms: [windows]
 metadata:
   hermes:
     tags: [holon, lending, usdc, aave, compound, morpho]
-    related_skills: [holon, holon-earn]
+    related_skills: [holon, earn-holon]
 ---
 
 # Holon Lending
 
 ## Non-negotiable rules
 
-1. **Always reply in the language of the user's latest meaningful message.** If the user changes language, change with them. Keep tool names, protocol names, field names, addresses, and error codes exact. Never answer in English merely because this skill is written in English. If a brand-new conversation contains only `/holon-lending` and gives no language signal, ask one short question for the preferred language and do nothing else until the user answers.
+1. **Always reply in the language of the user's latest meaningful message.** If the user changes language, change with them. Keep tool names, protocol names, field names, addresses, and error codes exact. Never answer in English merely because this skill is written in English. If a brand-new conversation contains only `/lending-holon` and gives no language signal, ask one short question for the preferred language and do nothing else until the user answers.
 2. **Lending chat is not authority.** Protocol choice or confirmation in chat only permits Hermes to request a protected flow. Password entry, exact review, confirmation, signing, and broadcast remain inside Holon Wallet.
 3. **Never handle secrets or raw transactions.** Do not ask for Wallet passwords, seed phrases, private keys, raw calldata, signed bytes, or arbitrary contract parameters.
 4. **Never guess or retry a financial action.** Missing protocol, action, amount mode, or amount must be clarified. Failed, refused, stale, cancelled, expired, or uncertain actions require a new explicit user decision.

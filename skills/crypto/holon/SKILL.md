@@ -8,7 +8,7 @@ platforms: [windows]
 metadata:
   hermes:
     tags: [holon, wallet, crypto, guard, onboarding]
-    related_skills: [holon-earn, holon-lending]
+    related_skills: [earn-holon, lending-holon]
 ---
 
 # Holon
@@ -39,9 +39,9 @@ Use the smallest matching path:
 | Start, set up, create, import, or open Holon | Follow **Onboarding and Wallet access**. |
 | Check integration availability | Call `holon_health`. |
 | Read Wallet ETH or USDC balances | Call `holon_wallet_balances`. |
-| Compare Earn providers, yield metrics, exit conditions, or risk state | Load and follow `holon-earn`. |
+| Compare Earn providers, yield metrics, exit conditions, or risk state | Load and follow `earn-holon`. |
 | Send ETH or USDC | Follow **Transfer workflow**. |
-| Compare yield, read positions, supply, withdraw, approval, or Lending recovery | Load and follow `holon-lending`. |
+| Compare yield, read positions, supply, withdraw, approval, or Lending recovery | Load and follow `lending-holon`. |
 | Check, cancel, or recover an existing action | Follow **Lifecycle and recovery** using the exact known `action_id`. |
 
 If the request is outside Holon's supported scope, say so plainly. Do not redirect it through terminal, browser automation, another wallet, raw RPC, or user-supplied calldata as a workaround.
@@ -86,7 +86,7 @@ Use only an exact `action_id` returned by Holon or already present in the conver
 - Transfer-specific lifecycle: `holon_transfer_status`, `holon_cancel_transfer`, `holon_recover_transfer`.
 - Common protected-action lifecycle: `holon_action_status`, `holon_cancel_action`, `holon_recover_action`.
 
-Status is read-only. Cancellation never authorizes signing. Recovery does not reuse an old signature, signed payload, nonce, or approval. Wallet-local Lending `resume_or_revoke` is handled by `holon-lending`: call `holon_open_wallet`, not generic `holon_recover_action`. If Holon reports that Wallet-only intervention is required, direct the user to Wallet and stop.
+Status is read-only. Cancellation never authorizes signing. Recovery does not reuse an old signature, signed payload, nonce, or approval. Wallet-local Lending `resume_or_revoke` is handled by `lending-holon`: call `holon_open_wallet`, not generic `holon_recover_action`. If Holon reports that Wallet-only intervention is required, direct the user to Wallet and stop.
 
 ## Completion standard
 

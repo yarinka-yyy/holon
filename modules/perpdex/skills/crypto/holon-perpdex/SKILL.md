@@ -1,5 +1,5 @@
 ---
-name: holon-perpdex
+name: perpdex-holon
 description: "Read and use the bounded Hyperliquid PerpDEX module when it is installed."
 version: "0.2.0-alpha"
 author: Holon
@@ -8,7 +8,7 @@ platforms: [windows]
 metadata:
   hermes:
     tags: [holon, hyperliquid, perpdex, hlp]
-    related_skills: [holon, holon-earn]
+    related_skills: [holon, earn-holon]
 ---
 
 # Holon PerpDEX

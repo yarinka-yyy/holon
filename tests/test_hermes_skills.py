@@ -12,9 +12,18 @@ import pytest
 
 ROOT = Path(__file__).parents[1]
 SKILLS_ROOT = ROOT / "skills" / "crypto"
+PERPDEX_SKILL_ROOT = (
+    ROOT / "modules" / "perpdex" / "skills" / "crypto" / "holon-perpdex"
+)
 PLUGIN_MANIFEST = ROOT / "src" / "holon_hermes_plugin" / "plugin.yaml"
 HERMES_PYTHON_ENV = "HOLON_TEST_HERMES_PYTHON"
 EXPECTED_SKILLS = {"holon", "holon-earn", "holon-lending"}
+PUBLIC_NAMES = {
+    "holon": "holon",
+    "holon-earn": "earn-holon",
+    "holon-lending": "lending-holon",
+    "holon-perpdex": "perpdex-holon",
+}
 INDEX_TRIGGERS = {
     "holon": "Holon, wallet, crypto, transfer, Earn",
     "holon-earn": "Holon Earn, yield, APY, return",
@@ -26,7 +35,8 @@ LANGUAGE_RULE = (
 
 
 def _content(name: str) -> str:
-    return (SKILLS_ROOT / name / "SKILL.md").read_text(encoding="utf-8")
+    root = PERPDEX_SKILL_ROOT if name == "holon-perpdex" else SKILLS_ROOT / name
+    return (root / "SKILL.md").read_text(encoding="utf-8")
 
 
 def _frontmatter_and_body(name: str) -> tuple[dict[str, str], str, str]:
@@ -58,7 +68,7 @@ def test_skill_source_is_exact_and_compact() -> None:
     for name in EXPECTED_SKILLS:
         fields, frontmatter, body = _frontmatter_and_body(name)
         assert fields == {
-            "name": name,
+            "name": PUBLIC_NAMES[name],
             "description": fields["description"],
             "version": "0.2.0-alpha",
             "author": "Holon",
@@ -70,11 +80,24 @@ def test_skill_source_is_exact_and_compact() -> None:
         assert len(_content(name)) <= 8_000
         assert "  hermes:" in frontmatter
         related = {
-            "holon": "holon-earn, holon-lending",
-            "holon-earn": "holon, holon-lending",
-            "holon-lending": "holon, holon-earn",
+            "holon": "earn-holon, lending-holon",
+            "holon-earn": "holon, lending-holon",
+            "holon-lending": "holon, earn-holon",
         }[name]
         assert f"related_skills: [{related}]" in frontmatter
+        assert body.strip()
+
+
+def test_public_skill_names_are_unique_and_related_skills_resolve() -> None:
+    public_names = set(PUBLIC_NAMES.values())
+    assert {name for name in public_names if name.startswith("holon")} == {"holon"}
+    for skill_id, public_name in PUBLIC_NAMES.items():
+        fields, frontmatter, body = _frontmatter_and_body(skill_id)
+        assert fields["name"] == public_name
+        related_match = re.search(r"related_skills: \[([^]]+)]", frontmatter)
+        assert related_match is not None
+        related = {item.strip() for item in related_match.group(1).split(",")}
+        assert related <= public_names - {public_name}
         assert body.strip()
 
 
@@ -87,19 +110,19 @@ def test_language_rule_is_first_and_scenario_contracts_are_present() -> None:
             "Transfer workflow",
             "PROTECTED_FLOW_STARTED",
             "Never ask the user to type or paste a seed phrase",
-            "holon-lending",
+            "lending-holon",
         ),
         "holon-earn": (
-            "only `/holon-earn`",
+            "only `/earn-holon`",
             "holon_earn_portfolio",
             "SUPPLY_APY",
             "TRAILING_RETURN",
             "NOT_ASSESSED",
             "total explicitly incomplete",
-            "load and follow `holon-lending`",
+            "load and follow `lending-holon`",
         ),
         "holon-lending": (
-            "only `/holon-lending`",
+            "only `/lending-holon`",
             "Aave V3",
             "Compound III",
             "Morpho V1",
@@ -132,6 +155,7 @@ def test_skill_tool_references_match_plugin_manifest_exactly() -> None:
 
 
 def _hermes_loader_code(agent_root: Path) -> str:
+    public_names = tuple(PUBLIC_NAMES.values())
     return f"""
 import json
 import sys
@@ -147,12 +171,13 @@ index = build_skills_system_prompt(
 commands = get_skill_commands()
 views = {{
     name: json.loads(skill_view(name, preprocess=False))
-    for name in ("holon", "holon-earn", "holon-lending")
+    for name in {public_names!r}
 }}
 print(json.dumps({{
     "python": list(sys.version_info[:2]),
     "index": index,
     "commands": {{key: value["name"] for key, value in commands.items()}},
+    "holon_prefix": sorted(key for key in commands if key.startswith("/holo")),
     "views": views,
 }}))
 """
@@ -169,6 +194,7 @@ def test_installed_hermes_discovers_skills_in_isolated_home(tmp_path: Path) -> N
     isolated_home = tmp_path / "hermes-home"
     destination = isolated_home / "skills" / "crypto"
     shutil.copytree(SKILLS_ROOT, destination)
+    shutil.copytree(PERPDEX_SKILL_ROOT, destination / "holon-perpdex")
     environment = os.environ.copy()
     environment["HERMES_HOME"] = str(isolated_home)
     environment["HERMES_PLATFORM"] = "windows"
@@ -185,16 +211,25 @@ def test_installed_hermes_discovers_skills_in_isolated_home(tmp_path: Path) -> N
     result = json.loads(completed.stdout)
 
     assert result["python"] == [3, 11]
-    assert set(result["commands"]) == {"/holon", "/holon-earn", "/holon-lending"}
-    assert set(result["commands"].values()) == EXPECTED_SKILLS
-    for name in EXPECTED_SKILLS:
-        fields, _, body = _frontmatter_and_body(name)
-        assert f"- {name}: {fields['description'][:57]}..." in result["index"]
-        assert INDEX_TRIGGERS[name] in fields["description"][:57]
-        view = result["views"][name]
+    expected_commands = {f"/{name}" for name in PUBLIC_NAMES.values()}
+    assert set(result["commands"]) == expected_commands
+    assert set(result["commands"].values()) == set(PUBLIC_NAMES.values())
+    assert result["holon_prefix"] == ["/holon"]
+    for skill_id, public_name in PUBLIC_NAMES.items():
+        content = _content(skill_id)
+        end = content.find("\n---\n", 4)
+        frontmatter = content[4:end]
+        body = content[end + 5 :]
+        description = re.search(r'^description: "([^"]+)"$', frontmatter, re.MULTILINE)
+        assert description is not None
+        assert f"- {public_name}: {description.group(1)[:57]}..." in result["index"]
+        if skill_id in INDEX_TRIGGERS:
+            assert INDEX_TRIGGERS[skill_id] in description.group(1)[:57]
+        view = result["views"][public_name]
         assert view["success"] is True
-        assert view["name"] == name
-        assert view["description"] == fields["description"]
+        assert view["name"] == public_name
+        assert view["description"] == description.group(1)
         assert body.strip() in view["content"]
         assert Path(view["skill_dir"]).is_relative_to(isolated_home)
+        assert Path(view["skill_dir"]).name == skill_id
     assert (isolated_home / ".skills_prompt_snapshot.json").is_file()
