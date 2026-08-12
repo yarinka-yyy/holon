@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -27,6 +28,7 @@ from holon_perpdex.funding_profile import (  # noqa: E402
 from holon_perpdex.funding_wallet import (  # noqa: E402
     FundingWalletAdapter, FundingWalletError,
 )
+from holon_perpdex.persistence import PerpDexOperationStore  # noqa: E402
 from holon_wallet.module_funding import ModuleFundingExecutor  # noqa: E402
 
 ACCOUNT = "0x" + "11" * 20
@@ -91,6 +93,35 @@ def test_funding_bundle_pins_only_native_usdc_arbitrum_bridge2(tmp_path: Path) -
     tampered["phases"][0]["semantic"]["bridge_address"] = "0x" + "22" * 20
     with pytest.raises(Exception):
         FundingBundle.from_mapping(tampered)
+
+
+def test_v2_funding_operation_migrates_terminal_diagnostics(tmp_path: Path) -> None:
+    item = bundle(tmp_path)
+    path = tmp_path / "operations.json"
+    store = PerpDexOperationStore(path)
+    store.begin(item)
+    store.mark_operation(item.operation_id, "AWAITING_LOCAL_CONFIRMATION")
+    store.mark_phase(
+        item.operation_id, item.phases[0].phase_id, "SUBMITTING", code="SUBMITTING",
+    )
+    store.mark_phase(
+        item.operation_id, item.phases[0].phase_id, "FAILED",
+        code="FUNDING_REVALIDATION_FAILED",
+    )
+    store.mark_operation(item.operation_id, "FAILED")
+
+    previous = json.loads(path.read_text(encoding="utf-8"))
+    previous["operations_version"] = "2"
+    for field in (
+        "failure_category", "operation_class", "terminal_code", "terminal_stage",
+    ):
+        del previous["operations"][0][field]
+    path.write_text(json.dumps(previous), encoding="utf-8")
+
+    migrated = PerpDexOperationStore(path).status(item.operation_id)
+    assert migrated["terminal_code"] == "FUNDING_REVALIDATION_FAILED"
+    assert migrated["terminal_stage"] == "PHASE_ARBITRUM_USDC_TRANSFER"
+    assert '"operations_version":"3"' in path.read_text(encoding="utf-8")
 
 
 def test_funding_preview_serializes_without_raw_contract_fields(tmp_path: Path) -> None:

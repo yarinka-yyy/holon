@@ -60,10 +60,8 @@ _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 _CODE_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
 TERMINAL_STAGES = frozenset({
     "WALLET_LIVE_VERIFY", "WALLET_EXECUTION_PRE_VERIFY", "WALLET_AUTHENTICATION",
-    "PHASE_SET_ISOLATED_LEVERAGE", "PHASE_CANCEL_MARKET_ORDERS",
-    "PHASE_SET_REFERRER", "PHASE_PLACE_IOC_ORDER", "PHASE_VAULT_TRANSFER",
     "RECONCILIATION", "TERMINAL",
-})
+} | {f"PHASE_{phase.value}" for phase in PhaseType})
 FAILURE_CATEGORIES = frozenset({
     "authentication", "cancelled", "exchange_rejected", "exchange_unknown",
     "expired", "internal", "perpdex_state", "public_data", "public_transport",
