@@ -7,6 +7,7 @@ TransactionFlowShell {
     property var presentation: result.presentation || ({})
     property bool funding: result.actionType === "FUND_TRADING_ACCOUNT"
     property bool positive: result.status === "COMPLETED" || result.status === "PENDING_CREDIT"
+    property bool hasTransactionHash: (presentation.transactionHash || "").length > 0
     title: funding ? "Hyperliquid deposit result" : "Position order result"
     subtitle: presentation.resultSubtitle || "No automatic retry"
     activeStep: 3; backVisible: false
@@ -40,7 +41,10 @@ TransactionFlowShell {
         }
     }
     Flickable {
-        id: resultScroll; x: 0; y: 170; width: 458; height: 226; clip: true
+        id: resultScroll; objectName: "perpDexResultScroll"
+        x: 0; y: 170; width: 458
+        height: (root.hasTransactionHash ? transactionActions.y - 14 : doneButton.y - 8) - y
+        clip: true
         contentWidth: width; contentHeight: resultColumn.height; boundsBehavior: Flickable.StopAtBounds
         Column {
             id: resultColumn; width: 458; spacing: 10
@@ -50,7 +54,10 @@ TransactionFlowShell {
                 Text { anchors.right: parent.right; anchors.rightMargin: 14; y: 10; text: root.phaseState(); color: root.positive ? Design.accent : Design.warning; font.family: Design.fontFamily; font.pixelSize: 11; font.weight: Font.DemiBold }
                 Text { x: 14; y: 36; width: 430; text: presentation.title || ""; color: Design.textMuted; font.family: Design.fontFamily; font.pixelSize: 11; elide: Text.ElideRight }
             }
-            PerpDexTechnicalDetails { width: 458; details: presentation.technicalDetails || [] }
+            PerpDexTechnicalDetails {
+                objectName: "perpDexResultTechnicalDetails"
+                width: 458; details: presentation.technicalDetails || []
+            }
         }
     }
     ScrollCue {
@@ -59,7 +66,8 @@ TransactionFlowShell {
         suggested: resultScroll.contentHeight > resultScroll.height && resultScroll.contentY < resultScroll.contentHeight - resultScroll.height - 2
     }
     Row {
-        visible: (presentation.transactionHash || "").length > 0; x: 0; y: 410; width: 458; spacing: 10
+        id: transactionActions; objectName: "perpDexTransactionActions"
+        visible: root.hasTransactionHash; x: 0; y: 410; width: 458; spacing: 10
         FormButton {
             objectName: "copyArbitrumTransactionHash"; width: 224; height: 46; primary: false; label: "Copy transaction hash"
             onTriggered: walletController.copyArbitrumTransactionHash(presentation.transactionHash || "")
@@ -70,7 +78,8 @@ TransactionFlowShell {
         }
     }
     FormButton {
-        objectName: "perpDexResultDoneButton"; x: 0; y: 528; width: 458; height: 56; label: "Done"
+        id: doneButton; objectName: "perpDexResultDoneButton"
+        x: 0; y: 528; width: 458; height: 56; label: "Done"
         onTriggered: walletController.finishPerpDexExecution()
     }
 }

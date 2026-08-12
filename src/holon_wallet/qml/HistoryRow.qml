@@ -5,6 +5,8 @@ Item {
     id: root
     property var record: ({})
     property bool showDateHeader: false
+    readonly property string actionId: root.record.actionId || ""
+    readonly property bool canOpenDetails: actionId.length > 0
     signal detailsRequested(string actionId)
     height: (showDateHeader ? 32 : 0) + 82
     Text {
@@ -13,9 +15,10 @@ Item {
         font.family: Design.fontFamily; font.pixelSize: 13; font.weight: Font.Medium
     }
     SurfaceCard {
+        objectName: "historyRowCard"
         y: root.showDateHeader ? 32 : 0; width: parent.width; height: 82
-        interactive: root.record.isOperation !== true
-        onTriggered: root.detailsRequested(root.record.actionId || "")
+        interactive: root.canOpenDetails
+        onTriggered: root.detailsRequested(root.actionId)
         Image {
             x: 14; anchors.verticalCenter: parent.verticalCenter; width: 44; height: 44
             source: root.record.token === "ETH" ? "assets/ethereum.svg" : "assets/usdc.webp"
@@ -56,7 +59,7 @@ Item {
                 font.family: Design.fontFamily; font.pixelSize: 11; font.weight: Font.Medium
             }
             Text {
-                visible: root.record.isOperation !== true
+                visible: root.canOpenDetails
                 text: "›"; color: Design.textMuted
                 font.family: Design.fontFamily; font.pixelSize: 18
             }

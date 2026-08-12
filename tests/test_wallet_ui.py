@@ -15,8 +15,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("QT_QUICK_BACKEND", "software")
 
 import pytest
-from PySide6.QtCore import QObject, QMetaObject, Qt
+from PySide6.QtCore import QObject, QMetaObject, Qt, QUrl
 from PySide6.QtGui import QGuiApplication
+from PySide6.QtQml import QQmlComponent
 from PySide6.QtTest import QTest
 
 from holon_earn import (
@@ -1522,6 +1523,7 @@ def test_hyperliquid_funding_pages_use_human_copy_and_scroll_cue() -> None:
     details = (qml / "PerpDexTechnicalDetails.qml").read_text(encoding="utf-8")
     password = (qml / "ProtectedActionPasswordPage.qml").read_text(encoding="utf-8")
     result = (qml / "ProtectedActionResultPage.qml").read_text(encoding="utf-8")
+    history_row = (qml / "HistoryRow.qml").read_text(encoding="utf-8")
 
     assert 'title: presentation.label || "Review action"' in review
     assert '"External protocol · real funds"' in review
@@ -1531,7 +1533,102 @@ def test_hyperliquid_funding_pages_use_human_copy_and_scroll_cue() -> None:
     assert '"Sign and send deposit"' in password
     assert 'title: funding ? "Hyperliquid deposit result"' in result
     assert '"Copy transaction hash"' in result and '"Open in Arbiscan"' in result
+    assert "expanded ? expandedHeight : 48" in details
+    assert "doneButton.y - 8" in result
+    assert "interactive: root.canOpenDetails" in history_row
+    assert "visible: root.canOpenDetails" in history_row
     assert "ScrollBar.vertical" not in review and "ScrollBar.vertical" not in result
+
+
+def test_perpdex_result_uses_free_space_and_history_operation_opens_details(
+    tmp_path, qt_app,
+) -> None:
+    repository = VaultRepository(WalletPaths(tmp_path))
+    repository.create_new(
+        fresh_password(), repository.new_record(generate_mnemonic(), "Main Account"),
+    )
+    app = make_app(qt_app, repository)
+    qml = Path(__file__).parents[1] / "src" / "holon_wallet" / "qml"
+    try:
+        result_component = QQmlComponent(
+            app.engine, QUrl.fromLocalFile(str(qml / "ProtectedActionResultPage.qml")),
+        )
+        result_page = result_component.create()
+        assert result_page is not None, [
+            error.toString() for error in result_component.errors()
+        ]
+        details = [
+            {"label": "Operation ID", "value": "act-" + "1" * 36},
+            {"label": "Result code", "value": "PERPDEX_ACTION_COMPLETED"},
+            {"label": "Failure stage", "value": "TERMINAL"},
+            {"label": "External submission", "value": "Started"},
+            {"label": "Signature", "value": "Created"},
+            {"label": "Operation class", "value": "PLACE_IOC_ORDER"},
+        ]
+        assert result_page.setProperty("presentation", {"technicalDetails": details})
+        technical = result_page.findChild(QObject, "perpDexResultTechnicalDetails")
+        scroller = result_page.findChild(QObject, "perpDexResultScroll")
+        done = result_page.findChild(QObject, "perpDexResultDoneButton")
+        assert technical is not None and scroller is not None and done is not None
+        assert technical.setProperty("expanded", True)
+        qt_app.processEvents()
+        assert scroller.property("height") == pytest.approx(
+            done.property("y") - scroller.property("y") - 8,
+        )
+        assert scroller.property("contentHeight") <= scroller.property("height")
+
+        assert result_page.setProperty(
+            "presentation", {"transactionHash": "0x" + "2" * 64},
+        )
+        qt_app.processEvents()
+        actions = result_page.findChild(QObject, "perpDexTransactionActions")
+        assert actions is not None and result_page.property("hasTransactionHash")
+        assert scroller.property("height") == pytest.approx(
+            actions.property("y") - scroller.property("y") - 14,
+        )
+        result_page.deleteLater()
+
+        action_id = "act-33333333-3333-4333-8333-333333333333"
+        app.controller._module_page["model"] = SimpleNamespace(operationHistory=[{
+            "operation_id": action_id, "action_type": "OPEN_POSITION",
+            "account": app.controller.activeProfile["address"], "state": "COMPLETED",
+            "created_at": "2026-08-12T07:34:47Z",
+            "updated_at": "2026-08-12T07:35:17Z",
+            "external_submission_started": True,
+            "terminal_code": "PERPDEX_ACTION_COMPLETED", "terminal_stage": "TERMINAL",
+            "failure_category": None, "operation_class": "PLACE_IOC_ORDER",
+            "intent": {"market": "ETH", "side": "LONG", "notional_usdc": "11",
+                       "leverage": 2, "margin_mode": "ISOLATED"},
+            "phases": [{"phase_type": "PLACE_IOC_ORDER", "state": "COMPLETED",
+                        "code": "PERPDEX_ACTION_COMPLETED", "public_id": "oid-1"}],
+        }])
+        assert app.controller.perpDexHistoryRecords[0]["actionId"] == action_id
+        app.controller.historyChanged.emit()
+        app.controller.showHistory()
+        invoke(child(app, "historyPerpDexTab"), "trigger")
+        qt_app.processEvents()
+        QTest.qWait(50)
+        history_list = child(app, "historyList")
+        assert history_list.property("count") == 1
+
+        def visual_descendants(item):
+            for child_item in item.childItems():
+                yield child_item
+                yield from visual_descendants(child_item)
+
+        card = next(
+            item for item in visual_descendants(history_list)
+            if item.objectName() == "historyRowCard"
+        )
+        assert card.property("interactive")
+        invoke(card, "triggered")
+        qt_app.processEvents()
+        assert app.controller.currentScreen == "transaction_details"
+        assert app.controller.selectedHistoryRecord["actionId"] == action_id
+        assert child(app, "transactionDetailsPage").property("enabled")
+        assert app.qml_warnings == []
+    finally:
+        app.close()
 
 
 def test_network_icons_are_accessible_but_new_networks_do_not_enter_send() -> None:

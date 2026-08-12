@@ -5,8 +5,9 @@ Item {
     id: root
     property var details: []
     property bool expanded: false
+    readonly property real expandedHeight: 78 + detailColumn.implicitHeight
     width: 458
-    height: 48 + (expanded ? detailColumn.implicitHeight + 20 : 0)
+    height: expanded ? expandedHeight : 48
 
     SurfaceCard {
         width: parent.width; height: 48; interactive: true
