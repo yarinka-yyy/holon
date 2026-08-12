@@ -3,8 +3,8 @@
 ## Release availability
 
 The public alpha is available from the
-[v0.1.0-alpha GitHub Release](https://github.com/yarinka-yyy/holon/releases/tag/v0.1.0-alpha).
-Download `Holon-0.1.0-alpha-Setup.exe` and `SHA256SUMS.txt` from that page.
+[v0.2.0-alpha GitHub Release](https://github.com/yarinka-yyy/holon/releases/tag/v0.2.0-alpha).
+Download `Holon-0.2.0-alpha-Setup.exe` and `SHA256SUMS.txt` from that page.
 The Setup is unsigned, so Windows may display an unknown-publisher warning.
 A file built locally with the same name is still a development artifact, not
 the published release.
@@ -12,7 +12,7 @@ the published release.
 Verify the downloaded Setup before running it:
 
 ```powershell
-Get-FileHash .\Holon-0.1.0-alpha-Setup.exe -Algorithm SHA256
+Get-FileHash .\Holon-0.2.0-alpha-Setup.exe -Algorithm SHA256
 ```
 
 Compare the displayed hash with the matching line in `SHA256SUMS.txt`.
@@ -29,11 +29,13 @@ The approved Setup requires:
 
 Run the Setup as the current user. It does not require administrator privileges,
 Python, Node.js, compilers, or other developer tools. The wizard detects one
-compatible Hermes installation, installs Wallet, Guard, the Hermes plugin, both
-Holon skills, and shared package assets, then enables only the Holon plugin after
-explicit confirmation. It does not grant the plugin permission to override tools.
+compatible Hermes installation and installs the `extended` composition: Wallet,
+Guard, Earn, built-in Lending, the removable `holon.perpdex` module, the Hermes
+plugin, and four Holon skills. It enables only the Holon plugin after explicit
+confirmation and does not grant tool-override permission.
 
-After a successful install, open Hermes normally and type `/holon`.
+After installation, open Hermes normally. Available commands are `/holon`,
+`/earn-holon`, `/lending-holon`, and `/perpdex-holon`.
 
 Program files are installed under `%LOCALAPPDATA%\Holon\app`. Encrypted Wallet
 data, settings, and secret-free journals are kept separately under
@@ -47,6 +49,15 @@ in memory while replacing its files on disk. Close Hermes and the installed Holo
 runtime manually if prompted, verify the Hermes version, and run Setup again. Do
 not paste Wallet secrets or diagnostic content into chat while troubleshooting.
 
+## Supported installed scope
+
+Wallet public reads cover Ethereum, Base, Arbitrum One, OP Mainnet, Polygon, and
+BNB Smart Chain. Transfers are limited to supported Ethereum and Base routes.
+Lending uses Base native USDC with pinned Aave V3, Compound III, and selected
+Morpho V1 profiles. PerpDEX supports Arbitrum native-USDC funding, Hyperliquid
+BTC/ETH/SOL LONG and SHORT positions, reduce-only close, and supported official
+HLP actions. Every protected action requires a fresh local Wallet Review.
+
 ## Developer build
 
 Source builds require CPython 3.13.14, `uv`, and the official Inno Setup compiler
@@ -58,10 +69,9 @@ uv sync --locked --all-groups
 .\packaging\build-installer.ps1
 ```
 
-The current M8 development build defaults to the `extended` composition and
-passes the repository-owned `modules\perpdex` root explicitly. To prove that
-the removable-module boundary remains intact, build Base without optional
-modules with:
+The release build defaults to the `extended` composition and passes the
+repository-owned `modules\perpdex` root explicitly. To prove that the removable
+module boundary remains intact, build Base without optional modules with:
 
 ```powershell
 .\packaging\build-installer.ps1 -CompositionId base
@@ -69,7 +79,7 @@ modules with:
 
 The build script requires the project `.venv` to report exactly CPython 3.13.14,
 rebuilds native Guard and Wallet executables, validates production staging, and
-writes an unsigned local artifact to `dist\Holon-0.1.0-alpha-Setup.exe`. It
+writes an unsigned local artifact to `dist\Holon-0.2.0-alpha-Setup.exe`. It
 recreates generated `build/` and `dist/` directories as needed.
 
 The PowerShell install and uninstall scripts are transactional internal backends.
@@ -78,9 +88,8 @@ They are invoked by Setup; end users should not run them directly.
 ## Third-party licenses and Qt rebuilds
 
 Holon source code remains under Apache License 2.0. The Windows package also
-contains third-party software listed in `NOTICE` and
-`THIRD_PARTY_LICENSES.txt`. These files are installed under
-`%LOCALAPPDATA%\Holon\app\licenses`.
+contains third-party software listed in `NOTICE` and `THIRD_PARTY_LICENSES.txt`.
+These files are installed under `%LOCALAPPDATA%\Holon\app\licenses`.
 
 Holon Wallet uses the Qt 6.11.1 libraries supplied by PySide6 and Shiboken6
 6.11.1 under LGPLv3. The release page includes the exact source archives for
@@ -89,7 +98,7 @@ not need those archives to install or run Holon.
 
 To rebuild Holon with a compatible modified Qt/PySide6 build:
 
-1. Check out the `v0.1.0-alpha` source tag.
+1. Check out the `v0.2.0-alpha` source tag.
 2. Build Qt and PySide6 from the matching release source archives using their
    upstream build instructions.
 3. Create the locked Holon environment with `uv sync --locked --all-groups`.

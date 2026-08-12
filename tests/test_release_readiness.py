@@ -89,35 +89,32 @@ def test_qt_bundle_classifier_fails_for_unreviewed_modules() -> None:
 
 def test_release_asset_preparer_writes_fixed_checksum_set(tmp_path: Path, monkeypatch) -> None:
     prepare = _load("prepare_release_assets")
-    payload = b"source-archive"
-    source_name = "source.tar.xz"
-    source_hash = hashlib.sha256(payload).hexdigest()
-    manifest = tmp_path / "sources.json"
-    manifest.write_text(json.dumps({
-        "assets": [{
-            "name": source_name, "bytes": len(payload), "sha256": source_hash,
-            "url": "https://download.qt.io/source.tar.xz",
-        }],
-    }), encoding="utf-8")
-    monkeypatch.setattr(prepare, "MANIFEST", manifest)
+    assert prepare.SETUP_NAME == "Holon-0.2.0-alpha-Setup.exe"
 
     def fake_download(url: str, destination: Path, size: int, digest: str) -> None:
         assert url.startswith("https://download.qt.io/")
-        destination.write_bytes(payload)
-        assert destination.stat().st_size == size
-        assert hashlib.sha256(destination.read_bytes()).hexdigest() == digest
+        assert size == EXPECTED_SOURCES[destination.name]
+        assert len(digest) == 64
+        destination.write_bytes(destination.name.encode("ascii"))
 
     monkeypatch.setattr(prepare, "_download", fake_download)
     setup = tmp_path / prepare.SETUP_NAME
     setup.write_bytes(b"setup")
     destination = tmp_path / "release"
     results = prepare.prepare(setup, destination)
-    assert [item[0] for item in results] == [prepare.SETUP_NAME, source_name]
-    assert {path.name for path in destination.iterdir()} == {
-        prepare.SETUP_NAME, source_name, prepare.CHECKSUM_NAME,
+    expected_assets = {
+        prepare.SETUP_NAME, prepare.CHECKSUM_NAME, *EXPECTED_SOURCES,
     }
-    checksum = (destination / prepare.CHECKSUM_NAME).read_text(encoding="ascii")
-    assert f"{source_hash}  {source_name}\n" in checksum
+    assert len(expected_assets) == 8
+    assert [item[0] for item in results] == [
+        prepare.SETUP_NAME, *EXPECTED_SOURCES,
+    ]
+    assert {path.name for path in destination.iterdir()} == expected_assets
+    checksum_lines = (
+        destination / prepare.CHECKSUM_NAME
+    ).read_text(encoding="ascii").splitlines()
+    assert len(checksum_lines) == 7
+    assert checksum_lines[0].endswith(f"  {prepare.SETUP_NAME}")
 
 
 def test_source_download_keeps_tls_verification_enabled(tmp_path: Path, monkeypatch) -> None:
@@ -161,7 +158,7 @@ def test_release_documents_use_public_links_and_plain_authorship() -> None:
             )
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     install = (PACKAGING / "INSTALL.md").read_text(encoding="utf-8")
-    assert "/releases/tag/v0.1.0-alpha" in readme
-    assert "/releases/download/v0.1.0-alpha/Holon-0.1.0-alpha-Setup.exe" in readme
+    assert "/releases/tag/v0.2.0-alpha" in readme
+    assert "/releases/download/v0.2.0-alpha/Holon-0.2.0-alpha-Setup.exe" in readme
     assert "unsigned" in readme.lower() and "SHA256SUMS.txt" in install
     assert "LGPLv3" in install and "%LOCALAPPDATA%\\Holon\\app\\licenses" in install

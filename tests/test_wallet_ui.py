@@ -967,6 +967,7 @@ def test_send_review_mainnet_confirmation_result_and_history(tmp_path, qt_app) -
         assert secondary_button.property("y") + secondary_button.property("height") <= 592
         assert not child(app, "transferReviewOverflowCue").property("visible")
         app.window.resize(520, 820)
+        QTest.qWait(220)
         qt_app.processEvents()
         assert continue_button.property("visible")
         assert secondary_button.property("visible")

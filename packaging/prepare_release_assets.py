@@ -1,4 +1,4 @@
-"""Prepare the fixed v0.1.0-alpha GitHub Release asset set."""
+"""Prepare the fixed v0.2.0-alpha GitHub Release asset set."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ import certifi
 
 ROOT = Path(__file__).parents[1]
 MANIFEST = ROOT / "packaging" / "qt-source-assets.json"
-SETUP_NAME = "Holon-0.1.0-alpha-Setup.exe"
+SETUP_NAME = "Holon-0.2.0-alpha-Setup.exe"
 CHECKSUM_NAME = "SHA256SUMS.txt"
 TLS_CONTEXT = ssl.create_default_context(cafile=certifi.where())
 
