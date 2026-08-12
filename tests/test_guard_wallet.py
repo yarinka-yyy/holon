@@ -259,7 +259,7 @@ class GuardWalletTests(unittest.TestCase):
                     if expected_code == "WALLET_EXITED":
                         self.assertIn("exit code 7", result.message)
 
-    def test_default_readiness_timeout_is_twenty_seconds(self) -> None:
+    def test_default_readiness_timeout_is_forty_seconds(self) -> None:
         class Control:
             def __init__(self) -> None:
                 self.timeouts: list[float] = []
@@ -280,7 +280,7 @@ class GuardWalletTests(unittest.TestCase):
 
         self.assertTrue(result.ok)
         self.assertEqual(control.timeouts, [0.15, WALLET_READINESS_TIMEOUT])
-        self.assertEqual(WALLET_READINESS_TIMEOUT, 20.0)
+        self.assertEqual(WALLET_READINESS_TIMEOUT, 40.0)
 
     def test_process_verification_code_is_preserved_without_private_detail(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

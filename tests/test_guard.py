@@ -4,7 +4,11 @@ import unittest
 from unittest.mock import patch
 
 from holon_contracts import MessageKind
-from holon_guard_ipc.client import PipeGuardClient, WALLET_OPEN_RESPONSE_TIMEOUT
+from holon_guard_ipc.client import (
+    MODULE_ACTION_EXECUTE_RESPONSE_TIMEOUT,
+    PipeGuardClient,
+    WALLET_OPEN_RESPONSE_TIMEOUT,
+)
 from holon_hermes_plugin.guard import (
     GuardAvailability,
     GuardConnector,
@@ -127,7 +131,21 @@ class GuardConnectorTests(unittest.TestCase):
 
         self.assertIs(client.kind, MessageKind.OPEN_WALLET)
         self.assertEqual(client.response_timeout, WALLET_OPEN_RESPONSE_TIMEOUT)
-        self.assertEqual(WALLET_OPEN_RESPONSE_TIMEOUT, 25.0)
+        self.assertEqual(WALLET_OPEN_RESPONSE_TIMEOUT, 45.0)
+
+    def test_module_execute_outlives_bounded_guard_and_wallet_work(self) -> None:
+        client = RecordingPipeClient()
+
+        PipeGuardClient(client).module_action_execute(
+            "holon.perpdex", "holon.perpdex.action.guard", "OPEN_POSITION",
+            {"market": "ETH"}, "a" * 64, "act-123",
+        )
+
+        self.assertIs(client.kind, MessageKind.MODULE_AUTHORITY_INTENT)
+        self.assertEqual(
+            client.response_timeout, MODULE_ACTION_EXECUTE_RESPONSE_TIMEOUT,
+        )
+        self.assertEqual(MODULE_ACTION_EXECUTE_RESPONSE_TIMEOUT, 140.0)
 
     def test_earn_portfolio_uses_public_read_contract(self) -> None:
         client = RecordingPipeClient()

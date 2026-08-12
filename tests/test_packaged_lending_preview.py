@@ -17,7 +17,9 @@ from web3 import Web3
 
 from holon_contracts import MessageKind
 from holon_guard_ipc import PipeClient
-from holon_guard_ipc.client import wait_for_pipe
+from holon_guard_ipc.client import (
+    MODULE_ACTION_EXECUTE_RESPONSE_TIMEOUT, wait_for_pipe,
+)
 from holon_guard.action_store import ActionStateStore
 from holon_guard.request_store import RequestStateStore
 from holon_guard.store import SnapshotStore
@@ -33,6 +35,8 @@ from holon_wallet.storage import WalletPaths
 from holon_wallet.vault import VaultRepository
 from holon_wallet.wallet_crypto import generate_mnemonic
 from wallet_public_support import public_snapshot
+
+PACKAGED_DIRECT_ACTION_TIMEOUT = 210.0
 
 
 def _selector(signature: str) -> str:
@@ -274,10 +278,13 @@ spec.loader.exec_module(module)
 from packaged_holon_plugin import plugin as holon_plugin
 from holon_contracts import MessageKind
 from holon_guard_ipc import PipeClient
+from holon_guard_ipc.client import MODULE_ACTION_EXECUTE_RESPONSE_TIMEOUT
 
 class Connector:
     def __init__(self):
-        self.client = PipeClient({pipe!r}, 2.0, 55.0)
+        self.client = PipeClient(
+            {pipe!r}, 2.0, MODULE_ACTION_EXECUTE_RESPONSE_TIMEOUT,
+        )
 
     def module_action_preview(self, module_id, capability_id, action_type, params):
         return self.client.request(
@@ -292,7 +299,8 @@ class Connector:
             MessageKind.MODULE_AUTHORITY_INTENT,
             {{"module_id": module_id, "capability_id": capability_id,
              "action_type": action_type, "params": params, "preview_digest": digest}},
-            action_id=action_id, owner_pid=os.getpid(), response_timeout=55.0,
+            action_id=action_id, owner_pid=os.getpid(),
+            response_timeout=MODULE_ACTION_EXECUTE_RESPONSE_TIMEOUT,
         )
 
 descriptor_path = root + "/modules/holon.perpdex/hermes-tools.json"
@@ -753,7 +761,8 @@ def test_packaged_public_perpdex_flows_use_real_tool_schema_and_cancel(
                         confirm_hlp=confirm_hlp,
                     ),
                 ],
-                check=True, capture_output=True, text=True, timeout=70,
+                check=True, capture_output=True, text=True,
+                timeout=PACKAGED_DIRECT_ACTION_TIMEOUT,
                 env=environment,
             )
             started = json.loads(response.stdout)
@@ -763,6 +772,10 @@ def test_packaged_public_perpdex_flows_use_real_tool_schema_and_cancel(
                     "stage", "status",
                 ) if key in started
             }
+            safe_failure["request_context"] = "/".join(
+                str(values.get(key, ""))
+                for key in ("action_type", "market", "side")
+            )
             assert started["status"] == "AWAITING_LOCAL_CONFIRMATION", safe_failure
             assert "preview_digest" not in started
             cancelled = client.request(
