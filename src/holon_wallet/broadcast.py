@@ -722,6 +722,7 @@ class MainnetTransferExecutor:
         password: str,
         permit: SigningPermit,
         on_signed: Callable[[], None] | None = None,
+        on_broadcast_starting: Callable[[], None] | None = None,
     ) -> MainnetTransferResult:
         now = self._clock().astimezone(UTC)
         validation = validate_signing_action(action, expected_digest, now)
@@ -857,6 +858,17 @@ class MainnetTransferExecutor:
                     recovered, history_status, False,
                 )
 
+            if on_broadcast_starting is not None:
+                try:
+                    on_broadcast_starting()
+                except Exception:
+                    # The signed transaction was deliberately not broadcast:
+                    # the caller could not durably mark the exact external
+                    # attempt boundary.
+                    return self._result(
+                        action, MainnetTransferCode.HISTORY_UNAVAILABLE,
+                        transaction_hash, recovered, history_status, False,
+                    )
             broadcast_attempted = True
             try:
                 primary_rpc = (

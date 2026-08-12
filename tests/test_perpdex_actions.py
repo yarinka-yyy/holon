@@ -35,9 +35,10 @@ class ActionInfo:
     def __init__(
         self, *, position: str | None = None, orders: tuple[int, ...] = (),
         referred_by=None, withdrawable: str = "200", hlp_equity: str = "20",
-        lockup: int = 0,
+        lockup: int = 0, position_market: str = "BTC",
     ) -> None:
         self.position = position
+        self.position_market = position_market
         self.orders = orders
         self.referred_by = referred_by
         self.withdrawable = withdrawable
@@ -79,8 +80,11 @@ class ActionInfo:
             positions = []
             if self.position is not None:
                 size = self.position
+                entry = {"BTC": "60000", "ETH": "3000", "SOL": "150"}[
+                    self.position_market
+                ]
                 positions.append({"position": {
-                    "coin": "BTC", "entryPx": "60000",
+                    "coin": self.position_market, "entryPx": entry,
                     "leverage": {"type": "isolated", "value": 2},
                     "liquidationPx": "30000", "marginUsed": "25",
                     "positionValue": "60", "szi": size, "unrealizedPnl": "1",
@@ -95,7 +99,7 @@ class ActionInfo:
             }
         if kind == "frontendOpenOrders":
             return [{
-                "coin": "BTC", "limitPx": "61000", "oid": oid,
+                "coin": self.position_market, "limitPx": "61000", "oid": oid,
                 "orderType": "Limit", "reduceOnly": True, "side": "Sell",
                 "sz": "0.001", "timestamp": int(CLOCK * 1000),
             } for oid in self.orders]
@@ -311,6 +315,27 @@ def test_hlp_deposit_is_limited_only_by_live_withdrawable_balance(tmp_path: Path
     assert error.value.code == "HLP_BALANCE_INSUFFICIENT"
 
 
+def test_hlp_deposit_ignores_display_only_equity_move_but_rechecks_balance(
+    tmp_path: Path,
+) -> None:
+    info = ActionInfo(
+        referred_by={"code": "EXISTING"}, withdrawable="25", hlp_equity="20",
+    )
+    action_builder = builder(tmp_path, info)
+    bundle = action_builder.bundle(
+        operation_id(),
+        action_builder.preview("HLP_DEPOSIT", {"amount_usdc": "25"}, ACCOUNT),
+    )
+
+    info.hlp_equity = "20.123456"
+    assert action_builder.verify(bundle.to_mapping(), ACCOUNT) == bundle
+
+    info.withdrawable = "24.999999"
+    with pytest.raises(AdapterError) as error:
+        action_builder.verify(bundle.to_mapping(), ACCOUNT)
+    assert error.value.code == "HLP_BALANCE_INSUFFICIENT"
+
+
 def test_wallet_verify_rejects_tamper_price_move_and_position_change(tmp_path: Path) -> None:
     info = ActionInfo(position="0.002", orders=(42,))
     action_builder = builder(tmp_path, info)
@@ -428,6 +453,87 @@ def test_direct_eth_long_5_5_reaches_review_reliably_with_bounded_live_reads(
     assert [call["type"] for call in guard_info.calls].count("referral") == 1
     assert [call["type"] for call in wallet_info.calls].count("referral") == 1
     assert all(call["type"] != "exchange" for call in all_calls)
+
+
+@pytest.mark.parametrize("market", ["BTC", "ETH", "SOL"])
+@pytest.mark.parametrize("side", ["LONG", "SHORT"])
+def test_all_supported_open_directions_reach_independent_wallet_verification(
+    tmp_path: Path, market: str, side: str,
+) -> None:
+    guard_info = ActionInfo(
+        referred_by={"code": "EXISTING"}, withdrawable="5.97316",
+    )
+    wallet_info = ActionInfo(
+        referred_by={"code": "EXISTING"}, withdrawable="5.97316",
+    )
+    guard = GuardProtectedActionAdapter(
+        HyperliquidReader(guard_info), clock=lambda: CLOCK,
+    )
+    wallet = WalletProtectedActionAdapter(
+        HyperliquidReader(wallet_info), clock=lambda: CLOCK,
+    )
+    guard.configure(tmp_path / "guard")
+    params = {
+        "leverage": 2, "margin_mode": "ISOLATED", "market": market,
+        "notional_usdc": "11", "side": side,
+    }
+
+    preview = guard.preview("OPEN_POSITION", params, ACCOUNT)
+    bundle = guard.prepare(
+        operation_id(), "OPEN_POSITION", params, ACCOUNT,
+        str(preview.preview_digest),
+    )
+    assert wallet.verify(bundle.to_mapping(), ACCOUNT) == bundle
+    order = bundle.phases[-1].semantic
+    assert order["market"] == market
+    assert order["is_buy"] is (side == "LONG")
+    assert order["reduce_only"] is False
+    assert Decimal(order["size_asset"]) * Decimal(order["limit_price"]) >= 10
+    calls = guard_info.calls + wallet_info.calls
+    assert {call["coin"] for call in calls if call["type"] == "l2Book"} == {market}
+    assert all(call["type"] != "exchange" for call in calls)
+
+
+@pytest.mark.parametrize(
+    ("market", "position_size", "is_buy"),
+    [
+        ("BTC", "0.001", False), ("BTC", "-0.001", True),
+        ("ETH", "0.02", False), ("ETH", "-0.02", True),
+        ("SOL", "0.4", False), ("SOL", "-0.4", True),
+    ],
+)
+def test_all_supported_positions_reach_reduce_only_close_verification(
+    tmp_path: Path, market: str, position_size: str, is_buy: bool,
+) -> None:
+    guard_info = ActionInfo(
+        position=position_size, position_market=market,
+        referred_by={"code": "EXISTING"},
+    )
+    wallet_info = ActionInfo(
+        position=position_size, position_market=market,
+        referred_by={"code": "EXISTING"},
+    )
+    guard = GuardProtectedActionAdapter(
+        HyperliquidReader(guard_info), clock=lambda: CLOCK,
+    )
+    wallet = WalletProtectedActionAdapter(
+        HyperliquidReader(wallet_info), clock=lambda: CLOCK,
+    )
+    guard.configure(tmp_path / "guard")
+    params = {"amount_mode": "FULL", "market": market, "percent": None}
+
+    preview = guard.preview("CLOSE_POSITION", params, ACCOUNT)
+    bundle = guard.prepare(
+        operation_id(), "CLOSE_POSITION", params, ACCOUNT,
+        str(preview.preview_digest),
+    )
+    assert wallet.verify(bundle.to_mapping(), ACCOUNT) == bundle
+    order = bundle.phases[-1].semantic
+    assert order["market"] == market
+    assert order["is_buy"] is is_buy
+    assert order["reduce_only"] is True
+    assert order["size_asset"] == str(Decimal(position_size).copy_abs())
+    assert not any(call["type"] == "referral" for call in guard_info.calls)
 
 
 def test_direct_preview_allows_bounded_packaged_wallet_startup(tmp_path: Path) -> None:

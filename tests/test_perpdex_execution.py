@@ -11,7 +11,7 @@ PERPDEX_SRC = ROOT / "modules" / "perpdex" / "src"
 sys.path.insert(0, str(PERPDEX_SRC))
 
 from holon_perpdex.guard import GuardProtectedActionAdapter  # noqa: E402
-from holon_perpdex.reader import HyperliquidReader  # noqa: E402
+from holon_perpdex.reader import HyperliquidReader, ReaderError  # noqa: E402
 from holon_perpdex.wallet import WalletProtectedActionAdapter  # noqa: E402
 from holon_wallet.perpdex_action import (  # noqa: E402
     ExchangeOutcomeUnknown, PerpDexExecutor,
@@ -84,6 +84,14 @@ def fixture(tmp_path: Path):
 
 def test_executor_signs_each_phase_once_and_persists_no_signature(tmp_path: Path) -> None:
     repository, record, password, account, bundle, wallet = fixture(tmp_path)
+    verified_phases: list[int] = []
+    verify_phase = wallet.verify_phase
+
+    def tracked_verify_phase(current_bundle, phase_index, current_account):
+        verified_phases.append(phase_index)
+        return verify_phase(current_bundle, phase_index, current_account)
+
+    wallet.verify_phase = tracked_verify_phase  # type: ignore[method-assign]
     transport = SubmitFixture()
     result = PerpDexExecutor(repository, wallet, transport).execute(
         bundle.to_mapping(), password, record.summary.profile_id, account,
@@ -91,6 +99,7 @@ def test_executor_signs_each_phase_once_and_persists_no_signature(tmp_path: Path
     assert result.status == "COMPLETED"
     assert result.code == "PERPDEX_ACTION_COMPLETED"
     assert len(transport.calls) == 2
+    assert verified_phases == [1]
     assert [call["action"]["type"] for call in transport.calls] == [
         "updateLeverage", "order",
     ]
@@ -189,3 +198,38 @@ def test_persistence_failure_after_submit_is_unknown_not_failed(tmp_path: Path) 
     assert result.status == "UNKNOWN"
     assert result.code == "PERPDEX_RESULT_UNKNOWN"
     assert len(transport.calls) == 1
+
+
+def test_inter_phase_public_failure_keeps_safe_operation_class_and_stops(
+    tmp_path: Path,
+) -> None:
+    repository, record, password, account, bundle, wallet = fixture(tmp_path)
+    original = wallet.reader._post
+    books = 0
+
+    def fail_second_book(payload):
+        nonlocal books
+        if payload.get("type") == "l2Book":
+            books += 1
+            if books == 2:
+                raise ReaderError(
+                    "HYPERLIQUID_UNAVAILABLE", "unavailable",
+                    operation_class="l2Book",
+                )
+        return original(payload)
+
+    wallet.reader._post = fail_second_book
+    transport = SubmitFixture()
+    result = PerpDexExecutor(repository, wallet, transport).execute(
+        bundle.to_mapping(), password, record.summary.profile_id, account,
+    )
+
+    assert result.status == "FAILED"
+    assert result.code == "HYPERLIQUID_UNAVAILABLE"
+    assert result.operation_class == "l2Book"
+    assert result.external_submission_started is True
+    assert [call["action"]["type"] for call in transport.calls] == ["updateLeverage"]
+    stored = wallet.status(bundle.operation_id)
+    assert stored["operation_class"] == "l2Book"
+    assert stored["failure_category"] == "public_transport"
+    assert stored["phases"][1]["state"] == "FAILED"

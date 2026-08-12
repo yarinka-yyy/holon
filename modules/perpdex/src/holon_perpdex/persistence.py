@@ -47,7 +47,9 @@ OPERATION_TRANSITIONS = {
     "EXECUTING": frozenset({"COMPLETED", "FAILED", "PARTIAL", "UNKNOWN", "PENDING_CREDIT"}),
 }
 PHASE_TRANSITIONS = {
-    "PENDING": frozenset({"SUBMITTING"}),
+    # A mandatory live check can fail before this phase is signed or submitted.
+    # Preserve that safe terminal fact instead of leaving History at PENDING.
+    "PENDING": frozenset({"SUBMITTING", "FAILED"}),
     "SUBMITTING": frozenset({"CONFIRMED", "FAILED", "PARTIAL", "UNKNOWN", "PENDING_CREDIT"}),
 }
 _ACTION_RE = re.compile(

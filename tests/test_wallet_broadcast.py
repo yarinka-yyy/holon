@@ -549,6 +549,46 @@ def test_history_hash_gate_blocks_broadcast_on_atomic_failure(
     assert "canary" not in repr(result).lower()
 
 
+def test_external_attempt_marker_is_immediately_before_send(tmp_path) -> None:
+    repository, history, action, password, _secret, rpc = prepared_fixture(tmp_path)
+    events: list[str] = []
+
+    def mark_attempt() -> None:
+        assert rpc.send_calls == 0
+        events.append("marked")
+
+    original_send = rpc.send_raw_transaction
+
+    def send(raw_transaction):
+        assert events == ["marked"]
+        return original_send(raw_transaction)
+
+    rpc.send_raw_transaction = send
+    result = executor(repository, history, rpc).execute(
+        action, action.digest, password, SigningPermit(),
+        on_broadcast_starting=mark_attempt,
+    )
+
+    assert result.code is MainnetTransferCode.PENDING
+    assert result.broadcast_attempted and rpc.send_calls == 1
+
+
+def test_external_attempt_marker_failure_prevents_send(tmp_path) -> None:
+    repository, history, action, password, _secret, rpc = prepared_fixture(tmp_path)
+
+    def fail_marker() -> None:
+        raise StorageError("private marker detail")
+
+    result = executor(repository, history, rpc).execute(
+        action, action.digest, password, SigningPermit(),
+        on_broadcast_starting=fail_marker,
+    )
+
+    assert result.code is MainnetTransferCode.HISTORY_UNAVAILABLE
+    assert not result.broadcast_attempted and rpc.send_calls == 0
+    assert "private marker detail" not in repr(result)
+
+
 def test_final_expiry_gate_blocks_send_after_history_persistence(
     tmp_path, monkeypatch,
 ) -> None:

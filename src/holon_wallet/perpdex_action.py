@@ -18,6 +18,11 @@ from .wallet_crypto import InvalidSecretError, private_key_bytes, rederive
 EXCHANGE_URL = "https://api.hyperliquid.xyz/exchange"
 MAX_RESPONSE_BYTES = 1024 * 1024
 HTTP_TIMEOUT_SECONDS = 12.0
+_SAFE_INFO_OPERATION_CLASSES = frozenset({
+    "clearinghouseState", "frontendOpenOrders", "l2Book", "metaAndAssetCtxs",
+    "orderStatus", "referral", "userFees", "userFillsByTime",
+    "userNonFundingLedgerUpdates", "userVaultEquities", "vaultDetails",
+})
 
 
 class ExchangeRejected(RuntimeError):
@@ -168,6 +173,11 @@ def _failure_category(code: str, submission_attempted: bool) -> str:
     return "internal"
 
 
+def _operation_class(exc: Exception) -> str | None:
+    requested = getattr(exc, "operation_class", None)
+    return requested if requested in _SAFE_INFO_OPERATION_CLASSES else None
+
+
 class PerpDexExecutor:
     """Authenticates once, then signs each exact phase at most once in order."""
 
@@ -218,7 +228,12 @@ class PerpDexExecutor:
                 phase_submission_attempted = False
                 terminal_stage = f"PHASE_{phase.phase_type.value}"
                 try:
-                    self.adapter.verify_phase(bundle, index, account)
+                    # ``adapter.verify`` above is the mandatory fresh check
+                    # immediately before authentication and the first phase.
+                    # Rebuild live state only between later phases, after an
+                    # earlier external effect could have changed prerequisites.
+                    if index > 0:
+                        self.adapter.verify_phase(bundle, index, account)
                     action = dict(self.adapter.wire_action(phase))
                     verified_digest = self.adapter.wire_digest(phase)
                     if verified_digest != phase.wire_digest:
@@ -312,6 +327,7 @@ class PerpDexExecutor:
                     terminal_status, terminal_code = "UNKNOWN", "HYPERLIQUID_RESULT_UNKNOWN"
                     break
                 except Exception as exc:
+                    operation_class = _operation_class(exc) or operation_class
                     state = "UNKNOWN" if phase_submission_attempted else "FAILED"
                     code = str(getattr(exc, "code", None) or exc or "PERPDEX_PHASE_FAILED")
                     if not code.isupper() or len(code) > 64:
@@ -373,8 +389,7 @@ class PerpDexExecutor:
                     if submission_attempted else "PERPDEX_EXECUTION_FAILED"
                 )
             failure_category = _failure_category(terminal_code, submission_attempted)
-            requested_class = getattr(exc, "operation_class", None)
-            operation_class = requested_class if isinstance(requested_class, str) else None
+            operation_class = _operation_class(exc)
             terminal_message = "Nothing was automatically retried."
             if operation_id:
                 try:

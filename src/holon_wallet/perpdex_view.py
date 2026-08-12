@@ -91,16 +91,18 @@ def result_presentation(result: Mapping[str, object], action: Mapping[str, objec
                        if isinstance(item, Mapping) and str(item.get("publicId", "")).startswith("0x") and len(str(item.get("publicId"))) == 66), "")
     technical = list(base["technicalDetails"])
     technical.append({"label": "Result code", "value": code})
-    if not funding:
-        stage = result.get("terminalStage")
-        if stage: technical.append({"label": "Failure stage", "value": str(stage)})
-        submitted = result.get("externalSubmissionStarted") is True
+    stage = result.get("terminalStage")
+    if stage: technical.append({"label": "Failure stage", "value": str(stage)})
+    submitted = result.get("externalSubmissionStarted") is True
+    technical.append({
+        "label": "External submission",
+        "value": "Started" if submitted else "Not attempted",
+    })
+    if not submitted and (funding or code == "PERPDEX_PRICE_MOVED"):
         technical.append({
-            "label": "External submission",
-            "value": "Started" if submitted else "Not attempted",
+            "label": "Signature",
+            "value": "Created locally; not sent" if funding and hash_value else "Not created",
         })
-        if code == "PERPDEX_PRICE_MOVED" and not submitted:
-            technical.append({"label": "Signature", "value": "Not created"})
     if hash_value: technical.append({"label": "Arbitrum hash", "value": hash_value})
     return {**base, "resultTitle": title, "resultSubtitle": subtitle, "resultCode": code,
             "transactionHash": hash_value, "status": status, "technicalDetails": technical}
@@ -152,11 +154,112 @@ def load_action_diagnostics(
     return values
 
 
+def funding_history_to_map(
+    base: Mapping[str, object], operation: Mapping[str, object] | None = None,
+    diagnostic: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    """Join public EVM funding history with secret-free PerpDEX terminal evidence."""
+    operation, diagnostic = operation or {}, diagnostic or {}
+    intent = operation.get("intent") if isinstance(operation.get("intent"), Mapping) else {}
+    operation_id = str(
+        operation.get("operation_id") or base.get("operationId") or base.get("actionId") or ""
+    )
+    amount = str(base.get("amount") or (
+        f"{intent.get('amount_usdc')} USDC" if intent.get("amount_usdc") else ""
+    ))
+    code = str(operation.get("terminal_code") or diagnostic.get("result_code") or "")
+    stage = str(operation.get("terminal_stage") or diagnostic.get("stage") or "")
+    category = str(
+        operation.get("failure_category") or diagnostic.get("failure_category") or ""
+    )
+    external_started = (
+        operation.get("external_submission_started") is True
+        if operation
+        else str(base.get("status", "")).lower() in {"pending", "confirmed"}
+    )
+    state = str(operation.get("state") or base.get("status") or "").upper()
+    status = state.replace("_", " ").title() or "Unavailable"
+    explanation = _result_explanation(code, str(diagnostic.get("recovery_state", "NOT_REQUIRED")))
+    if not explanation and code.startswith("FUNDING_"):
+        explanation = (
+            "The deposit did not complete. Review the safe result code and submission state "
+            "before creating another action."
+        )
+    signature = (
+        "Created before external attempt" if external_started
+        else "Created locally; not sent" if base.get("transactionHash")
+        else "Not created"
+    )
+    rows = [
+        ("Status", status), ("Action", "Deposit to Hyperliquid"),
+        ("Amount", amount or "Unavailable"),
+        ("Network", str(base.get("networkLabel") or "Arbitrum One")),
+        ("Wallet", str(base.get("sender") or operation.get("account") or "Unavailable")),
+        ("Destination", "Hyperliquid trading balance"),
+        ("Result code", code or "Unavailable"),
+        ("Failure stage", stage or "Unavailable"), ("Signature", signature),
+        ("External submission", "Started" if external_started else "Not attempted"),
+        ("Updated", str(base.get("updatedAt") or operation.get("updated_at") or "Unavailable")),
+    ]
+    technical = [
+        ("Operation ID", operation_id), ("Result code", code),
+        ("Failure stage", stage), ("Failure category", category),
+        ("External submission", "Started" if external_started else "Not attempted"),
+        ("Arbitrum hash", str(base.get("transactionHash") or "")),
+        ("Native USDC contract", str(base.get("contract") or "")),
+        ("Hyperliquid Bridge2", str(base.get("recipient") or "")),
+    ]
+    phases = operation.get("phases") if isinstance(operation.get("phases"), list) else []
+    for phase in phases:
+        if not isinstance(phase, Mapping):
+            continue
+        value = str(phase.get("state", "Unavailable"))
+        if phase.get("code"): value += " · " + str(phase["code"])
+        if phase.get("public_id"): value += " · " + str(phase["public_id"])
+        technical.append((str(phase.get("phase_type", "Phase")), value))
+    diagnostics = [
+        ("Action ID", str(base.get("actionId") or operation_id)),
+        ("Operation ID", operation_id), ("Action", "FUND_TRADING_ACCOUNT"),
+        ("Amount", amount or "Unavailable"),
+        ("Wallet", str(base.get("sender") or operation.get("account") or "Unavailable")),
+        ("Status", state or "Unavailable"), ("Result code", code or "Unavailable"),
+        ("Failure stage", stage or "Unavailable"),
+        ("Failure category", category or "Unavailable"), ("Signature", signature),
+        ("External submission started", str(external_started).lower()),
+        ("Arbitrum hash", str(base.get("transactionHash") or "Unavailable")),
+        ("Reason", explanation or "No additional terminal explanation is available."),
+    ]
+    return {
+        **base,
+        "actionId": str(base.get("actionId") or operation_id),
+        "operationId": operation_id,
+        "actionType": "FUND_TRADING_ACCOUNT",
+        "summaryTitle": "Deposit to Hyperliquid",
+        "counterpartyLabel": "Protocol", "shortRecipient": "Hyperliquid",
+        "amount": amount, "amountLabel": amount,
+        "status": state.lower(), "statusLabel": status,
+        "createdAt": str(base.get("createdAt") or operation.get("created_at") or ""),
+        "updatedAt": str(base.get("updatedAt") or operation.get("updated_at") or ""),
+        "dateLabel": str(base.get("dateLabel") or _date(str(operation.get("created_at", "")))),
+        "isPerpDex": True, "isOperation": not bool(base), "token": "USDC",
+        "transactionHash": str(base.get("transactionHash") or ""), "simulated": False,
+        "detailRows": [{"label": label, "value": value} for label, value in rows],
+        "technicalDetails": [
+            {"label": label, "value": value} for label, value in technical if value
+        ],
+        "diagnosticsText": "\n".join(f"{label}: {value}" for label, value in diagnostics),
+        "resultExplanation": explanation,
+        "externalSubmissionStarted": external_started,
+    }
+
+
 def operation_history_to_map(
     operation: Mapping[str, object], diagnostic: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     diagnostic = diagnostic or {}
     kind = str(operation.get("action_type", ""))
+    if kind == "FUND_TRADING_ACCOUNT":
+        return funding_history_to_map({}, operation, diagnostic)
     intent = operation.get("intent") if isinstance(operation.get("intent"), Mapping) else {}
     market, side = str(intent.get("market", "")), str(intent.get("side", "")).lower()
     title = {
@@ -284,6 +387,11 @@ def _category_for_code(code: str) -> str:
 
 def _result_explanation(code: str, recovery: str) -> str:
     values = {
+        "FUNDING_BROADCAST_PENDING": "The Arbitrum transfer was sent. Hyperliquid credit is still pending.",
+        "FUNDING_RESULT_UNKNOWN": "The external funding result could not be confirmed. Do not repeat it until the public transaction state is checked.",
+        "FUNDING_REVALIDATION_FAILED": "The deposit was stopped before signing because fresh Wallet checks no longer matched the reviewed action.",
+        "FUNDING_AUTHENTICATION_FAILED": "The deposit was stopped before signing because local Wallet authentication failed.",
+        "FUNDING_HISTORY_UNAVAILABLE": "The Wallet could not safely persist the funding result. No automatic retry was made.",
         "PERPDEX_PRICE_MOVED": "Price moved outside the protected limit before signing. The order was not sent.",
         "HYPERLIQUID_ACTION_REJECTED": "Hyperliquid rejected the submitted action.",
         "IOC_NOT_FILLED": "The IOC order was submitted but did not fill.",

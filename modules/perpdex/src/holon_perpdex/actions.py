@@ -546,7 +546,18 @@ class HyperliquidActionBuilder:
             elif phase.phase_type is PhaseType.VAULT_TRANSFER:
                 current_transfer = next(item[1] for item in current.phase_specs if item[0] is PhaseType.VAULT_TRANSFER)
                 if phase.semantic["is_deposit"]:
-                    if dict(phase.semantic) != current_transfer:
+                    # Personal vault equity is display-only and can move with
+                    # HLP performance while the user reviews the deposit. The
+                    # fresh preview above already proves the current trading
+                    # balance still covers the exact amount. Bind only fields
+                    # that can change what the Wallet would sign.
+                    material = {
+                        "amount_usdc", "is_deposit", "usd_atomic", "vault_address",
+                    }
+                    if any(
+                        phase.semantic[field] != current_transfer[field]
+                        for field in material
+                    ):
                         raise AdapterError("PERPDEX_BALANCE_CHANGED", "HLP deposit state changed")
                 elif _decimal(phase.semantic["amount_usdc"], "withdraw amount") > _decimal(current.preview["unlocked_equity_usdc"], "unlocked equity"):
                     raise AdapterError("HLP_EQUITY_CHANGED", "Unlocked HLP equity decreased")

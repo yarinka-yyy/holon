@@ -33,13 +33,41 @@ class ModuleFundingExecutor:
                 operation_id=bundle.operation_id,
             ))
         except Exception:
-            return self._terminal(bundle, phase, "FAILED", "FUNDING_HISTORY_UNAVAILABLE", None)
-        result = self._mainnet.execute(
-            action, action.digest, password, SigningPermit(),
-            on_signed=lambda: self._adapter.mark_external_submission_started(
-                bundle.operation_id,
-            ),
-        )
+            return self._terminal(
+                bundle, phase, "FAILED", "FUNDING_HISTORY_UNAVAILABLE", None,
+                external_submission_started=False,
+            )
+        external_submission_started = False
+
+        def mark_external_submission_started() -> None:
+            nonlocal external_submission_started
+            self._adapter.mark_external_submission_started(bundle.operation_id)
+            external_submission_started = True
+
+        try:
+            result = self._mainnet.execute(
+                action, action.digest, password, SigningPermit(),
+                on_broadcast_starting=mark_external_submission_started,
+            )
+        except Exception:
+            state = "UNKNOWN" if external_submission_started else "FAILED"
+            code = (
+                "FUNDING_RESULT_UNKNOWN" if external_submission_started
+                else "FUNDING_EXECUTION_FAILED"
+            )
+            try:
+                self._mainnet.history_store.update_status(
+                    action.action_id,
+                    HistoryStatus.UNKNOWN if external_submission_started
+                    else HistoryStatus.FAILED,
+                    _timestamp(datetime.now(UTC)),
+                )
+            except Exception:
+                code = "FUNDING_HISTORY_UNAVAILABLE"
+            return self._terminal(
+                bundle, phase, state, code, None,
+                external_submission_started=external_submission_started,
+            )
         if result.history_status is None:
             try:
                 self._mainnet.history_store.update_status(
@@ -51,6 +79,7 @@ class ModuleFundingExecutor:
             except Exception:
                 return self._terminal(
                     bundle, phase, "FAILED", "FUNDING_HISTORY_UNAVAILABLE", None,
+                    external_submission_started=external_submission_started,
                 )
         if result.code in {
             MainnetTransferCode.CONFIRMED, MainnetTransferCode.PENDING,
@@ -58,25 +87,49 @@ class ModuleFundingExecutor:
             return self._terminal(
                 bundle, phase, "PENDING_CREDIT", "FUNDING_BROADCAST_PENDING",
                 result.transaction_hash,
+                external_submission_started=external_submission_started,
             )
         if result.code is MainnetTransferCode.UNKNOWN:
-            return self._terminal(bundle, phase, "UNKNOWN", "FUNDING_RESULT_UNKNOWN", result.transaction_hash)
+            return self._terminal(
+                bundle, phase, "UNKNOWN", "FUNDING_RESULT_UNKNOWN",
+                result.transaction_hash,
+                external_submission_started=external_submission_started,
+            )
         return self._terminal(
             bundle, phase, "FAILED", "FUNDING_" + result.code.value,
             result.transaction_hash or None,
+            external_submission_started=external_submission_started,
         )
 
-    def _terminal(self, bundle, phase, state: str, code: str, public_id: str | None):
+    def _terminal(
+        self, bundle, phase, state: str, code: str, public_id: str | None, *,
+        external_submission_started: bool,
+    ):
+        terminal_stage = (
+            "RECONCILIATION" if state in {"PENDING_CREDIT", "UNKNOWN"}
+            else "PHASE_ARBITRUM_USDC_TRANSFER"
+        )
+        failure_category = (
+            None if state == "PENDING_CREDIT"
+            else "exchange_unknown" if external_submission_started
+            else "authentication" if "AUTHENTICATION" in code
+            else "wallet"
+        )
         try:
             self._adapter.mark_phase(bundle.operation_id, phase.phase_id, state, code=code, public_id=public_id)
-            self._adapter.mark_operation(bundle.operation_id, state)
+            self._adapter.mark_operation(
+                bundle.operation_id, state, terminal_code=code,
+                terminal_stage=terminal_stage, failure_category=failure_category,
+            )
         except Exception:
             state, code, public_id = "UNKNOWN", "FUNDING_OPERATION_STATE_UNKNOWN", None
+            terminal_stage, failure_category = "RECONCILIATION", "internal"
         return PerpDexExecutionResult(
             bundle.operation_id, bundle.intent.action_type.value, state, code,
             "No transaction was retried; refresh the public Hyperliquid portfolio for credit status.",
             ({"phaseId": phase.phase_id, "phaseType": phase.phase_type.value,
               "state": state, "code": code, "publicId": public_id},),
+            terminal_stage, failure_category, None, external_submission_started,
         )
 
 

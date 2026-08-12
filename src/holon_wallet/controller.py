@@ -72,7 +72,7 @@ from .history import (
 from .lending_view import lending_portfolio_to_map
 from .earn_view import earn_portfolio_to_map, module_earn_presentations
 from .perpdex_view import (
-    action_presentation, load_action_diagnostics, operation_history_to_map,
+    action_presentation, funding_history_to_map, load_action_diagnostics, operation_history_to_map,
     result_presentation,
 )
 from .lending_action import prepare_lending_action
@@ -1050,6 +1050,19 @@ class WalletController(QObject):
 
     def _history_maps(self) -> list[dict[str, object]]:
         mapped: list[dict[str, object]] = []
+        model = self._module_page.get("model")
+        operations = [
+            item for item in (getattr(model, "operationHistory", []) if model is not None else [])
+            if isinstance(item, Mapping)
+        ]
+        operation_by_id = {
+            str(item.get("operation_id")): item for item in operations if item.get("operation_id")
+        }
+        operation_ids = set(operation_by_id)
+        diagnostics = load_action_diagnostics(
+            self._repository.paths.data_dir, operation_ids,
+        )
+        represented_funding: set[str] = set()
         for record in sorted(
             (
                 item for item in self._history_records
@@ -1059,21 +1072,23 @@ class WalletController(QObject):
             reverse=True,
         ):
             value = history_record_to_map(record)
+            if record.action_type == "perpdex_funding":
+                operation_id = str(record.operation_id or record.action_id)
+                represented_funding.add(operation_id)
+                value = funding_history_to_map(
+                    value, operation_by_id.get(operation_id), diagnostics.get(operation_id),
+                )
             mapped.append(value)
-        model = self._module_page.get("model")
-        operations = getattr(model, "operationHistory", []) if model is not None else []
-        operation_ids = {
-            str(operation.get("operation_id")) for operation in operations
-            if isinstance(operation, Mapping) and operation.get("operation_id")
-        }
-        diagnostics = load_action_diagnostics(
-            self._repository.paths.data_dir, operation_ids,
-        )
         for operation in operations:
-            if isinstance(operation, Mapping) and operation.get("action_type") != "FUND_TRADING_ACCOUNT":
-                mapped.append(operation_history_to_map(
-                    operation, diagnostics.get(str(operation.get("operation_id")), {}),
-                ))
+            operation_id = str(operation.get("operation_id", ""))
+            if (
+                operation.get("action_type") == "FUND_TRADING_ACCOUNT"
+                and operation_id in represented_funding
+            ):
+                continue
+            mapped.append(operation_history_to_map(
+                operation, diagnostics.get(operation_id, {}),
+            ))
         return sorted(mapped, key=lambda item: str(item.get("createdAt", "")), reverse=True)
 
     @Property(bool, notify=historyChanged)

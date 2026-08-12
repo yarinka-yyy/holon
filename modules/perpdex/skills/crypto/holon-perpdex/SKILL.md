@@ -33,12 +33,14 @@ metadata:
    network, native-USDC route and maximum fee in a human-readable summary, with technical details
    available on demand. Never retry, substitute an action, or begin a trade after funding.
 7. For `OPEN_POSITION`, ask only for missing market, direction, leverage, or amount. An ordinary
-   amount such as "open ETH long 2x with 6 USDC" means **6 USDC margin**; calculate the final
-   position notional as margin × leverage. Treat `notional`, `total position`, or `including
-   leverage` as the final position notional instead. Use `ISOLATED` when the user did not state a
-   margin mode and preserve an explicit `CROSS` or `ISOLATED` choice. The final rounded order value
-   must be at least `10 USDC`; if it is smaller, explain the minimum and an approximate required
-   margin at the requested leverage instead of trying to open Wallet Review.
+   amount such as "open ETH long 2x with 6 USDC" means **6 USDC margin**: pass it only as
+   `amount_usdc` and let the protected tool bind the final notional to margin × leverage. Treat
+   `notional`, `total position`, or `including leverage` as the final position notional and pass it
+   only as `notional_usdc`. Do not normally send both representations; if the user explicitly gives
+   both, they must exactly match leverage or the request is refused. Use `ISOLATED` when the user did
+   not state a margin mode and preserve an explicit `CROSS` or `ISOLATED` choice. The final rounded
+   order value must be at least `10 USDC`; if it is smaller, explain the minimum and an approximate
+   required margin at the requested leverage instead of trying to open Wallet Review.
 8. For `CLOSE_POSITION`, ask only for the market or whether to close all/a percentage when those
    facts are missing. A complete open or close request is already sufficient to open a local Wallet
    Review: call `holon_perpdex_prepare` once. It internally consumes its one-use preview and opens

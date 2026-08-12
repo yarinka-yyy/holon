@@ -84,5 +84,5 @@ jobs:
             tests/test_guard_process.py `
             tests/test_packaged_lending_preview.py::test_packaged_guard_cold_starts_and_reactivates_wallet `
             tests/test_packaged_lending_preview.py::test_packaged_funding_reaches_review_with_bounded_fee_drift `
-            tests/test_packaged_lending_preview.py::test_packaged_direct_position_review_uses_fake_public_info_and_cancels `
+            tests/test_packaged_lending_preview.py::test_packaged_public_perpdex_flows_use_real_tool_schema_and_cancel `
             tests/test_packaged_plugin.py

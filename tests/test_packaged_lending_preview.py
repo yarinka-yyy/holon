@@ -162,10 +162,14 @@ class FundingRpcFixture(RpcFixture):
 
 class HyperliquidInfoFixture(BaseHTTPRequestHandler):
     calls: list[str] = []
+    position_market: str | None = None
+    position_size: str | None = None
 
     @classmethod
     def reset(cls) -> None:
         cls.calls = []
+        cls.position_market = None
+        cls.position_size = None
 
     def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         length = int(self.headers.get("Content-Length", "0"))
@@ -183,8 +187,8 @@ class HyperliquidInfoFixture(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: object) -> None:
         del format, args
 
-    @staticmethod
-    def _response(kind: str, request: dict[str, object]) -> object:
+    @classmethod
+    def _response(cls, kind: str, request: dict[str, object]) -> object:
         now = int(time.time() * 1000)
         if kind == "metaAndAssetCtxs":
             return [{"universe": [
@@ -201,9 +205,22 @@ class HyperliquidInfoFixture(BaseHTTPRequestHandler):
             bid, ask = prices[str(request["coin"])]
             return {"coin": request["coin"], "levels": [[{"px": bid}], [{"px": ask}]], "time": now}
         if kind == "clearinghouseState":
+            positions = []
+            if cls.position_market is not None and cls.position_size is not None:
+                positions.append({"position": {
+                    "coin": cls.position_market, "entryPx": "3000",
+                    "leverage": {"type": "isolated", "value": 2},
+                    "liquidationPx": "1500", "marginUsed": "5.5",
+                    "positionValue": "11", "szi": cls.position_size,
+                    "unrealizedPnl": "0",
+                }})
             return {
-                "assetPositions": [],
-                "marginSummary": {"accountValue": "200", "totalMarginUsed": "0", "totalNtlPos": "0"},
+                "assetPositions": positions,
+                "marginSummary": {
+                    "accountValue": "200",
+                    "totalMarginUsed": "5.5" if positions else "0",
+                    "totalNtlPos": "11" if positions else "0",
+                },
                 "withdrawable": "200",
             }
         if kind == "frontendOpenOrders":
@@ -212,10 +229,30 @@ class HyperliquidInfoFixture(BaseHTTPRequestHandler):
             return {"userAddRate": "0.00015", "userCrossRate": "0.00045"}
         if kind == "referral":
             return {"cumVlm": "0", "referredBy": {"code": "EXISTING", "referrer": "0x" + "34" * 20}}
+        if kind == "vaultDetails":
+            return {
+                "allowDeposits": True, "apr": "0.12",
+                "followerState": {
+                    "allTimePnl": "0", "lockupUntil": 0, "pnl": "0",
+                    "vaultEquity": "20",
+                },
+                "isClosed": False, "name": "Hyperliquidity Provider (HLP)",
+                "relationship": {"data": {"childAddresses": []}, "type": "parent"},
+                "vaultAddress": "0xdfc24b077bc1425ad1dea75bcb6f8158e10df303",
+            }
+        if kind == "userVaultEquities":
+            return [{
+                "equity": "20",
+                "vaultAddress": "0xdfc24b077bc1425ad1dea75bcb6f8158e10df303",
+            }]
         raise AssertionError(f"Unexpected Hyperliquid public request: {kind}")
 
 
-def _packaged_direct_position_code(plugin: Path, pipe: str) -> str:
+def _packaged_perpdex_code(
+    plugin: Path, pipe: str, tool_name: str, params: dict[str, object], *,
+    confirm_hlp: bool = False,
+) -> str:
+    encoded_params = json.dumps(params, ensure_ascii=True, separators=(",", ":"))
     return f"""
 import importlib.util
 import json
@@ -258,12 +295,31 @@ class Connector:
             action_id=action_id, owner_pid=os.getpid(), response_timeout=55.0,
         )
 
+descriptor_path = root + "/modules/holon.perpdex/hermes-tools.json"
+with open(descriptor_path, "r", encoding="utf-8") as handle:
+    declarations = json.load(handle)["tools"]
+declaration = next(item for item in declarations if item["name"] == {tool_name!r})
+params = json.loads({encoded_params!r})
+schema = declaration["parameters"]
+assert set(schema["required"]).issubset(params)
+assert set(params).issubset(schema["properties"])
 runtime = holon_plugin.PluginRuntime(Connector())
-print(runtime.handle_module_action_prepare(
-    "holon.perpdex", "holon.perpdex.action.guard",
-    {{"action_type": "OPEN_POSITION", "leverage": 2, "margin_mode": "ISOLATED",
-     "market": "ETH", "notional_usdc": "12", "side": "LONG"}},
-))
+if {tool_name!r} == "holon_perpdex_fund_prepare":
+    result = runtime.handle_module_funding_prepare(
+        "holon.perpdex", declaration["capability_id"], params,
+    )
+else:
+    result = runtime.handle_module_action_prepare(
+        "holon.perpdex", declaration["capability_id"], params,
+    )
+first = json.loads(result)
+if {confirm_hlp!r}:
+    assert first["status"] == "PREVIEW_READY"
+    result = runtime.handle_module_action_execute(
+        "holon.perpdex", declaration["capability_id"],
+        {{"preview_digest": first["preview_digest"]}},
+    )
+print(result)
 """
 
 
@@ -559,8 +615,12 @@ def test_packaged_guard_wallet_preview_with_offline_rpc(tmp_path: Path) -> None:
 def test_packaged_funding_reaches_review_with_bounded_fee_drift(tmp_path: Path) -> None:
     guard = Path(os.environ.get("HOLON_TEST_GUARD_EXE", ""))
     wallet = Path(os.environ.get("HOLON_TEST_WALLET_EXE", ""))
-    if not guard.is_file() or not wallet.is_file():
-        pytest.skip("Packaged Guard and Wallet paths were not provided")
+    plugin = Path(os.environ.get("HOLON_TEST_PLUGIN_ROOT", ""))
+    if (
+        not guard.is_file() or not wallet.is_file()
+        or not (plugin / "plugin.py").is_file()
+    ):
+        pytest.skip("Packaged Guard, Wallet, and Hermes plugin paths were not provided")
     _assert_test_wallet_absent(wallet)
     local_root = tmp_path / "funding-local"
     paths = WalletPaths(local_root / "Holon" / "data")
@@ -604,32 +664,21 @@ def test_packaged_funding_reaches_review_with_bounded_fee_drift(tmp_path: Path) 
         client = PipeClient(pipe, 2.0, 40.0)
         opened = client.request(MessageKind.OPEN_WALLET, response_timeout=30.0)
         assert opened.kind is MessageKind.WALLET_OPENED, opened.payload
-        preview = client.request(
-            MessageKind.MODULE_ACTION_INTENT,
-            {
-                "module_id": "holon.perpdex",
-                "capability_id": "holon.perpdex.funding.guard",
-                "action_type": "FUND_TRADING_ACCOUNT",
-                "params": {"amount_usdc": "6"},
-            },
-            response_timeout=40.0,
+        response = subprocess.run(
+            [
+                sys.executable, "-I", "-c",
+                _packaged_perpdex_code(
+                    plugin, pipe, "holon_perpdex_fund_prepare",
+                    {"amount_usdc": "6"},
+                ),
+            ],
+            check=True, capture_output=True, text=True, timeout=70,
+            env=environment,
         )
-        assert preview.kind is MessageKind.MODULE_ACTION_PREVIEW
-        assert preview.payload["status"] == "PREVIEW_READY"
-        assert preview.payload["preview"]["max_total_fee_wei"] == "125"
-        action_id = "act-" + str(uuid.uuid4())
-        started = client.request(
-            MessageKind.MODULE_AUTHORITY_INTENT,
-            {
-                "module_id": "holon.perpdex",
-                "capability_id": "holon.perpdex.funding.guard",
-                "action_type": "FUND_TRADING_ACCOUNT",
-                "params": {"amount_usdc": "6"},
-                "preview_digest": preview.payload["preview_digest"],
-            },
-            action_id=action_id, owner_pid=os.getpid(), response_timeout=40.0,
-        )
-        assert started.kind is MessageKind.PROTECTED_FLOW_STARTED
+        started = json.loads(response.stdout)
+        assert started["status"] == "AWAITING_LOCAL_CONFIRMATION", started
+        assert started["action_type"] == "FUND_TRADING_ACCOUNT"
+        action_id = started["action_id"]
         assert FundingRpcFixture.snapshot_index >= 3
         cancelled = client.request(MessageKind.CANCEL_ACTION, action_id=action_id)
         assert cancelled.payload["code"] == "ACTION_CANCELLED"
@@ -647,7 +696,7 @@ def test_packaged_funding_reaches_review_with_bounded_fee_drift(tmp_path: Path) 
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Packaged Windows executables")
-def test_packaged_direct_position_review_uses_fake_public_info_and_cancels(
+def test_packaged_public_perpdex_flows_use_real_tool_schema_and_cancel(
     tmp_path: Path,
 ) -> None:
     guard = Path(os.environ.get("HOLON_TEST_GUARD_EXE", ""))
@@ -691,25 +740,64 @@ def test_packaged_direct_position_review_uses_fake_public_info_and_cancels(
     )
     try:
         wait_for_pipe(pipe, 20.0)
-        response = subprocess.run(
-            [sys.executable, "-I", "-c", _packaged_direct_position_code(plugin, pipe)],
-            check=True, capture_output=True, text=True, timeout=70, env=environment,
-        )
-        started = json.loads(response.stdout)
-        safe_failure = {
-            key: started.get(key) for key in (
-                "action_id", "code", "failure_category", "operation_class", "stage", "status",
-            ) if key in started
-        }
-        assert started["status"] == "AWAITING_LOCAL_CONFIRMATION", safe_failure
-        assert started["action_type"] == "OPEN_POSITION"
-        assert "preview_digest" not in started
-        action_id = started["action_id"]
-        cancelled = PipeClient(pipe, 2.0, 55.0).request(
-            MessageKind.CANCEL_ACTION, action_id=action_id,
-        )
-        assert cancelled.payload["code"] == "ACTION_CANCELLED"
+        client = PipeClient(pipe, 2.0, 55.0)
+
+        def reaches_review(
+            values: dict[str, object], *, confirm_hlp: bool = False,
+        ) -> dict[str, object]:
+            response = subprocess.run(
+                [
+                    sys.executable, "-I", "-c",
+                    _packaged_perpdex_code(
+                        plugin, pipe, "holon_perpdex_prepare", values,
+                        confirm_hlp=confirm_hlp,
+                    ),
+                ],
+                check=True, capture_output=True, text=True, timeout=70,
+                env=environment,
+            )
+            started = json.loads(response.stdout)
+            safe_failure = {
+                key: started.get(key) for key in (
+                    "action_id", "code", "failure_category", "operation_class",
+                    "stage", "status",
+                ) if key in started
+            }
+            assert started["status"] == "AWAITING_LOCAL_CONFIRMATION", safe_failure
+            assert "preview_digest" not in started
+            cancelled = client.request(
+                MessageKind.CANCEL_ACTION, action_id=started["action_id"],
+            )
+            assert cancelled.payload["code"] == "ACTION_CANCELLED"
+            return started
+
+        for market in ("BTC", "ETH", "SOL"):
+            for side in ("LONG", "SHORT"):
+                started = reaches_review({
+                    "action_type": "OPEN_POSITION", "amount_usdc": "5.5",
+                    "leverage": 2, "margin_mode": "ISOLATED", "market": market,
+                    "notional_usdc": "11", "side": side,
+                })
+                assert started["action_type"] == "OPEN_POSITION"
+
+        HyperliquidInfoFixture.position_market = "ETH"
+        HyperliquidInfoFixture.position_size = "0.02"
+        closed = reaches_review({
+            "action_type": "CLOSE_POSITION", "amount_mode": "ALL",
+            "market": "ETH",
+        })
+        assert closed["action_type"] == "CLOSE_POSITION"
+
+        HyperliquidInfoFixture.position_market = None
+        HyperliquidInfoFixture.position_size = None
+        deposited = reaches_review({
+            "action_type": "HLP_DEPOSIT", "amount_usdc": "25",
+        }, confirm_hlp=True)
+        assert deposited["action_type"] == "HLP_DEPOSIT"
         assert {"metaAndAssetCtxs", "l2Book", "clearinghouseState", "userFees", "referral"}.issubset(
+            HyperliquidInfoFixture.calls,
+        )
+        assert {"vaultDetails", "userVaultEquities"}.issubset(
             HyperliquidInfoFixture.calls,
         )
         assert "exchange" not in HyperliquidInfoFixture.calls

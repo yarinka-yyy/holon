@@ -117,8 +117,14 @@ class FundingWalletAdapter:
             protocol_id="hyperliquid-bridge2",
         ))
 
-    def mark_operation(self, operation_id: str, state: str) -> None:
-        self._store().mark_operation(operation_id, state)
+    def mark_operation(
+        self, operation_id: str, state: str, *, terminal_code: str | None = None,
+        terminal_stage: str | None = None, failure_category: str | None = None,
+    ) -> None:
+        self._store().mark_operation(
+            operation_id, state, terminal_code=terminal_code,
+            terminal_stage=terminal_stage, failure_category=failure_category,
+        )
 
     def mark_external_submission_started(self, operation_id: str) -> None:
         self._store().mark_external_submission_started(operation_id)

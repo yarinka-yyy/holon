@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from holon_wallet.perpdex_view import action_presentation, operation_history_to_map, result_presentation
+from holon_wallet.perpdex_view import (
+    action_presentation, funding_history_to_map, operation_history_to_map,
+    result_presentation,
+)
 
 
 def test_funding_and_position_presentations_keep_raw_values_out_of_main_copy() -> None:
@@ -34,7 +37,9 @@ def test_result_and_history_mapping_are_plain_but_keep_diagnostics_collapsed() -
               "funding": {"amountAtomic": "6000000", "chainId": 42161, "maxTotalFeeWei": "1",
                           "recipient": "0x" + "22" * 20, "tokenContract": "0x" + "11" * 20}}
     result = result_presentation({"actionType": "FUND_TRADING_ACCOUNT", "status": "PENDING_CREDIT",
-                                  "code": "FUNDING_BROADCAST_PENDING", "phases": []}, action)
+                                  "code": "FUNDING_BROADCAST_PENDING", "phases": [],
+                                  "terminalStage": "RECONCILIATION",
+                                  "externalSubmissionStarted": True}, action)
     assert result["resultTitle"] == "Deposit sent"
     assert result["resultSubtitle"] == "Waiting for Hyperliquid balance update"
     assert all(item["value"] != "FUNDING_BROADCAST_PENDING" for item in result["summaryRows"])
@@ -42,6 +47,9 @@ def test_result_and_history_mapping_are_plain_but_keep_diagnostics_collapsed() -
         item == {"label": "Result code", "value": "FUNDING_BROADCAST_PENDING"}
         for item in result["technicalDetails"]
     )
+    assert {item["label"]: item["value"] for item in result["technicalDetails"]}[
+        "External submission"
+    ] == "Started"
 
     history = operation_history_to_map({"operation_id": "act-3", "action_type": "OPEN_POSITION",
                                         "state": "COMPLETED", "created_at": "2026-08-11T12:00:00Z",
@@ -50,6 +58,58 @@ def test_result_and_history_mapping_are_plain_but_keep_diagnostics_collapsed() -
     assert history["summaryTitle"] == "Open ETH long"
     assert history["statusLabel"] == "Completed"
     assert history["isPerpDex"] is True
+
+
+def test_funding_history_keeps_terminal_details_after_result_screen_closes() -> None:
+    mapped = funding_history_to_map({
+        "actionId": "act-evm", "operationId": "act-funding",
+        "amount": "5.5 USDC", "networkLabel": "Arbitrum One",
+        "sender": "0x" + "11" * 20, "recipient": "0x" + "22" * 20,
+        "contract": "0x" + "33" * 20, "transactionHash": "",
+        "status": "failed", "createdAt": "2026-08-12T10:00:00Z",
+        "updatedAt": "2026-08-12T10:00:01Z", "dateLabel": "Aug 12, 2026",
+    }, {
+        "operation_id": "act-funding", "action_type": "FUND_TRADING_ACCOUNT",
+        "account": "0x" + "11" * 20, "state": "FAILED",
+        "created_at": "2026-08-12T10:00:00Z", "updated_at": "2026-08-12T10:00:01Z",
+        "intent": {"amount_usdc": "5.5"}, "external_submission_started": False,
+        "terminal_code": "FUNDING_REVALIDATION_FAILED",
+        "terminal_stage": "PHASE_ARBITRUM_USDC_TRANSFER",
+        "failure_category": "wallet", "phases": [{
+            "phase_type": "ARBITRUM_USDC_TRANSFER", "state": "FAILED",
+            "code": "FUNDING_REVALIDATION_FAILED", "public_id": None,
+        }],
+    })
+    rows = {item["label"]: item["value"] for item in mapped["detailRows"]}
+    technical = {item["label"]: item["value"] for item in mapped["technicalDetails"]}
+    assert rows["Wallet"] == "0x" + "11" * 20
+    assert rows["Amount"] == "5.5 USDC"
+    assert rows["Signature"] == "Not created"
+    assert rows["External submission"] == "Not attempted"
+    assert technical["Result code"] == "FUNDING_REVALIDATION_FAILED"
+    assert technical["ARBITRUM_USDC_TRANSFER"] == "FAILED · FUNDING_REVALIDATION_FAILED"
+    assert "External submission started: false" in mapped["diagnosticsText"]
+    assert "stopped before signing" in mapped["resultExplanation"]
+
+
+def test_funding_history_does_not_confuse_local_hash_with_external_attempt() -> None:
+    mapped = funding_history_to_map({
+        "actionId": "act-evm", "operationId": "act-funding",
+        "amount": "5.5 USDC", "sender": "0x" + "11" * 20,
+        "recipient": "0x" + "22" * 20, "contract": "0x" + "33" * 20,
+        "transactionHash": "0x" + "44" * 32, "status": "failed",
+        "createdAt": "2026-08-12T10:00:00Z", "updatedAt": "2026-08-12T10:00:01Z",
+    }, {
+        "operation_id": "act-funding", "action_type": "FUND_TRADING_ACCOUNT",
+        "state": "FAILED", "external_submission_started": False,
+        "terminal_code": "FUNDING_CANCELLED",
+        "terminal_stage": "PHASE_ARBITRUM_USDC_TRANSFER",
+        "failure_category": "wallet", "phases": [],
+    })
+    rows = {item["label"]: item["value"] for item in mapped["detailRows"]}
+    assert rows["Signature"] == "Created locally; not sent"
+    assert rows["External submission"] == "Not attempted"
+    assert mapped["externalSubmissionStarted"] is False
 
 
 def test_price_move_result_and_history_prove_order_was_not_sent() -> None:

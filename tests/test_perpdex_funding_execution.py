@@ -102,6 +102,13 @@ def test_funding_executes_through_the_arbitrum_network_endpoint_only(tmp_path: P
 
     assert result.status == "PENDING_CREDIT"
     assert result.code == "FUNDING_BROADCAST_PENDING"
+    assert result.external_submission_started is True
+    assert result.terminal_stage == "RECONCILIATION"
+    operation = adapter.status(OPERATION_ID)
+    assert operation is not None
+    assert operation["terminal_code"] == "FUNDING_BROADCAST_PENDING"
+    assert operation["terminal_stage"] == "RECONCILIATION"
+    assert operation["failure_category"] is None
     assert rpc.send_calls == 1
     assert endpoints == ["fixture://arbitrum", "fixture://arbitrum"]
     assert prepared.action.max_total_fee_wei == 1_375_000
@@ -121,24 +128,42 @@ def test_pre_sign_funding_refusal_changes_history_from_prepared_to_failed(tmp_pa
     action = SimpleNamespace(action_id="act-history", profile_id="profile", network_id="arbitrum", chain_id=42161,
         sender="0x" + "11" * 20, recipient=BRIDGE2_ADDRESS, token_contract=NATIVE_USDC, token="USDC",
         amount_atomic=6_000_000, decimals=6, max_total_fee_wei=100, created_at=now, digest="a" * 64)
-    events: list[tuple[str, str]] = []
+    events: list[tuple[str, str, dict[str, object]]] = []
 
     class Adapter:
-        def mark_operation(self, operation_id, state): events.append((operation_id, state))
-        def mark_phase(self, operation_id, phase_id, state, **_kwargs): events.append((phase_id, state))
+        def mark_operation(self, operation_id, state, **kwargs):
+            events.append((operation_id, state, kwargs))
+        def mark_phase(self, operation_id, phase_id, state, **kwargs):
+            events.append((phase_id, state, kwargs))
         def mark_external_submission_started(self, _operation_id): raise AssertionError("must not sign")
 
     class Refusal:
         def __init__(self, store): self.history_store = store
-        def execute(self, prepared, digest, password, permit, on_signed=None):
-            del prepared, digest, password, permit, on_signed
+        def execute(
+            self, prepared, digest, password, permit, on_signed=None,
+            on_broadcast_starting=None,
+        ):
+            del prepared, digest, password, permit, on_signed, on_broadcast_starting
             return MainnetTransferResult(MainnetTransferCode.REVALIDATION_FAILED, "act-history", "a" * 64,
                 "", "", None, "2026-08-11T12:00:00Z", False, True, False, "perpdex_funding")
 
     store = HistoryStore(WalletPaths(tmp_path))
     result = ModuleFundingExecutor(Refusal(store), Adapter()).execute(SimpleNamespace(bundle=bundle, action=action), "fixture")
     assert result.code == "FUNDING_REVALIDATION_FAILED"
+    assert result.external_submission_started is False
+    assert result.terminal_stage == "PHASE_ARBITRUM_USDC_TRANSFER"
+    assert result.failure_category == "wallet"
     assert store.load()[0].status is HistoryStatus.FAILED
     assert store.load()[0].transaction_hash is None
-    assert events == [(OPERATION_ID, "EXECUTING"), ("phase-fixture", "SUBMITTING"),
-                      ("phase-fixture", "FAILED"), (OPERATION_ID, "FAILED")]
+    assert events == [
+        (OPERATION_ID, "EXECUTING", {}),
+        ("phase-fixture", "SUBMITTING", {"code": "SUBMITTING"}),
+        ("phase-fixture", "FAILED", {
+            "code": "FUNDING_REVALIDATION_FAILED", "public_id": None,
+        }),
+        (OPERATION_ID, "FAILED", {
+            "terminal_code": "FUNDING_REVALIDATION_FAILED",
+            "terminal_stage": "PHASE_ARBITRUM_USDC_TRANSFER",
+            "failure_category": "wallet",
+        }),
+    ]

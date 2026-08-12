@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import re
 from collections import OrderedDict
 from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Optional
 
@@ -83,6 +85,37 @@ WALLET_OPEN_FAILURE_CODES = frozenset({
     "CONTROL_PROTOCOL_FAILED", "WALLET_PROCESS_VERIFICATION_FAILED",
     "WALLET_OPEN_INTERNAL_FAILURE", "WALLET_UNAVAILABLE",
 })
+_PROTECTED_DECIMAL_RE = re.compile(
+    r"^(?:0|[1-9][0-9]*)(?:\.[0-9]{1,6})?$",
+)
+
+
+class _ModuleActionParameterError(ValueError):
+    """A closed, secret-free public tool parameter refusal."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+def _protected_decimal(value: object) -> Decimal:
+    if (
+        not isinstance(value, str) or len(value) > 80
+        or _PROTECTED_DECIMAL_RE.fullmatch(value) is None
+    ):
+        raise ValueError("Invalid protected decimal")
+    try:
+        parsed = Decimal(value)
+    except InvalidOperation as exc:
+        raise ValueError("Invalid protected decimal") from exc
+    if not parsed.is_finite() or parsed <= 0:
+        raise ValueError("Invalid protected decimal")
+    return parsed
+
+
+def _decimal_text(value: Decimal) -> str:
+    text = format(value, "f")
+    return text.rstrip("0").rstrip(".") if "." in text else text
 WALLET_OPEN_FAILURE_MESSAGES = {
     "WALLET_EXECUTABLE_MISSING": "Wallet executable is missing.",
     "WALLET_START_FAILED": "Wallet could not be started.",
@@ -483,10 +516,10 @@ class PluginRuntime:
         action_type = values.get("action_type")
         required, allowed = {
             "OPEN_POSITION": (
-                {"action_type", "leverage", "market", "notional_usdc", "side"},
+                {"action_type", "leverage", "market", "side"},
                 {
-                    "action_type", "leverage", "margin_mode", "market",
-                    "notional_usdc", "side",
+                    "action_type", "amount_usdc", "leverage", "margin_mode",
+                    "market", "notional_usdc", "side",
                 },
             ),
             "CLOSE_POSITION": (
@@ -509,32 +542,58 @@ class PluginRuntime:
         if not required or not required.issubset(values) or not set(values).issubset(allowed):
             raise ValueError("Invalid protected module parameters")
         if action_type == "OPEN_POSITION":
+            margin_value = values.get("amount_usdc")
+            notional_value = values.get("notional_usdc")
             if (
                 values["market"] not in {"BTC", "ETH", "SOL"}
                 or values["side"] not in {"LONG", "SHORT"}
                 or type(values["leverage"]) is not int
                 or values["leverage"] < 1
                 or values.get("margin_mode") not in {None, "CROSS", "ISOLATED"}
-                or not isinstance(values["notional_usdc"], str)
+                or margin_value is None and notional_value is None
             ):
                 raise ValueError("Invalid open parameters")
+            margin = (
+                _protected_decimal(margin_value)
+                if margin_value is not None else None
+            )
+            notional = (
+                _protected_decimal(notional_value)
+                if notional_value is not None else None
+            )
+            calculated = (
+                margin * Decimal(values["leverage"])
+                if margin is not None else None
+            )
+            if calculated is not None and notional is not None and calculated != notional:
+                raise _ModuleActionParameterError(
+                    "OPEN_MARGIN_NOTIONAL_MISMATCH",
+                )
+            canonical_notional = notional if notional is not None else calculated
+            if canonical_notional is None:
+                raise ValueError("Invalid open parameters")
             params = {key: values[key] for key in (
-                "leverage", "market", "notional_usdc", "side",
+                "leverage", "market", "side",
             )}
+            params["notional_usdc"] = _decimal_text(canonical_notional)
             if "margin_mode" in values:
                 params["margin_mode"] = values["margin_mode"]
         elif action_type == "CLOSE_POSITION":
             percent = values.get("percent")
+            amount_mode = (
+                "FULL" if values["amount_mode"] == "ALL"
+                else values["amount_mode"]
+            )
             if (
                 values["market"] not in {"BTC", "ETH", "SOL"}
-                or values["amount_mode"] not in {"FULL", "PERCENT"}
-                or values["amount_mode"] == "FULL" and percent is not None
-                or values["amount_mode"] == "PERCENT"
+                or amount_mode not in {"FULL", "PERCENT"}
+                or amount_mode == "FULL" and percent is not None
+                or amount_mode == "PERCENT"
                 and not isinstance(percent, str)
             ):
                 raise ValueError("Invalid close parameters")
             params = {
-                "amount_mode": values["amount_mode"], "market": values["market"],
+                "amount_mode": amount_mode, "market": values["market"],
                 "percent": percent,
             }
         elif action_type == "HLP_DEPOSIT":
@@ -543,15 +602,19 @@ class PluginRuntime:
             params = {"amount_usdc": values["amount_usdc"]}
         elif action_type == "HLP_WITHDRAW":
             amount_usdc = values.get("amount_usdc")
+            amount_mode = (
+                "ALL" if values["amount_mode"] == "FULL"
+                else values["amount_mode"]
+            )
             if (
-                values["amount_mode"] not in {"EXACT", "ALL"}
-                or values["amount_mode"] == "ALL" and amount_usdc is not None
-                or values["amount_mode"] == "EXACT"
+                amount_mode not in {"EXACT", "ALL"}
+                or amount_mode == "ALL" and amount_usdc is not None
+                or amount_mode == "EXACT"
                 and not isinstance(amount_usdc, str)
             ):
                 raise ValueError("Invalid HLP withdrawal parameters")
             params = {
-                "amount_mode": values["amount_mode"],
+                "amount_mode": amount_mode,
                 "amount_usdc": amount_usdc,
             }
         else:
@@ -592,6 +655,8 @@ class PluginRuntime:
     ) -> str:
         try:
             action_type, semantic = self._module_action_params(values)
+        except _ModuleActionParameterError as exc:
+            return self._module_action_failure(exc.code)
         except ValueError:
             return self._module_action_failure("MODULE_ACTION_PREVIEW_INVALID")
         try:
@@ -667,6 +732,9 @@ class PluginRuntime:
     ) -> str:
         messages = {
             "MODULE_ACTION_PREVIEW_INVALID": "Protected action parameters are invalid.",
+            "OPEN_MARGIN_NOTIONAL_MISMATCH": (
+                "Open margin and final position notional do not match leverage."
+            ),
             "MODULE_ACTION_PREVIEW_GUARD_UNAVAILABLE": "Local Guard is unavailable.",
             "MODULE_ACTION_PREVIEW_RESPONSE_TIMEOUT": "Local Guard did not respond in time.",
             "MODULE_ACTION_PREVIEW_IPC_FAILED": "Local Guard response could not be verified.",

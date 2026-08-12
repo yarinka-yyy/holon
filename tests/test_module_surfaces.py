@@ -219,15 +219,59 @@ def test_hermes_perpdex_direct_review_and_hlp_confirmation(
     monkeypatch.setattr(plugin, "_runtime", opened_runtime)
     opened_context = _Context()
     plugin.register(opened_context)
-    opened = json.loads({item["name"]: item for item in opened_context.tools}["holon_perpdex_prepare"]["handler"]({
-        "action_type": "OPEN_POSITION", "leverage": 2, "market": "ETH",
-        "notional_usdc": "6", "side": "LONG",
+    open_tool = {
+        item["name"]: item for item in opened_context.tools
+    }["holon_perpdex_prepare"]
+    opened = json.loads(open_tool["handler"]({
+        "action_type": "OPEN_POSITION", "amount_usdc": "5.5",
+        "leverage": 2, "margin_mode": "ISOLATED", "market": "ETH",
+        "notional_usdc": "11", "side": "LONG",
     }, **dispatch_context))
     assert opened["status"] == "AWAITING_LOCAL_CONFIRMATION"
     assert "preview_digest" not in opened
     assert connector.previews[-1][2:] == ("OPEN_POSITION", {
-        "leverage": 2, "market": "ETH", "notional_usdc": "6", "side": "LONG",
+        "leverage": 2, "margin_mode": "ISOLATED", "market": "ETH",
+        "notional_usdc": "11", "side": "LONG",
     })
+    properties = open_tool["schema"]["parameters"]["properties"]
+    assert "user margin" in properties["amount_usdc"]["description"]
+    assert "including leverage" in properties["notional_usdc"]["description"]
+
+    margin_only = json.loads(plugin.PluginRuntime(connector).handle_module_action_prepare(
+        "holon.perpdex", "holon.perpdex.action.guard", {
+            "action_type": "OPEN_POSITION", "amount_usdc": "5.5",
+            "leverage": 2, "market": "ETH", "side": "LONG",
+        },
+    ))
+    assert margin_only["status"] == "AWAITING_LOCAL_CONFIRMATION"
+    assert connector.previews[-1][2:] == ("OPEN_POSITION", {
+        "leverage": 2, "market": "ETH", "notional_usdc": "11", "side": "LONG",
+    })
+
+    preview_count = len(connector.previews)
+    mismatch = json.loads(plugin.PluginRuntime(connector).handle_module_action_prepare(
+        "holon.perpdex", "holon.perpdex.action.guard", {
+            "action_type": "OPEN_POSITION", "amount_usdc": "5.5",
+            "leverage": 2, "market": "ETH", "notional_usdc": "12",
+            "side": "LONG",
+        },
+    ))
+    assert mismatch["code"] == "OPEN_MARGIN_NOTIONAL_MISMATCH"
+    assert len(connector.previews) == preview_count
+
+    close_all = plugin.PluginRuntime._module_action_params({
+        "action_type": "CLOSE_POSITION", "amount_mode": "ALL", "market": "ETH",
+    })
+    assert close_all == (
+        "CLOSE_POSITION",
+        {"amount_mode": "FULL", "market": "ETH", "percent": None},
+    )
+    withdraw_full = plugin.PluginRuntime._module_action_params({
+        "action_type": "HLP_WITHDRAW", "amount_mode": "FULL",
+    })
+    assert withdraw_full == (
+        "HLP_WITHDRAW", {"amount_mode": "ALL", "amount_usdc": None},
+    )
 
     class UnavailableConnector:
         @staticmethod
@@ -241,7 +285,7 @@ def test_hermes_perpdex_direct_review_and_hlp_confirmation(
         plugin.PluginRuntime(UnavailableConnector()).handle_module_action_prepare(
             "holon.perpdex", "holon.perpdex.action.guard", {
                 "action_type": "OPEN_POSITION", "leverage": 2, "market": "ETH",
-                "notional_usdc": "6", "side": "LONG",
+                "notional_usdc": "11", "side": "LONG",
             },
         ),
     )
@@ -253,7 +297,7 @@ def test_hermes_perpdex_direct_review_and_hlp_confirmation(
     invalid_open = json.loads(invalid_runtime.handle_module_action_prepare(
         "holon.perpdex", "holon.perpdex.action.guard", {
         "action_type": "OPEN_POSITION", "leverage": 2, "margin_mode": "UNIFIED",
-        "market": "ETH", "notional_usdc": "6", "side": "LONG",
+        "market": "ETH", "notional_usdc": "11", "side": "LONG",
     }))
     assert invalid_open["code"] == "MODULE_ACTION_PREVIEW_INVALID"
 
