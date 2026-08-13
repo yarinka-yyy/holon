@@ -63,7 +63,12 @@ def hermes_supported(version: str) -> bool:
     if not match:
         return False
     parts = tuple(map(int, match.groups()))
-    return version == ".".join(map(str, parts)) and (0, 18, 2) <= parts < (0, 19, 0)
+    if version != ".".join(map(str, parts)):
+        return False
+    return (
+        (0, 18, 2) <= parts < (0, 19, 0)
+        or (0, 20, 0) <= parts < (0, 21, 0)
+    )
 
 
 def verify_installed(

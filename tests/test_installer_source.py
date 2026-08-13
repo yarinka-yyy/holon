@@ -55,7 +55,8 @@ def test_installer_requires_safe_hermes_and_uses_transactional_backend() -> None
     assert "hermes_agent-*.dist-info" in source
     assert "Version: " in source
     assert "function IsCompatibleHermesVersion" in source
-    assert "PatchVersion >= 2" in source
+    assert "IsHermesPatchVersion(Version, '0.18.', 2)" in source
+    assert "IsHermesPatchVersion(Version, '0.20.', 0)" in source
     assert "SELECT ProcessId, ExecutablePath FROM Win32_Process" in source
     assert "IsPathInsideHermes(ProcessPath, HermesHome)" in source
     assert "ProcessItem.Terminate(0)" in source

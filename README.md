@@ -75,7 +75,7 @@ and explicit confirmation. Holon does not retry a financial action automatically
 
 ## Current scope
 
-The alpha supports Windows 11 x64 and Hermes `>=0.18.2,<0.19.0`. Wallet public
+The alpha supports Windows 11 x64 and Hermes `>=0.18.2,<0.19.0 || >=0.20.0,<0.21.0`. Wallet public
 reads span the six listed EVM networks, while transfers remain limited to approved
 Ethereum and Base routes. Lending is limited to Base native USDC and the three
 pinned profiles. PerpDEX is limited to the stated Hyperliquid funding, BTC/ETH/SOL

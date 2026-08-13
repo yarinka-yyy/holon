@@ -31,7 +31,7 @@ def test_manifest_is_canonical_and_records_required_versions(tmp_path: Path) -> 
     assert manifest.core_api_version == "1"
     assert manifest.module_ids == ()
     assert manifest.skill_ids == ("holon", "holon-earn", "holon-lending")
-    assert manifest.hermes_compatibility == ">=0.18.2,<0.19.0"
+    assert manifest.hermes_compatibility == ">=0.18.2,<0.19.0 || >=0.20.0,<0.21.0"
     skill_files = [item for item in manifest.files if item.component == "skills"]
     assert {item.path for item in skill_files} == {
         "payload/skills/crypto/holon/SKILL.md",
@@ -118,7 +118,12 @@ def test_package_rejects_windows_reparse_directory(tmp_path: Path) -> None:
 def test_hermes_compatibility_range_is_exact() -> None:
     assert hermes_supported("0.18.2")
     assert hermes_supported("0.18.99")
+    assert hermes_supported("0.20.0")
+    assert hermes_supported("0.20.99")
     assert not hermes_supported("0.18.1")
     assert not hermes_supported("0.19.0")
+    assert not hermes_supported("0.19.99")
+    assert not hermes_supported("0.21.0")
     assert not hermes_supported("00.18.2")
+    assert not hermes_supported("0.20.0.1")
     assert not hermes_supported("unknown")

@@ -66,6 +66,15 @@ function Test-HolHermesRunning([string]$HermesRoot) {
     return $false
 }
 
+function Test-HolHermesVersion([string]$Version) {
+    if ($Version -notmatch "^0\.(18|20)\.(\d+)$") { return $false }
+    try {
+        $minor = [int]$Matches[1]
+        $patch = [int]$Matches[2]
+    } catch { return $false }
+    return (($minor -eq 18 -and $patch -ge 2) -or $minor -eq 20)
+}
+
 $candidates = [Collections.Generic.List[object]]::new()
 Add-HolCandidate $candidates $HermesHomeOverride $HermesCommandOverride
 Add-HolCandidate $candidates $env:HERMES_HOME ""
@@ -94,9 +103,9 @@ foreach ($candidate in $candidates) {
     } catch { continue }
     finally { $env:HERMES_HOME = $previousHermesRoot }
     $versionText = $versionOutput -join " "
-    if ($versionText -notmatch "(?:^|[^0-9])(0\.18\.(\d+))(?:[^0-9]|$)" -or
-        [int]$Matches[2] -lt 2) { continue }
+    if ($versionText -notmatch "(?:^|[^0-9])(0\.(?:18|20)\.\d+)(?![0-9.])") { continue }
     $version = $Matches[1]
+    if (-not (Test-HolHermesVersion $version)) { continue }
     $desktop = Join-Path $hermesRoot "hermes-agent\apps\desktop\release\win-unpacked\Hermes.exe"
     if (-not (Test-Path -LiteralPath $desktop -PathType Leaf)) { $desktop = "" }
     if ($RequireClosed -and (Test-HolHermesRunning $hermesRoot)) {

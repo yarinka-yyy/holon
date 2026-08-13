@@ -83,7 +83,7 @@ function Read-HolManifest([string]$Root) {
         "skill_ids", "files"
     ))) { throw [System.ArgumentException]::new("Invalid manifest fields") }
     if ($manifest.manifest_version -cne "3" -or $manifest.package_version -cne "0.2.0a0" -or
-        $manifest.hermes_compatibility -cne ">=0.18.2,<0.19.0") {
+        $manifest.hermes_compatibility -cne ">=0.18.2,<0.19.0 || >=0.20.0,<0.21.0") {
         throw [System.ArgumentException]::new("Incompatible package") }
     if ($null -eq $manifest.component_versions -or -not (Test-HolFields `
         $manifest.component_versions @(

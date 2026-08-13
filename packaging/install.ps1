@@ -97,7 +97,12 @@ function Restore-HolPrevious([string]$Current, [string]$Backup, [bool]$Swapped) 
     } catch { return }
 }
 function Test-HolHermesVersion([string]$Version) {
-    return $Version -cmatch "^0\.18\.(\d+)$" -and [int]$Matches[1] -ge 2
+    if ($Version -notmatch "^0\.(18|20)\.(\d+)$") { return $false }
+    try {
+        $minor = [int]$Matches[1]
+        $patch = [int]$Matches[2]
+    } catch { return $false }
+    return (($minor -eq 18 -and $patch -ge 2) -or $minor -eq 20)
 }
 function Test-HolHermesMetadataCompatibility([string]$HermesHomePath) {
     try {
@@ -131,10 +136,10 @@ function Test-HolHermesCompatibility(
         $versionOutput = & $HermesCommandPath --version 2>&1
         $exitCode = $LASTEXITCODE
         $versionText = $versionOutput -join " "
-        if ($exitCode -ne 0 -or $versionText -notmatch "(?:^|[^0-9])0\.18\.(\d+)(?:[^0-9]|$)") {
+        if ($exitCode -ne 0 -or $versionText -notmatch "(?:^|[^0-9])(0\.(?:18|20)\.\d+)(?![0-9.])") {
             return $false
         }
-        return Test-HolHermesVersion ("0.18." + $Matches[1])
+        return Test-HolHermesVersion $Matches[1]
     } catch { return $false }
 }
 function Get-HolConfigStamp([string]$HermesHomePath) {

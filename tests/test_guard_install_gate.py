@@ -48,7 +48,11 @@ def test_guard_entry_integrity_gate_recovers_after_clean_reinstall(tmp_path: Pat
     assert _integrity_failure(_args(manifest, app, plugin)) == "GUARD_INTEGRITY_FAILED"
     guard.write_bytes((package / "payload" / "app" / "HolonGuard.exe").read_bytes())
     assert _integrity_failure(_args(manifest, app, plugin)) is None
+    assert _integrity_failure(_args(manifest, app, plugin, "0.20.0")) is None
     assert _integrity_failure(_args(manifest, app, plugin, "0.19.0")) == (
+        "HERMES_VERSION_UNSUPPORTED"
+    )
+    assert _integrity_failure(_args(manifest, app, plugin, "0.21.0")) == (
         "HERMES_VERSION_UNSUPPORTED"
     )
     assert _integrity_failure(_args(manifest, app, plugin, "")) == "HERMES_VERSION_UNSUPPORTED"

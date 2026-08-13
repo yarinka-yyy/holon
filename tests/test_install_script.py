@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 import subprocess
 
+import pytest
+
 from package_support import build_fixture
 from powershell_support import POWERSHELL, fake_hermes, invoke, make_junction
 from holon_installation import verify_installed
@@ -11,7 +13,7 @@ from holon_installation import verify_installed
 
 def _install(
     package: Path, local: Path, hermes: Path, command: Path | None = None,
-    *, enable: bool = False,
+    *, enable: bool = False, verified_version: str | None = None,
 ):
     arguments: list[object] = [
         package / "install.ps1", "-PackageRoot", package,
@@ -20,17 +22,21 @@ def _install(
     ]
     if command is not None:
         arguments.extend(["-HermesCommand", command])
+    if verified_version is not None:
+        arguments.extend(["-HermesVersion", verified_version])
     if enable:
         arguments.append("-EnableHermesPlugin")
     return invoke(*arguments)
 
 
-def _compatible_hermes_home(home: Path) -> None:
+def _compatible_hermes_home(home: Path, version: str = "0.18.2") -> None:
     metadata = home / "hermes-agent" / "venv" / "Lib" / "site-packages" / (
-        "hermes_agent-0.18.2.dist-info"
+        f"hermes_agent-{version}.dist-info"
     )
     metadata.mkdir(parents=True)
-    (metadata / "METADATA").write_text("Name: hermes-agent\nVersion: 0.18.2\n", encoding="utf-8")
+    (metadata / "METADATA").write_text(
+        f"Name: hermes-agent\nVersion: {version}\n", encoding="utf-8",
+    )
 
 
 def test_confirmation_is_required_and_result_is_safe(tmp_path: Path) -> None:
@@ -90,14 +96,34 @@ def test_clean_install_bootstraps_data_and_reinstall_repairs_program(tmp_path: P
         assert (data / name).read_bytes() == value
 
 
-def test_enable_uses_installed_hermes_metadata_for_compatibility(tmp_path: Path) -> None:
+@pytest.mark.parametrize("version", ["0.18.2", "0.18.99", "0.20.0", "0.20.99"])
+def test_enable_accepts_each_supported_hermes_version(tmp_path: Path, version: str) -> None:
     package, _ = build_fixture(tmp_path)
     local, hermes = tmp_path / "local", tmp_path / "hermes"
-    _compatible_hermes_home(hermes)
+    _compatible_hermes_home(hermes, version)
 
-    code, result = _install(package, local, hermes, fake_hermes(tmp_path / "hermes.ps1"), enable=True)
+    code, result = _install(
+        package, local, hermes,
+        fake_hermes(tmp_path / "hermes.ps1", version=version), enable=True,
+    )
 
     assert code == 0 and result["code"] == "INSTALL_OK"
+
+
+@pytest.mark.parametrize("version", ["0.18.1", "0.19.0", "0.19.99", "0.21.0", "0.20.0.1"])
+def test_enable_rejects_each_unsupported_verified_version(tmp_path: Path, version: str) -> None:
+    package, _ = build_fixture(tmp_path)
+    local, hermes = tmp_path / "local", tmp_path / "hermes"
+    _compatible_hermes_home(hermes, "0.20.0")
+
+    code, result = _install(
+        package, local, hermes,
+        fake_hermes(tmp_path / "hermes.ps1", version="0.20.0"),
+        enable=True, verified_version=version,
+    )
+
+    assert code == 2 and result["code"] == "INSTALL_VALIDATION_FAILED"
+    assert not (hermes / "plugins" / "holon").exists()
 
 
 def test_result_file_is_utf8_json_and_stdout_stays_empty(tmp_path: Path) -> None:

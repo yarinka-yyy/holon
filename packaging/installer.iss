@@ -90,7 +90,7 @@ english.AdditionalShortcuts=Additional shortcuts:
 english.HermesPageDescription=Holon connects to an existing compatible Hermes installation.
 english.HermesDetecting=Checking Hermes...
 english.HermesReady=Hermes %1 was found.%n%nLocation: %2%n%nInstall will enable the Holon plugin without allowing tool overrides.
-english.HermesUnavailable=Compatible Hermes was not found. Install Hermes 0.18.2 through 0.18.x, then run Holon Setup again.
+english.HermesUnavailable=Compatible Hermes was not found. Install Hermes 0.18.2 through 0.18.x or 0.20.x, then run Holon Setup again.
 english.HermesRunning=Hermes is still running. Allow Setup to close it, or close its processes manually and try again.
 english.HermesClosePrompt=Hermes is running and must be closed before Holon is installed.%n%nAllow Setup to close only processes running from the selected Hermes installation?
 english.HermesCloseFailed=Setup could not close Hermes. Close its remaining processes in Task Manager and click Install again.
@@ -109,7 +109,7 @@ russian.AdditionalShortcuts=Дополнительные ярлыки:
 russian.HermesPageDescription=Holon подключается к уже установленной совместимой версии Hermes.
 russian.HermesDetecting=Проверяем Hermes...
 russian.HermesReady=Найден Hermes %1.%n%nПуть: %2%n%nНажатие «Установить» включит плагин Holon без разрешения подменять tools.
-russian.HermesUnavailable=Совместимый Hermes не найден. Установите Hermes версии 0.18.2–0.18.x и снова запустите установщик Holon.
+russian.HermesUnavailable=Совместимый Hermes не найден. Установите Hermes версии 0.18.2–0.18.x или 0.20.x и снова запустите установщик Holon.
 russian.HermesRunning=Hermes всё ещё запущен. Разрешите установщику закрыть его либо завершите процессы вручную и повторите попытку.
 russian.HermesClosePrompt=Hermes запущен, и перед установкой Holon его необходимо закрыть.%n%nРазрешить установщику закрыть только процессы из выбранной установки Hermes?
 russian.HermesCloseFailed=Установщику не удалось закрыть Hermes. Завершите оставшиеся процессы в диспетчере задач и снова нажмите «Установить».
@@ -163,15 +163,38 @@ begin
     end;
 end;
 
-function IsCompatibleHermesVersion(const Version: String): Boolean;
+function IsDecimalVersionPatch(const Value: String): Boolean;
 var
+  Index: Integer;
+begin
+  Result := False;
+  if Length(Value) = 0 then
+    Exit;
+  for Index := 1 to Length(Value) do
+    if (Value[Index] < '0') or (Value[Index] > '9') then
+      Exit;
+  Result := True;
+end;
+
+function IsHermesPatchVersion(const Version, Prefix: String; MinimumPatch: Integer): Boolean;
+var
+  PatchText: String;
   PatchVersion: Integer;
 begin
   Result := False;
-  if Pos('0.18.', Version) <> 1 then
+  if Pos(Prefix, Version) <> 1 then
     Exit;
-  PatchVersion := StrToIntDef(Copy(Version, Length('0.18.') + 1, MaxInt), -1);
-  Result := PatchVersion >= 2;
+  PatchText := Copy(Version, Length(Prefix) + 1, MaxInt);
+  if not IsDecimalVersionPatch(PatchText) then
+    Exit;
+  PatchVersion := StrToIntDef(PatchText, -1);
+  Result := PatchVersion >= MinimumPatch;
+end;
+
+function IsCompatibleHermesVersion(const Version: String): Boolean;
+begin
+  Result := IsHermesPatchVersion(Version, '0.18.', 2) or
+    IsHermesPatchVersion(Version, '0.20.', 0);
 end;
 
 function ReadHermesVersion(const HermesHome: String; var Version: String): Boolean;

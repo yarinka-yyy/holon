@@ -61,17 +61,28 @@ def test_detector_writes_public_result_file_without_stdout(tmp_path: Path) -> No
     assert output.read_bytes().startswith(b"code=HERMES_READY\r\n")
 
 
+def test_detector_accepts_the_checked_0_20_runtime(tmp_path: Path) -> None:
+    home = tmp_path / "hermes-0-20"
+    home.mkdir()
+    command = fake_hermes(tmp_path / "hermes-0-20.ps1", version="0.20.0")
+
+    code, result = _detect(tmp_path / "local", home, command)
+
+    assert code == 0 and result["code"] == "HERMES_READY"
+    assert result["version"] == "0.20.0"
+
+
 def test_refuses_missing_or_incompatible_hermes(tmp_path: Path) -> None:
     missing_code, missing = _detect(
         tmp_path / "local", tmp_path / "missing", tmp_path / "missing.exe",
     )
     assert missing_code == 2 and missing["code"] == "HERMES_NOT_FOUND"
-    home = tmp_path / "old-hermes"
-    home.mkdir()
-    command = tmp_path / "old-hermes.ps1"
-    command.write_text("Write-Output 'Hermes Agent v0.17.9'\nexit 0\n", encoding="utf-8")
-    old_code, old = _detect(tmp_path / "local", home, command)
-    assert old_code == 2 and old["code"] == "HERMES_INCOMPATIBLE"
+    for version in ("0.17.9", "0.18.1", "0.19.0", "0.21.0", "0.20.0.1"):
+        home = tmp_path / ("hermes-" + version.replace(".", "-"))
+        home.mkdir()
+        command = fake_hermes(tmp_path / ("hermes-" + version.replace(".", "-") + ".ps1"), version=version)
+        code, result = _detect(tmp_path / "local", home, command)
+        assert code == 2 and result["code"] == "HERMES_INCOMPATIBLE"
 
 
 def test_require_closed_detects_process_under_selected_home(tmp_path: Path) -> None:

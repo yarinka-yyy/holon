@@ -8,7 +8,7 @@ from typing import Any, Mapping
 
 MANIFEST_VERSION = "3"
 PACKAGE_VERSION = "0.2.0a0"
-HERMES_COMPATIBILITY = ">=0.18.2,<0.19.0"
+HERMES_COMPATIBILITY = ">=0.18.2,<0.19.0 || >=0.20.0,<0.21.0"
 VERSION_FIELDS = frozenset(
     {"plugin", "guard", "wallet", "contracts", "policy", "skills", "modules"}
 )

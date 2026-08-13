@@ -24,7 +24,8 @@ authentication or replace code signing.
 The approved Setup requires:
 
 - Windows 11 x64;
-- an existing Hermes Desktop installation in the range `>=0.18.2,<0.19.0`;
+- an existing Hermes Desktop installation in the range
+  `>=0.18.2,<0.19.0 || >=0.20.0,<0.21.0`;
 - Hermes closed before installation.
 
 Run the Setup as the current user. It does not require administrator privileges,
